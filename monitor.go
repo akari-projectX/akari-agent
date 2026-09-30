@@ -49,11 +49,10 @@ func trafficLoop(ctx context.Context, cm *CoreManager, send func(*pb.AgentUp) er
 			return
 		case <-ticker.C:
 		}
-		users := cm.TrafficSnapshot()
-		if len(users) == 0 {
+		report := cm.TrafficSnapshot()
+		if report == nil || len(report.Users) == 0 {
 			continue
 		}
-		report := &pb.TrafficReport{Users: users}
 		if err := send(&pb.AgentUp{Msg: &pb.AgentUp_Traffic{Traffic: report}}); err != nil {
 			return
 		}
