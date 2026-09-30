@@ -49,11 +49,13 @@ message TrafficReport {
   repeated UserTraffic users = 1;
   uint64 monotonic_ms = 2;
   // Session (xray instance lifetime) these counters belong to, read
-  // atomically with them. The panel keys accounting on it; empty = older
-  // agent, the panel then falls back to the stream's Hello session.
+  // atomically with them. The panel keys accounting on it and DROPS reports
+  // without it (agents must be upgraded before the panel).
   string session_id = 3;
 }
 
+// Result of applying a Snapshot/Delta. Versions are the ATTEMPTED ones; on
+// ok=false the agent keeps (and reports in Hello) its previous versions.
 message Ack {
   uint64 config_version = 1;
   uint64 user_version = 2;

@@ -352,8 +352,8 @@ type TrafficReport struct {
 	Users       []*UserTraffic         `protobuf:"bytes,1,rep,name=users,proto3" json:"users,omitempty"`
 	MonotonicMs uint64                 `protobuf:"varint,2,opt,name=monotonic_ms,json=monotonicMs,proto3" json:"monotonic_ms,omitempty"`
 	// Session (xray instance lifetime) these counters belong to, read
-	// atomically with them. The panel keys accounting on it; empty = older
-	// agent, the panel then falls back to the stream's Hello session.
+	// atomically with them. The panel keys accounting on it and DROPS reports
+	// without it (agents must be upgraded before the panel).
 	SessionId     string `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -410,6 +410,8 @@ func (x *TrafficReport) GetSessionId() string {
 	return ""
 }
 
+// Result of applying a Snapshot/Delta. Versions are the ATTEMPTED ones; on
+// ok=false the agent keeps (and reports in Hello) its previous versions.
 type Ack struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ConfigVersion uint64                 `protobuf:"varint,1,opt,name=config_version,json=configVersion,proto3" json:"config_version,omitempty"`

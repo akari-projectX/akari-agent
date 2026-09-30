@@ -185,7 +185,13 @@ func (a *Agent) handleDown(send func(*pb.AgentUp) error, in *pb.PanelDown) error
 				return serr
 			}
 		}
-		a.setVersions(snap.ConfigVersion, snap.UserVersion)
+		// Only a clean apply moves the held versions. On failure the agent
+		// keeps claiming its previous versions (Hello), and the Ack reports
+		// the ATTEMPTED versions with ok=false, so the panel can never
+		// mistake a failed apply for convergence.
+		if err == nil {
+			a.setVersions(snap.ConfigVersion, snap.UserVersion)
+		}
 		// Counters restarted under a new session: announce it.
 		if serr := send(a.hello()); serr != nil {
 			return serr
@@ -199,7 +205,9 @@ func (a *Agent) handleDown(send func(*pb.AgentUp) error, in *pb.PanelDown) error
 			"ops", len(delta.Ops))
 		err := a.core.ApplyDelta(delta.Ops)
 		curConfig, _ := a.versions()
-		a.setVersions(curConfig, delta.UserVersion)
+		if err == nil {
+			a.setVersions(curConfig, delta.UserVersion)
+		}
 		return sendAck(send, curConfig, delta.UserVersion, err)
 
 	case *pb.PanelDown_Noop:
