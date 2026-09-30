@@ -1,0 +1,112 @@
+// Akari panel <-> agent control-plane contract.
+//
+// Transport: the agent dials OUT to the panel over mutual TLS. The agent's
+// client certificate is issued by the panel CA and identifies the node;
+// no enrollment or management port exists on the agent side.
+syntax = "proto3";
+
+package akari.v1;
+
+option go_package = "akari/agent/pb";
+
+service AgentChannel {
+  // Persistent bidirectional stream. The agent keeps it open for its whole
+  // lifetime; the panel pushes config / user deltas on the same stream.
+  rpc OpenChannel(stream AgentUp) returns (stream PanelDown);
+}
+
+message AgentInfo {
+  string agent_version = 1;
+  string core_version = 2; // embedded xray-core version
+  string os = 3;
+  string arch = 4;
+}
+
+// First message on every stream, and re-sent whenever the agent rebuilds
+// its xray instance (traffic counters reset -> new session_id).
+message Hello {
+  string session_id = 1;     // fresh whenever traffic counters reset
+  uint64 config_version = 2; // inbound config the agent currently holds
+  uint64 user_version = 3;   // user set the agent currently holds
+  AgentInfo info = 4;
+}
+
+message Heartbeat {
+  double cpu_percent = 1;
+  uint64 mem_used_bytes = 2;
+  uint64 mem_total_bytes = 3;
+  uint64 connections = 4;
+  uint64 uptime_seconds = 5;
+}
+
+message UserTraffic {
+  string user_id = 1;   // panel user id; also the xray user "email" field
+  uint64 up_bytes = 2;  // cumulative within the current session
+  uint64 down_bytes = 3;
+}
+
+message TrafficReport {
+  repeated UserTraffic users = 1;
+  uint64 monotonic_ms = 2;
+}
+
+message Ack {
+  uint64 config_version = 1;
+  uint64 user_version = 2;
+  bool ok = 3;
+  string error = 4;
+}
+
+message AgentUp {
+  oneof msg {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    TrafficReport traffic = 3;
+    Ack ack = 4;
+  }
+}
+
+// One protocol account for one inbound. account_json follows the xray
+// per-protocol account schema, e.g. {"id": "...", "flow": "xtls-rprx-vision"}
+// for VLESS or {"password": "..."} for Trojan. protocol names the account
+// type ("vless", "vmess", "trojan", "shadowsocks").
+message InboundUser {
+  string inbound_tag = 1;
+  string account_json = 2;
+  string protocol = 3;
+}
+
+message UserOp {
+  enum Op {
+    ADD = 0;
+    REMOVE = 1;
+  }
+  Op op = 1;
+  string user_id = 2;
+  repeated InboundUser inbound_users = 3; // ignored for REMOVE
+}
+
+// Full desired state, sent when the agent's held versions mismatch the
+// panel's. Contains the complete user set so the agent can converge from
+// any state without a diff protocol.
+message ConfigSnapshot {
+  uint64 config_version = 1;
+  string inbounds_json = 2; // xray "inbounds" array JSON
+  uint64 user_version = 3;
+  repeated UserOp users = 4; // complete desired user set
+}
+
+message UserDelta {
+  uint64 user_version = 1; // version after applying all ops
+  repeated UserOp ops = 2;
+}
+
+message Noop {}
+
+message PanelDown {
+  oneof msg {
+    ConfigSnapshot snapshot = 1;
+    UserDelta delta = 2;
+    Noop noop = 3;
+  }
+}
