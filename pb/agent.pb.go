@@ -348,9 +348,13 @@ func (x *UserTraffic) GetDownBytes() uint64 {
 }
 
 type TrafficReport struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Users         []*UserTraffic         `protobuf:"bytes,1,rep,name=users,proto3" json:"users,omitempty"`
-	MonotonicMs   uint64                 `protobuf:"varint,2,opt,name=monotonic_ms,json=monotonicMs,proto3" json:"monotonic_ms,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Users       []*UserTraffic         `protobuf:"bytes,1,rep,name=users,proto3" json:"users,omitempty"`
+	MonotonicMs uint64                 `protobuf:"varint,2,opt,name=monotonic_ms,json=monotonicMs,proto3" json:"monotonic_ms,omitempty"`
+	// Session (xray instance lifetime) these counters belong to, read
+	// atomically with them. The panel keys accounting on it; empty = older
+	// agent, the panel then falls back to the stream's Hello session.
+	SessionId     string `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -397,6 +401,13 @@ func (x *TrafficReport) GetMonotonicMs() uint64 {
 		return x.MonotonicMs
 	}
 	return 0
+}
+
+func (x *TrafficReport) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
 }
 
 type Ack struct {
@@ -989,10 +1000,12 @@ const file_agent_proto_rawDesc = "" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x19\n" +
 	"\bup_bytes\x18\x02 \x01(\x04R\aupBytes\x12\x1d\n" +
 	"\n" +
-	"down_bytes\x18\x03 \x01(\x04R\tdownBytes\"_\n" +
+	"down_bytes\x18\x03 \x01(\x04R\tdownBytes\"~\n" +
 	"\rTrafficReport\x12+\n" +
 	"\x05users\x18\x01 \x03(\v2\x15.akari.v1.UserTrafficR\x05users\x12!\n" +
-	"\fmonotonic_ms\x18\x02 \x01(\x04R\vmonotonicMs\"u\n" +
+	"\fmonotonic_ms\x18\x02 \x01(\x04R\vmonotonicMs\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\"u\n" +
 	"\x03Ack\x12%\n" +
 	"\x0econfig_version\x18\x01 \x01(\x04R\rconfigVersion\x12!\n" +
 	"\fuser_version\x18\x02 \x01(\x04R\vuserVersion\x12\x0e\n" +

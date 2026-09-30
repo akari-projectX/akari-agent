@@ -20,6 +20,7 @@ Go 1.27 单包（`package main`，模块名 `akari/agent`），内嵌 xray-core 
 ```bash
 make build        # → ./agent（gitignored）
 make vet fmt-check
+make test         # go test -race ./...
 make sync-proto   # 从 ../akari-panel 拷贝契约并 buf generate
 make check-proto  # 契约漂移校验
 ```
@@ -27,6 +28,6 @@ make check-proto  # 契约漂移校验
 ## 须知
 
 - xray 动态用户链路：`inbound.Manager.GetHandler(tag)` → 断言 `GetInbound()` → 协议 inbound 的 `AddUser/RemoveUser`。新协议需要 blank-import 对应 inbound 包并在 `buildUser` 加分支。
-- 每个 Snapshot 都会 `Rebuild`（关停并重建 xray 实例 → **断开节点上所有连接**，未上报的 ≤10s 流量丢失）。面板目前只发 Snapshot，所以每次用户变更都会触发重建。见 REVIEW。
-- 重建后会 `resetSession()`，但**不会重发 Hello**，面板仍按旧 session_id 记账。
+- 每个 Snapshot 都会 `Rebuild`（关停并重建 xray 实例 → **断开节点上所有连接**；旧实例最终计数会在重建前上报）。面板目前只发 Snapshot，所以每次用户变更都会触发重建。见 REVIEW。
+- session id 归 `CoreManager` 所有，只在 `Rebuild` 内持锁更换；`TrafficSnapshot` 在同一把锁下返回 (session, 计数)，每个 `TrafficReport` 都带 `session_id`（面板按它记账）。`Rebuild` 返回旧实例的最终计数（旧 session），agent 先上报它，再重发 Hello（新 session + 新版本），再 Ack。`go test -race ./...` 覆盖原子性。
 - `tlsConfig()` 在密钥无效时 panic；bootstrap 文件含私钥，权限应为 0600。

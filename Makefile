@@ -1,4 +1,4 @@
-.PHONY: build proto sync-proto check-proto vet fmt-check
+.PHONY: build proto sync-proto check-proto vet fmt-check test
 
 # Canonical contract lives in akari-panel/proto/agent.proto. This repo vendors
 # a copy: `make sync-proto` pulls the sibling checkout's version and
@@ -22,3 +22,6 @@ vet:
 
 fmt-check:
 	test -z "$$(gofmt -l .)"
+
+test:
+	go test -race ./...

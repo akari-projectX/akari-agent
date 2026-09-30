@@ -70,34 +70,60 @@ type CoreManager struct {
 	mu          sync.Mutex
 	instance    *core.Instance
 	inboundTags []string
-	emailsMu    sync.RWMutex
-	emails      map[string]struct{}
+	// sessionID names the lifetime of the current traffic counters. It is
+	// only changed under mu, together with the instance, so a
+	// TrafficSnapshot can never pair one instance's counters with another
+	// instance's session (the panel bills by (node, user, session)).
+	sessionID string
+	emailsMu  sync.RWMutex
+	emails    map[string]struct{}
+	// onStart is a test seam, called under mu right after a new instance
+	// is installed. Always nil in production.
+	onStart func(*core.Instance)
 }
 
 func NewCoreManager() *CoreManager {
-	return &CoreManager{emails: make(map[string]struct{})}
+	return &CoreManager{emails: make(map[string]struct{}), sessionID: newSessionID()}
+}
+
+// SessionID returns the session the current counters belong to.
+func (m *CoreManager) SessionID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sessionID
 }
 
 // Rebuild stops the current instance (if any) and starts a new one from the
-// panel's desired state. Traffic counters reset here; the caller assigns a
-// fresh session id so the panel can reset its baselines.
-func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) error {
+// panel's desired state. Traffic counters reset here, so a fresh session id
+// is minted under the same lock. The old instance's final counters (tagged
+// with the old session) are returned so the caller can report them instead
+// of losing up to one reporting interval of traffic; nil if there were none.
+func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) (*pb.TrafficReport, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	var final *pb.TrafficReport
 	if m.instance != nil {
+		if counters := m.countersLocked(); len(counters) > 0 {
+			final = &pb.TrafficReport{Users: counters, SessionId: m.sessionID}
+		}
 		_ = m.instance.Close()
 		m.instance = nil
 		m.inboundTags = nil
 	}
+	// Counters restart with whatever instance comes next (or none).
+	m.sessionID = newSessionID()
 
 	inst, tags, err := newInstance(inboundsJSON)
 	if err != nil {
-		return err
+		return final, err
 	}
 
 	m.instance = inst
 	m.inboundTags = tags
+	if m.onStart != nil {
+		m.onStart(inst)
+	}
 	m.emailsMu.Lock()
 	m.emails = make(map[string]struct{})
 	m.emailsMu.Unlock()
@@ -108,7 +134,7 @@ func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) error {
 			firstErr = err
 		}
 	}
-	return firstErr
+	return final, firstErr
 }
 
 // ApplyDelta applies incremental user ops to the running instance.
@@ -230,17 +256,21 @@ func buildUser(protocolName, accountJSON, userID string) (*protocol.User, error)
 	}, nil
 }
 
-// TrafficSnapshot returns cumulative per-user uplink/downlink counters from
-// the running instance. Counters accumulate for the lifetime of the
-// instance; the panel diffs them and keys on session id.
-func (m *CoreManager) TrafficSnapshot() []*pb.UserTraffic {
+// TrafficSnapshot returns the current session id together with the
+// cumulative per-user counters of the instance that session names. Both are
+// read under mu, so a concurrent Rebuild cannot split them.
+func (m *CoreManager) TrafficSnapshot() *pb.TrafficReport {
 	m.mu.Lock()
-	inst := m.instance
-	m.mu.Unlock()
-	if inst == nil {
+	defer m.mu.Unlock()
+	if m.instance == nil {
 		return nil
 	}
-	sm, ok := inst.GetFeature(stats.ManagerType()).(stats.Manager)
+	return &pb.TrafficReport{Users: m.countersLocked(), SessionId: m.sessionID}
+}
+
+// countersLocked reads per-user counters of m.instance. Caller holds mu.
+func (m *CoreManager) countersLocked() []*pb.UserTraffic {
+	sm, ok := m.instance.GetFeature(stats.ManagerType()).(stats.Manager)
 	if !ok {
 		return nil
 	}

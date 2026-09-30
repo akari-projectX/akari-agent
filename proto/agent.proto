@@ -48,6 +48,10 @@ message UserTraffic {
 message TrafficReport {
   repeated UserTraffic users = 1;
   uint64 monotonic_ms = 2;
+  // Session (xray instance lifetime) these counters belong to, read
+  // atomically with them. The panel keys accounting on it; empty = older
+  // agent, the panel then falls back to the stream's Hello session.
+  string session_id = 3;
 }
 
 message Ack {

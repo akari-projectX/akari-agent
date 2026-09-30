@@ -25,7 +25,6 @@ type Agent struct {
 	agentVersion string
 
 	mu         sync.Mutex
-	sessionID  string
 	heldConfig uint64
 	heldUser   uint64
 }
@@ -35,14 +34,7 @@ func NewAgent(cfg *Config, agentVersion string) *Agent {
 		cfg:          cfg,
 		core:         NewCoreManager(),
 		agentVersion: agentVersion,
-		sessionID:    newSessionID(),
 	}
-}
-
-func (a *Agent) currentSession() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.sessionID
 }
 
 func (a *Agent) versions() (config, user uint64) {
@@ -56,12 +48,6 @@ func (a *Agent) setVersions(config, user uint64) {
 	defer a.mu.Unlock()
 	a.heldConfig = config
 	a.heldUser = user
-}
-
-func (a *Agent) resetSession() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.sessionID = newSessionID()
 }
 
 // Run keeps the channel alive for the process lifetime, reconnecting with
@@ -141,19 +127,7 @@ func (a *Agent) session(ctx context.Context) error {
 		}
 	}
 
-	configVersion, userVersion := a.versions()
-	hello := &pb.Hello{
-		SessionId:     a.currentSession(),
-		ConfigVersion: configVersion,
-		UserVersion:   userVersion,
-		Info: &pb.AgentInfo{
-			AgentVersion: a.agentVersion,
-			CoreVersion:  core.Version(),
-			Os:           runtime.GOOS,
-			Arch:         runtime.GOARCH,
-		},
-	}
-	if err := send(&pb.AgentUp{Msg: &pb.AgentUp_Hello{Hello: hello}}); err != nil {
+	if err := send(a.hello()); err != nil {
 		return err
 	}
 
@@ -177,6 +151,24 @@ func (a *Agent) session(ctx context.Context) error {
 	return <-done
 }
 
+// hello describes the agent's current state: the session its traffic
+// counters belong to and the versions it holds. Sent first on every stream
+// and again after every Rebuild (new session).
+func (a *Agent) hello() *pb.AgentUp {
+	configVersion, userVersion := a.versions()
+	return &pb.AgentUp{Msg: &pb.AgentUp_Hello{Hello: &pb.Hello{
+		SessionId:     a.core.SessionID(),
+		ConfigVersion: configVersion,
+		UserVersion:   userVersion,
+		Info: &pb.AgentInfo{
+			AgentVersion: a.agentVersion,
+			CoreVersion:  core.Version(),
+			Os:           runtime.GOOS,
+			Arch:         runtime.GOARCH,
+		},
+	}}}
+}
+
 func (a *Agent) handleDown(send func(*pb.AgentUp) error, in *pb.PanelDown) error {
 	switch msg := in.Msg.(type) {
 	case *pb.PanelDown_Snapshot:
@@ -185,10 +177,19 @@ func (a *Agent) handleDown(send func(*pb.AgentUp) error, in *pb.PanelDown) error
 			"config_version", snap.ConfigVersion,
 			"user_version", snap.UserVersion,
 			"users", len(snap.Users))
-		err := a.core.Rebuild(snap.InboundsJson, snap.Users)
-		// Counters restarted with the new instance: new session id.
-		a.resetSession()
+		final, err := a.core.Rebuild(snap.InboundsJson, snap.Users)
+		// Report the old instance's last counters (old session) so the
+		// traffic since the previous 10s tick is not lost.
+		if final != nil {
+			if serr := send(&pb.AgentUp{Msg: &pb.AgentUp_Traffic{Traffic: final}}); serr != nil {
+				return serr
+			}
+		}
 		a.setVersions(snap.ConfigVersion, snap.UserVersion)
+		// Counters restarted under a new session: announce it.
+		if serr := send(a.hello()); serr != nil {
+			return serr
+		}
 		return sendAck(send, snap.ConfigVersion, snap.UserVersion, err)
 
 	case *pb.PanelDown_Delta:
