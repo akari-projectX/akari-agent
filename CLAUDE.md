@@ -13,7 +13,7 @@ Go 1.27 单包（`package main`，模块名 `akari/agent`），内嵌 xray-core 
 | `core.go` | `CoreManager`：xray 实例构建（`DecodeJSONConfig→Build→core.New`）、动态 AddUser/RemoveUser、按 `user>>>{id}>>>traffic>>>*` 读计数 |
 | `monitor.go` | 心跳 15s（cpu/mem）、流量 10s（累计值） |
 | `proto/agent.proto` | **vendor 副本**，禁止手改，只能 `make sync-proto` |
-| `pb/` | buf 生成物（已提交）；`pb/proto/` 是旧布局遗留的重复副本，可删除 |
+| `pb/` | buf 生成物（已提交，`buf generate proto`） |
 
 ## 命令
 
@@ -31,3 +31,4 @@ make check-proto  # 契约漂移校验
 - 每个 Snapshot 都会 `Rebuild`（关停并重建 xray 实例 → **断开节点上所有连接**；旧实例最终计数会在重建前上报）。面板目前只发 Snapshot，所以每次用户变更都会触发重建。见 REVIEW。
 - session id 归 `CoreManager` 所有，只在 `Rebuild` 内持锁更换；`TrafficSnapshot` 在同一把锁下返回 (session, 计数)，每个 `TrafficReport` 都带 `session_id`（面板按它记账）。`Rebuild` 返回旧实例的最终计数（旧 session），agent 先上报它，再重发 Hello（新 session + 新版本），再 Ack。`go test -race ./...` 覆盖原子性。
 - `tlsConfig()` 在密钥无效时 panic；bootstrap 文件含私钥，权限应为 0600。
+- 应用失败（Snapshot 的 `Rebuild` 或 Delta 返回错误）时**不**更新持有版本：Hello 继续报旧版本，Ack 携带**尝试的**版本且 `ok=false`，面板据此记录 `last_error` 并按退避重试。
