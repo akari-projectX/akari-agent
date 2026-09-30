@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 3 * * *" # nightly: new Go/xray advisories
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: go (fmt, vet, test, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make fmt-check
+      - run: make vet # includes the `canary` build tag
+      - run: make test # canary (no -race) + go test -race ./...
+      - run: make build
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make vulncheck
+
+  proto:
+    # The vendored contract must equal the panel's canonical copy, and pb/
+    # must be what `buf generate` produces from it. The Makefile expects the
+    # sibling layout ../akari-panel, so both repos are checked out under the
+    # workspace directory.
+    name: check-proto (vs akari-panel main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: akari-agent
+      - uses: actions/checkout@v4
+        with:
+          repository: akari-projectX/akari-panel
+          ref: main
+          path: akari-panel
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: akari-agent/go.mod
+          cache: false
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - name: Vendored proto equals the panel's
+        run: make check-proto
+        working-directory: akari-agent
+      - name: pb/ is up to date with the proto
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+          make check-pb
+        working-directory: akari-agent
