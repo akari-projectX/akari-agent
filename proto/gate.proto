@@ -1,0 +1,11 @@
+// Agent-internal (NOT part of the panel contract, not vendored): the xray
+// app config that installs the agent's gate dispatcher (gate.go) in place of
+// xray's DefaultDispatcher. xray instantiates apps from typed proto
+// messages, so the gate needs a message type of its own.
+syntax = "proto3";
+
+package akari.agent.v1;
+
+option go_package = "akari/agent/pb";
+
+message GateDispatcherConfig {}

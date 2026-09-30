@@ -7,6 +7,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/shirou/gopsutil/v4 v4.26.8
 	github.com/xtls/xray-core v1.260327.0
+	golang.org/x/sys v0.47.0
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 )
@@ -44,7 +45,6 @@ require (
 	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect

@@ -23,13 +23,39 @@ message AgentInfo {
 }
 
 // First message on every stream, and re-sent whenever the agent rebuilds
-// its xray instance (traffic counters reset -> new session_id).
+// its xray instance (traffic counters reset -> new session_id) or tears it
+// down (lease expiry).
 message Hello {
   string session_id = 1;     // fresh whenever traffic counters reset
   uint64 config_version = 2; // inbound config the agent currently holds
   uint64 user_version = 3;   // user set the agent currently holds
   AgentInfo info = 4;
+  // Control-protocol revision the agent speaks. Agents that predate the
+  // field send 0. The panel serves agents below its MIN_AGENT_PROTOCOL the
+  // EMPTY desired state (no inbounds, no users) and never trusts their
+  // Hello/Ack for convergence. Revisions:
+  //   1 = UserDelta base/target + REPLACE semantics, Ack.reason/held_*,
+  //       state_hash, LeaseGrant.
+  uint32 protocol_version = 5;
+  // State hash of what the agent actually runs (see "State hash" below),
+  // for config_version + the applied user set. Empty for protocol 0.
+  string state_hash = 6;
 }
+
+// State hash (protocol >= 1), lowercase hex SHA-256 over:
+//   "akari-state-v1\n"
+//   u64 big-endian config_version (the held inbound config version)
+//   then, for every applied (user_id, inbound_tag) record, sorted by
+//   user_id then inbound_tag (bytewise), the four fields
+//   user_id, inbound_tag, protocol, account_json, each encoded as
+//   u32 big-endian byte length followed by the UTF-8 bytes.
+// Records: each (user_id, inbound_tag) pair appears at most once; within one
+// UserOp a later InboundUser for the same inbound_tag replaces an earlier
+// one. Users with no inbound left contribute nothing. account_json is hashed
+// VERBATIM as carried in InboundUser.account_json (never re-serialized): the
+// panel emits it canonically (compact JSON, object keys sorted) and the
+// agent hashes exactly the bytes it applied. Shared test vectors:
+// proto/state_hash_vectors.json (both repos test against it).
 
 message Heartbeat {
   double cpu_percent = 1;
@@ -37,6 +63,9 @@ message Heartbeat {
   uint64 mem_total_bytes = 3;
   uint64 connections = 4;
   uint64 uptime_seconds = 5;
+  // Seconds left on the fail-closed lease (see LeaseGrant); unset while no
+  // lease is armed (no grant received since the agent started).
+  optional uint64 lease_remaining_seconds = 6;
 }
 
 message UserTraffic {
@@ -54,13 +83,32 @@ message TrafficReport {
   string session_id = 3;
 }
 
-// Result of applying a Snapshot/Delta. Versions are the ATTEMPTED ones; on
-// ok=false the agent keeps (and reports in Hello) its previous versions.
+// Result of applying a Snapshot/Delta. Versions are the ATTEMPTED ones
+// (the target); on ok=false the agent keeps (and reports in Hello) its
+// previous versions.
 message Ack {
   uint64 config_version = 1;
   uint64 user_version = 2;
   bool ok = 3;
   string error = 4;
+
+  enum Reason {
+    REASON_UNSPECIFIED = 0;  // protocol 0 agent: use `ok`
+    REASON_OK = 1;
+    // The apply was attempted and failed (possibly partially). The panel
+    // falls back to a Snapshot under its failure backoff.
+    REASON_APPLY_FAILED = 2;
+    // A UserDelta whose base is not what the agent holds (or the agent's
+    // state is dirty after a failed delta). Nothing was changed; the panel
+    // sends a Snapshot at once (not a failure, no backoff).
+    REASON_BASE_MISMATCH = 3;
+  }
+  Reason reason = 5;           // protocol >= 1
+  // What the agent holds AFTER handling the message (protocol >= 1).
+  uint64 held_config_version = 6;
+  uint64 held_user_version = 7;
+  // State hash of the held state (see Hello.state_hash).
+  string state_hash = 8;
 }
 
 message AgentUp {
@@ -82,6 +130,12 @@ message InboundUser {
   string protocol = 3;
 }
 
+// ADD has REPLACE semantics (protocol >= 1): the user ends up on EXACTLY
+// the listed inbounds; tags not listed are removed, a changed account is
+// swapped (and that user's live connections on the changed/removed tags are
+// closed), an identical account is left untouched. REMOVE removes the user
+// from every inbound and closes their live connections. Both are
+// idempotent.
 message UserOp {
   enum Op {
     ADD = 0;
@@ -102,9 +156,32 @@ message ConfigSnapshot {
   repeated UserOp users = 4; // complete desired user set
 }
 
+// Incremental user-set change (protocol >= 1). Applies only on top of
+// base: the agent applies it iff it holds exactly (base_config_version,
+// base_user_version); if it already holds the target (config_version,
+// user_version) it acks ok without changing anything (idempotent resend);
+// otherwise it answers REASON_BASE_MISMATCH and keeps its state. A delta
+// never changes inbounds: config_version == base_config_version. On a
+// (partial) failure the agent keeps the base versions, marks its state
+// dirty (further deltas get BASE_MISMATCH until a Snapshot) and its
+// state_hash reflects what actually applied.
 message UserDelta {
-  uint64 user_version = 1; // version after applying all ops
+  uint64 user_version = 1; // target user version, after applying all ops
   repeated UserOp ops = 2;
+  uint64 base_config_version = 3;
+  uint64 base_user_version = 4;
+  uint64 config_version = 5; // target config version == base_config_version
+}
+
+// Fail-closed lease (protocol >= 1). Sent only after the panel successfully
+// read this node's desired state from its database for this stream
+// (initial sync and every reconcile). The agent measures it on a clock that
+// keeps running during suspend (CLOCK_BOOTTIME), accepts grants only from
+// its current stream, treats 0 as the 24h default and clamps to >= 1h. On
+// expiry it tears xray down, resets its held versions to (0,0) (next Hello
+// forces a Snapshot) and keeps the final counters for the next stream.
+message LeaseGrant {
+  uint64 duration_seconds = 1;
 }
 
 message Noop {}
@@ -114,5 +191,6 @@ message PanelDown {
     ConfigSnapshot snapshot = 1;
     UserDelta delta = 2;
     Noop noop = 3;
+    LeaseGrant lease = 4;
   }
 }
