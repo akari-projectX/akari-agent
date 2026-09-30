@@ -87,6 +87,9 @@ type CoreManager struct {
 	instance *core.Instance
 	gate     *gateDispatcher
 	tags     []string
+	// inboundsJSON is the running instance's Snapshot.inbounds_json
+	// verbatim ("" when none runs); bound into the state hash.
+	inboundsJSON string
 	// sessionID names the lifetime of the current traffic counters. It is
 	// only changed under mu, together with the instance, so a
 	// TrafficSnapshot can never pair one instance's counters with another
@@ -151,6 +154,7 @@ func (m *CoreManager) stopLocked() *pb.TrafficReport {
 		m.gate = nil
 		m.tags = nil
 	}
+	m.inboundsJSON = ""
 	m.sessionID = newSessionID()
 	m.resetUsersLocked()
 	return final
@@ -183,6 +187,7 @@ func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) (*pb.Traf
 	m.instance = inst
 	m.gate = gate
 	m.tags = tags
+	m.inboundsJSON = inboundsJSON
 	if m.onStart != nil {
 		m.onStart(inst)
 	}
@@ -194,6 +199,33 @@ func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) (*pb.Traf
 		}
 	}
 	return final, firstErr
+}
+
+// WouldDropCredential reports whether ops would remove or change a live
+// credential (removal/rotation), as opposed to pure additions.
+func (m *CoreManager) WouldDropCredential(ops []*pb.UserOp) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, op := range ops {
+		cur := m.applied[op.GetUserId()]
+		if len(cur) == 0 {
+			continue
+		}
+		if op.GetOp() != pb.UserOp_ADD {
+			return true
+		}
+		want := map[string]*pb.InboundUser{}
+		for _, iu := range op.GetInboundUsers() {
+			want[iu.GetInboundTag()] = iu
+		}
+		for tag, c := range cur {
+			w, ok := want[tag]
+			if !ok || w.GetProtocol() != c.protocol || w.GetAccountJson() != c.account {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ApplyUserOps applies UserDelta ops to the running instance, continuing
@@ -376,7 +408,7 @@ func (m *CoreManager) StateHash(configVersion uint64) string {
 			recs = append(recs, hashRecord{UserID: uid, Tag: tag, Protocol: c.protocol, Account: c.account})
 		}
 	}
-	return stateHash(configVersion, recs)
+	return stateHash(configVersion, m.inboundsJSON, recs)
 }
 
 // TrafficSnapshot returns the current session id together with the

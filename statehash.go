@@ -15,12 +15,13 @@ type hashRecord struct {
 	Account  string // account_json verbatim
 }
 
-// stateHash implements agent.proto "State hash": lowercase hex SHA-256 over
-// "akari-state-v1\n" || u64be(configVersion) || for each record sorted by
-// (user_id, inbound_tag) bytewise: len-prefixed (u32be) user_id,
-// inbound_tag, protocol, account_json. Records must be unique per
+// stateHash implements agent.proto "State hash" (v2): lowercase hex SHA-256
+// over "akari-state-v2\n" || u64be(configVersion) || for each record sorted
+// by (user_id, inbound_tag) bytewise: len-prefixed (u32be) user_id,
+// inbound_tag, protocol, account_json || u32be(32) || SHA-256(inbounds
+// JSON verbatim as sent; "" when nothing runs). Records must be unique per
 // (user_id, inbound_tag). Test vectors: proto/state_hash_vectors.json.
-func stateHash(configVersion uint64, recs []hashRecord) string {
+func stateHash(configVersion uint64, inboundsJSON string, recs []hashRecord) string {
 	sorted := append([]hashRecord(nil), recs...)
 	sort.Slice(sorted, func(i, j int) bool {
 		if sorted[i].UserID != sorted[j].UserID {
@@ -29,7 +30,7 @@ func stateHash(configVersion uint64, recs []hashRecord) string {
 		return sorted[i].Tag < sorted[j].Tag
 	})
 	h := sha256.New()
-	h.Write([]byte("akari-state-v1\n"))
+	h.Write([]byte("akari-state-v2\n"))
 	var b8 [8]byte
 	binary.BigEndian.PutUint64(b8[:], configVersion)
 	h.Write(b8[:])
@@ -45,5 +46,7 @@ func stateHash(configVersion uint64, recs []hashRecord) string {
 		field(r.Protocol)
 		field(r.Account)
 	}
+	inb := sha256.Sum256([]byte(inboundsJSON))
+	field(string(inb[:]))
 	return hex.EncodeToString(h.Sum(nil))
 }

@@ -27,6 +27,7 @@ func TestStateHashVectors(t *testing.T) {
 		Cases []struct {
 			Name          string `json:"name"`
 			ConfigVersion uint64 `json:"config_version"`
+			InboundsJSON  string `json:"inbounds_json"`
 			Users         []struct {
 				UserID       string `json:"user_id"`
 				InboundUsers []struct {
@@ -41,7 +42,7 @@ func TestStateHashVectors(t *testing.T) {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.Cases) < 5 {
+	if len(f.Cases) < 10 {
 		t.Fatal("fixture has too few cases")
 	}
 	for _, c := range f.Cases {
@@ -56,7 +57,7 @@ func TestStateHashVectors(t *testing.T) {
 		for _, r := range recs {
 			list = append(list, r)
 		}
-		if got := stateHash(c.ConfigVersion, list); got != c.Hash {
+		if got := stateHash(c.ConfigVersion, c.InboundsJSON, list); got != c.Hash {
 			t.Errorf("%s: got %s want %s", c.Name, got, c.Hash)
 		}
 	}
@@ -299,7 +300,7 @@ func TestLeaseExpiryTeardownAndReport(t *testing.T) {
 			t.Fatal("no hello after reconnect")
 		}
 	}
-	if h.UserVersion != 0 || h.StateHash != stateHash(0, nil) {
+	if h.UserVersion != 0 || h.StateHash != stateHash(0, "", nil) {
 		t.Fatalf("hello after expiry = %v", h)
 	}
 	select {

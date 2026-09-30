@@ -27,6 +27,57 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type RemoveMode int32
+
+const (
+	// In place (UserDelta); the agent's gate dispatcher closes the user's
+	// live connections.
+	RemoveMode_REMOVE_MODE_GATE RemoveMode = 0
+	// Fallback switch: any removal or credential change goes through a full
+	// Snapshot (xray rebuild, drops every connection on the node). The panel
+	// sends no such deltas; the agent also refuses them (BASE_MISMATCH).
+	RemoveMode_REMOVE_MODE_REBUILD RemoveMode = 1
+)
+
+// Enum value maps for RemoveMode.
+var (
+	RemoveMode_name = map[int32]string{
+		0: "REMOVE_MODE_GATE",
+		1: "REMOVE_MODE_REBUILD",
+	}
+	RemoveMode_value = map[string]int32{
+		"REMOVE_MODE_GATE":    0,
+		"REMOVE_MODE_REBUILD": 1,
+	}
+)
+
+func (x RemoveMode) Enum() *RemoveMode {
+	p := new(RemoveMode)
+	*p = x
+	return p
+}
+
+func (x RemoveMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RemoveMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_agent_proto_enumTypes[0].Descriptor()
+}
+
+func (RemoveMode) Type() protoreflect.EnumType {
+	return &file_agent_proto_enumTypes[0]
+}
+
+func (x RemoveMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RemoveMode.Descriptor instead.
+func (RemoveMode) EnumDescriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{0}
+}
+
 type Ack_Reason int32
 
 const (
@@ -68,11 +119,11 @@ func (x Ack_Reason) String() string {
 }
 
 func (Ack_Reason) Descriptor() protoreflect.EnumDescriptor {
-	return file_agent_proto_enumTypes[0].Descriptor()
+	return file_agent_proto_enumTypes[1].Descriptor()
 }
 
 func (Ack_Reason) Type() protoreflect.EnumType {
-	return &file_agent_proto_enumTypes[0]
+	return &file_agent_proto_enumTypes[1]
 }
 
 func (x Ack_Reason) Number() protoreflect.EnumNumber {
@@ -114,11 +165,11 @@ func (x UserOp_Op) String() string {
 }
 
 func (UserOp_Op) Descriptor() protoreflect.EnumDescriptor {
-	return file_agent_proto_enumTypes[1].Descriptor()
+	return file_agent_proto_enumTypes[2].Descriptor()
 }
 
 func (UserOp_Op) Type() protoreflect.EnumType {
-	return &file_agent_proto_enumTypes[1]
+	return &file_agent_proto_enumTypes[2]
 }
 
 func (x UserOp_Op) Number() protoreflect.EnumNumber {
@@ -1017,8 +1068,12 @@ func (x *UserDelta) GetConfigVersion() uint64 {
 type LeaseGrant struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	DurationSeconds uint64                 `protobuf:"varint,1,opt,name=duration_seconds,json=durationSeconds,proto3" json:"duration_seconds,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// How user removals/rotations must be applied (panel config
+	// agent.remove_mode). Carried on every grant, so it reaches the agent
+	// with the first sync of each stream and before any Snapshot/UserDelta.
+	RemoveMode    RemoveMode `protobuf:"varint,2,opt,name=remove_mode,json=removeMode,proto3,enum=akari.v1.RemoveMode" json:"remove_mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *LeaseGrant) Reset() {
@@ -1056,6 +1111,13 @@ func (x *LeaseGrant) GetDurationSeconds() uint64 {
 		return x.DurationSeconds
 	}
 	return 0
+}
+
+func (x *LeaseGrant) GetRemoveMode() RemoveMode {
+	if x != nil {
+		return x.RemoveMode
+	}
+	return RemoveMode_REMOVE_MODE_GATE
 }
 
 type Noop struct {
@@ -1290,17 +1352,23 @@ const file_agent_proto_rawDesc = "" +
 	"\x03ops\x18\x02 \x03(\v2\x10.akari.v1.UserOpR\x03ops\x12.\n" +
 	"\x13base_config_version\x18\x03 \x01(\x04R\x11baseConfigVersion\x12*\n" +
 	"\x11base_user_version\x18\x04 \x01(\x04R\x0fbaseUserVersion\x12%\n" +
-	"\x0econfig_version\x18\x05 \x01(\x04R\rconfigVersion\"7\n" +
+	"\x0econfig_version\x18\x05 \x01(\x04R\rconfigVersion\"n\n" +
 	"\n" +
 	"LeaseGrant\x12)\n" +
-	"\x10duration_seconds\x18\x01 \x01(\x04R\x0fdurationSeconds\"\x06\n" +
+	"\x10duration_seconds\x18\x01 \x01(\x04R\x0fdurationSeconds\x125\n" +
+	"\vremove_mode\x18\x02 \x01(\x0e2\x14.akari.v1.RemoveModeR\n" +
+	"removeMode\"\x06\n" +
 	"\x04Noop\"\xcb\x01\n" +
 	"\tPanelDown\x126\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x18.akari.v1.ConfigSnapshotH\x00R\bsnapshot\x12+\n" +
 	"\x05delta\x18\x02 \x01(\v2\x13.akari.v1.UserDeltaH\x00R\x05delta\x12$\n" +
 	"\x04noop\x18\x03 \x01(\v2\x0e.akari.v1.NoopH\x00R\x04noop\x12,\n" +
 	"\x05lease\x18\x04 \x01(\v2\x14.akari.v1.LeaseGrantH\x00R\x05leaseB\x05\n" +
-	"\x03msg2I\n" +
+	"\x03msg*;\n" +
+	"\n" +
+	"RemoveMode\x12\x14\n" +
+	"\x10REMOVE_MODE_GATE\x10\x00\x12\x17\n" +
+	"\x13REMOVE_MODE_REBUILD\x10\x012I\n" +
 	"\fAgentChannel\x129\n" +
 	"\vOpenChannel\x12\x11.akari.v1.AgentUp\x1a\x13.akari.v1.PanelDown(\x010\x01B\x10Z\x0eakari/agent/pbb\x06proto3"
 
@@ -1316,49 +1384,51 @@ func file_agent_proto_rawDescGZIP() []byte {
 	return file_agent_proto_rawDescData
 }
 
-var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
 var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_agent_proto_goTypes = []any{
-	(Ack_Reason)(0),        // 0: akari.v1.Ack.Reason
-	(UserOp_Op)(0),         // 1: akari.v1.UserOp.Op
-	(*AgentInfo)(nil),      // 2: akari.v1.AgentInfo
-	(*Hello)(nil),          // 3: akari.v1.Hello
-	(*Heartbeat)(nil),      // 4: akari.v1.Heartbeat
-	(*UserTraffic)(nil),    // 5: akari.v1.UserTraffic
-	(*TrafficReport)(nil),  // 6: akari.v1.TrafficReport
-	(*Ack)(nil),            // 7: akari.v1.Ack
-	(*AgentUp)(nil),        // 8: akari.v1.AgentUp
-	(*InboundUser)(nil),    // 9: akari.v1.InboundUser
-	(*UserOp)(nil),         // 10: akari.v1.UserOp
-	(*ConfigSnapshot)(nil), // 11: akari.v1.ConfigSnapshot
-	(*UserDelta)(nil),      // 12: akari.v1.UserDelta
-	(*LeaseGrant)(nil),     // 13: akari.v1.LeaseGrant
-	(*Noop)(nil),           // 14: akari.v1.Noop
-	(*PanelDown)(nil),      // 15: akari.v1.PanelDown
+	(RemoveMode)(0),        // 0: akari.v1.RemoveMode
+	(Ack_Reason)(0),        // 1: akari.v1.Ack.Reason
+	(UserOp_Op)(0),         // 2: akari.v1.UserOp.Op
+	(*AgentInfo)(nil),      // 3: akari.v1.AgentInfo
+	(*Hello)(nil),          // 4: akari.v1.Hello
+	(*Heartbeat)(nil),      // 5: akari.v1.Heartbeat
+	(*UserTraffic)(nil),    // 6: akari.v1.UserTraffic
+	(*TrafficReport)(nil),  // 7: akari.v1.TrafficReport
+	(*Ack)(nil),            // 8: akari.v1.Ack
+	(*AgentUp)(nil),        // 9: akari.v1.AgentUp
+	(*InboundUser)(nil),    // 10: akari.v1.InboundUser
+	(*UserOp)(nil),         // 11: akari.v1.UserOp
+	(*ConfigSnapshot)(nil), // 12: akari.v1.ConfigSnapshot
+	(*UserDelta)(nil),      // 13: akari.v1.UserDelta
+	(*LeaseGrant)(nil),     // 14: akari.v1.LeaseGrant
+	(*Noop)(nil),           // 15: akari.v1.Noop
+	(*PanelDown)(nil),      // 16: akari.v1.PanelDown
 }
 var file_agent_proto_depIdxs = []int32{
-	2,  // 0: akari.v1.Hello.info:type_name -> akari.v1.AgentInfo
-	5,  // 1: akari.v1.TrafficReport.users:type_name -> akari.v1.UserTraffic
-	0,  // 2: akari.v1.Ack.reason:type_name -> akari.v1.Ack.Reason
-	3,  // 3: akari.v1.AgentUp.hello:type_name -> akari.v1.Hello
-	4,  // 4: akari.v1.AgentUp.heartbeat:type_name -> akari.v1.Heartbeat
-	6,  // 5: akari.v1.AgentUp.traffic:type_name -> akari.v1.TrafficReport
-	7,  // 6: akari.v1.AgentUp.ack:type_name -> akari.v1.Ack
-	1,  // 7: akari.v1.UserOp.op:type_name -> akari.v1.UserOp.Op
-	9,  // 8: akari.v1.UserOp.inbound_users:type_name -> akari.v1.InboundUser
-	10, // 9: akari.v1.ConfigSnapshot.users:type_name -> akari.v1.UserOp
-	10, // 10: akari.v1.UserDelta.ops:type_name -> akari.v1.UserOp
-	11, // 11: akari.v1.PanelDown.snapshot:type_name -> akari.v1.ConfigSnapshot
-	12, // 12: akari.v1.PanelDown.delta:type_name -> akari.v1.UserDelta
-	14, // 13: akari.v1.PanelDown.noop:type_name -> akari.v1.Noop
-	13, // 14: akari.v1.PanelDown.lease:type_name -> akari.v1.LeaseGrant
-	8,  // 15: akari.v1.AgentChannel.OpenChannel:input_type -> akari.v1.AgentUp
-	15, // 16: akari.v1.AgentChannel.OpenChannel:output_type -> akari.v1.PanelDown
-	16, // [16:17] is the sub-list for method output_type
-	15, // [15:16] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	3,  // 0: akari.v1.Hello.info:type_name -> akari.v1.AgentInfo
+	6,  // 1: akari.v1.TrafficReport.users:type_name -> akari.v1.UserTraffic
+	1,  // 2: akari.v1.Ack.reason:type_name -> akari.v1.Ack.Reason
+	4,  // 3: akari.v1.AgentUp.hello:type_name -> akari.v1.Hello
+	5,  // 4: akari.v1.AgentUp.heartbeat:type_name -> akari.v1.Heartbeat
+	7,  // 5: akari.v1.AgentUp.traffic:type_name -> akari.v1.TrafficReport
+	8,  // 6: akari.v1.AgentUp.ack:type_name -> akari.v1.Ack
+	2,  // 7: akari.v1.UserOp.op:type_name -> akari.v1.UserOp.Op
+	10, // 8: akari.v1.UserOp.inbound_users:type_name -> akari.v1.InboundUser
+	11, // 9: akari.v1.ConfigSnapshot.users:type_name -> akari.v1.UserOp
+	11, // 10: akari.v1.UserDelta.ops:type_name -> akari.v1.UserOp
+	0,  // 11: akari.v1.LeaseGrant.remove_mode:type_name -> akari.v1.RemoveMode
+	12, // 12: akari.v1.PanelDown.snapshot:type_name -> akari.v1.ConfigSnapshot
+	13, // 13: akari.v1.PanelDown.delta:type_name -> akari.v1.UserDelta
+	15, // 14: akari.v1.PanelDown.noop:type_name -> akari.v1.Noop
+	14, // 15: akari.v1.PanelDown.lease:type_name -> akari.v1.LeaseGrant
+	9,  // 16: akari.v1.AgentChannel.OpenChannel:input_type -> akari.v1.AgentUp
+	16, // 17: akari.v1.AgentChannel.OpenChannel:output_type -> akari.v1.PanelDown
+	17, // [17:18] is the sub-list for method output_type
+	16, // [16:17] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_agent_proto_init() }
@@ -1384,7 +1454,7 @@ func file_agent_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_proto_rawDesc), len(file_agent_proto_rawDesc)),
-			NumEnums:      2,
+			NumEnums:      3,
 			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,

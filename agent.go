@@ -44,6 +44,10 @@ type Agent struct {
 
 	lease  *leaseState
 	finals finalQueue
+	// removeRebuild: panel agent.remove_mode = rebuild (LeaseGrant). Deltas
+	// that remove or rotate a live credential are refused (BASE_MISMATCH)
+	// so the change arrives as a Snapshot (full rebuild).
+	removeRebuild bool
 
 	streamMu  sync.Mutex
 	streamGen uint64
@@ -307,6 +311,11 @@ func (a *Agent) handleDown(ctx context.Context, gen uint64, send func(*pb.AgentU
 			return nil
 		}
 		d := a.lease.grant(msg.Lease.GetDurationSeconds())
+		rebuild := msg.Lease.GetRemoveMode() == pb.RemoveMode_REMOVE_MODE_REBUILD
+		if rebuild != a.removeRebuild {
+			slog.Info("remove mode changed", "mode", msg.Lease.GetRemoveMode().String())
+		}
+		a.removeRebuild = rebuild
 		slog.Debug("lease granted", "duration", d)
 		return nil
 	case *pb.PanelDown_Noop:
@@ -376,6 +385,10 @@ func (a *Agent) applyDeltaLocked(ctx context.Context, gen uint64, send func(*pb.
 		return a.sendAckLocked(send, target[0], target[1], pb.Ack_REASON_OK, nil)
 	case held != base || a.isDirty() || !a.core.Running():
 		why := fmt.Errorf("delta base %d/%d, agent holds %d/%d (dirty=%v)", base[0], base[1], held[0], held[1], a.isDirty())
+		slog.Warn("rejecting user delta", "error", why)
+		return a.sendAckLocked(send, target[0], target[1], pb.Ack_REASON_BASE_MISMATCH, why)
+	case a.removeRebuild && a.core.WouldDropCredential(d.Ops):
+		why := fmt.Errorf("remove_mode=rebuild: removals/rotations need a snapshot")
 		slog.Warn("rejecting user delta", "error", why)
 		return a.sendAckLocked(send, target[0], target[1], pb.Ack_REASON_BASE_MISMATCH, why)
 	}

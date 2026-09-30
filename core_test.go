@@ -279,7 +279,8 @@ func TestReplaceRemovesStaleTags(t *testing.T) {
 		{InboundTag: "in-a", Protocol: "vless", AccountJson: `{"flow":"","id":"` + idA + `"}`},
 		{InboundTag: "in-b", Protocol: "vless", AccountJson: `{"flow":"","id":"` + idA + `"}`},
 	}}
-	if _, err := m.Rebuild(twoInbounds(pa, pb2), []*pb.UserOp{both}); err != nil {
+	inb := twoInbounds(pa, pb2)
+	if _, err := m.Rebuild(inb, []*pb.UserOp{both}); err != nil {
 		t.Fatal(err)
 	}
 	cb, err := vlessDial(pb2, idA, echo)
@@ -304,7 +305,7 @@ func TestReplaceRemovesStaleTags(t *testing.T) {
 		}
 		c.Close()
 	}
-	want := stateHash(0, []hashRecord{{UserID: userA, Tag: "in-a", Protocol: "vless", Account: `{"flow":"","id":"` + idA + `"}`}})
+	want := stateHash(0, inb, []hashRecord{{UserID: userA, Tag: "in-a", Protocol: "vless", Account: `{"flow":"","id":"` + idA + `"}`}})
 	if got := m.StateHash(0); got != want {
 		t.Fatal("state hash does not reflect the replaced set")
 	}
