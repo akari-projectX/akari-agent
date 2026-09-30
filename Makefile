@@ -1,4 +1,4 @@
-.PHONY: build proto sync-proto check-proto vet fmt-check test test-canary
+.PHONY: build proto sync-proto check-proto check-pb vet fmt-check test test-canary vulncheck ci
 
 # Canonical contract lives in akari-panel/proto/agent.proto. This repo vendors
 # a copy: `make sync-proto` pulls the sibling checkout's version and
@@ -16,6 +16,28 @@ sync-proto:
 
 check-proto:
 	diff -q ../akari-panel/proto/agent.proto proto/agent.proto
+
+# Generated code (pb/) must be what buf produces from the vendored proto.
+# Needs protoc-gen-go v1.36.12 and protoc-gen-go-grpc v1.6.2 on PATH.
+check-pb: proto
+	git diff --exit-code -- pb
+
+# govulncheck fails on any reachable vulnerability. VULN_ALLOW lists accepted
+# IDs (each needs a reason); anything else fails.
+#   GO-2026-6443: grpc server panic on missing :authority. Fix exists only as
+#   a v1.85.0-dev pseudo-version; reached via xray's internal gRPC transport,
+#   not an endpoint the agent exposes (agent dials out only). Revisit when
+#   grpc v1.85.0 is released.
+VULN_ALLOW ?= GO-2026-6443
+vulncheck:
+	@out=$$(go run golang.org/x/vuln/cmd/govulncheck@latest ./... 2>&1); rc=$$?; echo "$$out"; \
+	[ $$rc -eq 0 ] && exit 0; \
+	bad=$$(echo "$$out" | grep -oE '^Vulnerability #[0-9]+: GO-[0-9]+-[0-9]+' | grep -oE 'GO-[0-9]+-[0-9]+' | sort -u | grep -vxF "$$(echo $(VULN_ALLOW) | tr ' ' '\n')"); \
+	if [ -n "$$bad" ]; then echo "NEW reachable vulnerabilities: $$bad"; exit 1; fi; \
+	echo "only allow-listed vulnerabilities: $(VULN_ALLOW)"
+
+# What CI runs (minus check-proto/check-pb, which need ../akari-panel).
+ci: fmt-check vet test build vulncheck
 
 vet:
 	go vet ./...
