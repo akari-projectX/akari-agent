@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -456,4 +457,34 @@ func TestGateDispatchPath(t *testing.T) {
 	if _, err := gate.Dispatch(ctxFor(installed), dest); err != errRevoked {
 		t.Fatalf("revoked identity admitted: %v", err)
 	}
+}
+
+// R12: the agent refuses fakedns sniffing after xray's own parse, whatever
+// JSON spelling got it there (case variants, comma strings, duplicate keys
+// by case that Go's decoder merges); a tag containing "fakedns" is fine.
+func TestFakeDNSRefusedAfterXrayParse(t *testing.T) {
+	base := `"listen":"127.0.0.1","port":0,"protocol":"vless","settings":{"clients":[],"decryption":"none"}`
+	bad := []string{
+		`{"tag":"a",` + base + `,"sniffing":{"enabled":true,"destOverride":["http","fakedns"]}}`,
+		`{"tag":"a",` + base + `,"sniffing":{"enabled":true,"destOverride":["FakeDNS+Others"]}}`,
+		`{"tag":"a",` + base + `,"SNIFFING":{"enabled":true,"DestOverride":["fakedns"]}}`,
+		`{"tag":"a",` + base + `,"sniffing":{"enabled":true,"destOverride":["http"]},"Sniffing":{"enabled":true,"destOverride":["fakedns"]}}`,
+		`{"tag":"a",` + base + `,"sniffing":{"enabled":true,"destOverride":["faKedns"]}}`,
+	}
+	for _, in := range bad {
+		inst, _, _, err := newInstance("[" + in + "]")
+		if err == nil {
+			_ = inst.Close()
+			t.Fatalf("accepted fakedns: %s", in)
+		}
+		if !strings.Contains(err.Error(), "fakedns sniffing is not supported") {
+			t.Fatalf("unexpected error for %s: %v", in, err)
+		}
+	}
+	ok := `{"tag":"fakedns-in",` + base + `,"sniffing":{"enabled":true,"destOverride":["http","tls"]}}`
+	inst, _, _, err := newInstance("[" + ok + "]")
+	if err != nil {
+		t.Fatalf("rejected a clean inbound: %v", err)
+	}
+	_ = inst.Close()
 }

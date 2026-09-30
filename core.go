@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/xtls/xray-core/app/dispatcher"
 	_ "github.com/xtls/xray-core/app/dns"
 	_ "github.com/xtls/xray-core/app/log"
 	_ "github.com/xtls/xray-core/app/policy"
-	_ "github.com/xtls/xray-core/app/proxyman"
+	"github.com/xtls/xray-core/app/proxyman"
 	_ "github.com/xtls/xray-core/app/proxyman/inbound"
 	_ "github.com/xtls/xray-core/app/proxyman/outbound"
 	_ "github.com/xtls/xray-core/app/router"
@@ -484,6 +485,33 @@ func counterValue(sm stats.Manager, name string) int64 {
 	return c.Value()
 }
 
+// refuseFakeDNS is the authoritative FakeDNS check (the panel's JSON check
+// is only a courtesy): it inspects what xray itself parsed, after its
+// case-insensitive key matching, merging and string-list handling. The
+// gate wraps a DefaultDispatcher without a FakeDNS engine, so fakedns
+// sniffing would silently misroute (R10 F4, R12).
+func refuseFakeDNS(cfg *core.Config) error {
+	for _, in := range cfg.Inbound {
+		if in.ReceiverSettings == nil {
+			continue
+		}
+		msg, err := in.ReceiverSettings.GetInstance()
+		if err != nil {
+			return fmt.Errorf("inbound %q: receiver settings: %w", in.Tag, err)
+		}
+		rc, ok := msg.(*proxyman.ReceiverConfig)
+		if !ok || rc.SniffingSettings == nil {
+			continue
+		}
+		for _, o := range rc.SniffingSettings.DestinationOverride {
+			if strings.Contains(strings.ToLower(o), "fakedns") {
+				return fmt.Errorf("inbound %q: fakedns sniffing is not supported by this agent", in.Tag)
+			}
+		}
+	}
+	return nil
+}
+
 func newInstance(inboundsJSON string) (*core.Instance, *gateDispatcher, []string, error) {
 	var inbounds []json.RawMessage
 	if err := json.Unmarshal([]byte(inboundsJSON), &inbounds); err != nil {
@@ -526,6 +554,9 @@ func newInstance(inboundsJSON string) (*core.Instance, *gateDispatcher, []string
 	pbConfig, err := jsonConfig.Build()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("build xray config: %w", err)
+	}
+	if err := refuseFakeDNS(pbConfig); err != nil {
+		return nil, nil, nil, err
 	}
 	// Swap xray's dispatcher for the gate (same slot in the app list, so
 	// every inbound resolves the gate when it is created).
