@@ -188,3 +188,70 @@ func appliedUsers(m *CoreManager) []string {
 	sortStrings(out)
 	return out
 }
+
+// R10 fallback switch: with remove_mode=rebuild (pushed on the lease
+// grant) a delta that removes or rotates a live credential is refused
+// untouched (BASE_MISMATCH -> the panel sends a Snapshot); pure additions
+// still apply. Gate mode applies all of them in place.
+func TestRemoveModeGateVsRebuild(t *testing.T) {
+	type v = [2]uint64
+	grant := func(mode pb.RemoveMode) *pb.PanelDown {
+		return &pb.PanelDown{Msg: &pb.PanelDown_Lease{Lease: &pb.LeaseGrant{DurationSeconds: 7200, RemoveMode: mode}}}
+	}
+	for _, c := range []struct {
+		mode             pb.RemoveMode
+		add, rot, remove pb.Ack_Reason
+	}{
+		{pb.RemoveMode_REMOVE_MODE_GATE, pb.Ack_REASON_OK, pb.Ack_REASON_OK, pb.Ack_REASON_OK},
+		{pb.RemoveMode_REMOVE_MODE_REBUILD, pb.Ack_REASON_OK, pb.Ack_REASON_BASE_MISMATCH, pb.Ack_REASON_BASE_MISMATCH},
+	} {
+		a := NewAgent(&Config{}, "test")
+		ctx := context.Background()
+		nop := func(*pb.AgentUp) error { return nil }
+		_ = a.handleDown(ctx, 0, nop, grant(c.mode))
+		_ = a.handleDown(ctx, 0, nop, snapshotMsg(2, 1, twoInbounds(freePort(t), freePort(t)), vlessUser(userA, "in-a", idA)))
+		step := func(msg *pb.PanelDown) pb.Ack_Reason {
+			out, send := collect()
+			if err := a.handleDown(ctx, 0, send, msg); err != nil {
+				t.Fatal(err)
+			}
+			return lastAck(t, *out).Reason
+		}
+		if got := step(deltaMsg(v{2, 1}, v{2, 2}, vlessUser(userB, "in-a", idB))); got != c.add {
+			t.Fatalf("%v add: %v", c.mode, got)
+		}
+		hc, hu := a.versions()
+		if got := step(deltaMsg(v{hc, hu}, v{2, 3}, vlessUser(userA, "in-a", idB2))); got != c.rot {
+			t.Fatalf("%v rotate: %v", c.mode, got)
+		}
+		hc, hu = a.versions()
+		if got := step(deltaMsg(v{hc, hu}, v{2, 4}, removeOp(userB))); got != c.remove {
+			t.Fatalf("%v remove: %v", c.mode, got)
+		}
+		if c.mode == pb.RemoveMode_REMOVE_MODE_REBUILD && len(appliedUsers(a.core)) != 2 {
+			t.Fatal("a refused delta changed the running set")
+		}
+		a.core.Teardown()
+	}
+}
+
+// State hash v2 binds the inbounds: same users, other inbounds, other hash.
+func TestStateHashBindsInbounds(t *testing.T) {
+	m := NewCoreManager()
+	defer m.Teardown()
+	users := []*pb.UserOp{vlessUser(userA, "in-a", idA)}
+	if _, err := m.Rebuild(twoInbounds(freePort(t), freePort(t)), users); err != nil {
+		t.Fatal(err)
+	}
+	h1 := m.StateHash(1)
+	if _, err := m.Rebuild(twoInbounds(freePort(t), freePort(t)), users); err != nil {
+		t.Fatal(err)
+	}
+	if m.StateHash(1) == h1 {
+		t.Fatal("inbounds not bound into the state hash")
+	}
+	m.Teardown()
+	if m.StateHash(0) != stateHash(0, "", nil) {
+		t.Fatal("nothing running must hash with empty inbounds")
+	}
+}

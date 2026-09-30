@@ -13,6 +13,12 @@ Responsibilities:
   `AddUser`/`RemoveUser`, no rebuild). A gate dispatcher replaces xray's
   default one so removing or rotating a user also closes that user's live
   connections (and refuses new mux sub-streams on them)
+- user-less inbounds (dokodemo/socks/http without clients) are neither gated
+  nor billed — only vless/vmess/trojan users are panel-managed
+- `agent.remove_mode = "rebuild"` on the panel (pushed on every lease grant)
+  makes every removal/rotation a full rebuild instead (fallback switch)
+- per-protocol revocation canaries: `make test-canary` (part of `make
+  test`); bump xray-core only when they are green
 - report a state hash of what actually runs (Hello, every Ack) so the panel
   detects divergence
 - enforce the panel's fail-closed lease (CLOCK_BOOTTIME; stop xray when the
