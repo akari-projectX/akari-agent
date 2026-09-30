@@ -5,9 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 
-	_ "github.com/xtls/xray-core/app/dispatcher"
+	"github.com/xtls/xray-core/app/dispatcher"
 	_ "github.com/xtls/xray-core/app/dns"
 	_ "github.com/xtls/xray-core/app/log"
 	_ "github.com/xtls/xray-core/app/policy"
@@ -20,6 +21,7 @@ import (
 	commonserial "github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/inbound"
+	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/features/stats"
 	confserial "github.com/xtls/xray-core/infra/conf/serial"
 	"github.com/xtls/xray-core/proxy"
@@ -63,27 +65,55 @@ func userStore(handler inbound.Handler) (userManager, error) {
 	return store, nil
 }
 
+// appliedCred is one credential actually installed on one inbound.
+type appliedCred struct {
+	protocol string
+	account  string // account_json verbatim (hashed as-is)
+	user     *protocol.MemoryUser
+}
+
+// monoCounter keeps a reported counter monotonic within a session even if
+// the underlying xray counter were ever reset (see readCounter).
+type monoCounter struct {
+	lastRaw int64
+	offset  int64
+}
+
 // CoreManager owns the embedded xray-core instance. The agent is a
 // supervisor: it (re)builds the instance from panel-pushed snapshots and
-// applies per-user changes in place, without restarting the process.
+// applies per-user changes in place (UserDelta), without restarting it.
 type CoreManager struct {
-	mu          sync.Mutex
-	instance    *core.Instance
-	inboundTags []string
+	mu       sync.Mutex
+	instance *core.Instance
+	gate     *gateDispatcher
+	tags     []string
 	// sessionID names the lifetime of the current traffic counters. It is
 	// only changed under mu, together with the instance, so a
 	// TrafficSnapshot can never pair one instance's counters with another
 	// instance's session (the panel bills by (node, user, session)).
 	sessionID string
-	emailsMu  sync.RWMutex
-	emails    map[string]struct{}
+	// applied is what is really installed: user -> inbound tag -> cred.
+	// It feeds the state hash, so it only records successful adds.
+	applied map[string]map[string]appliedCred
+	// counted: every email with counters in this instance, including users
+	// removed since (xray keeps their counters; the tail is still billed).
+	counted map[string]struct{}
+	mono    map[string]*monoCounter
 	// onStart is a test seam, called under mu right after a new instance
 	// is installed. Always nil in production.
 	onStart func(*core.Instance)
 }
 
 func NewCoreManager() *CoreManager {
-	return &CoreManager{emails: make(map[string]struct{}), sessionID: newSessionID()}
+	m := &CoreManager{sessionID: newSessionID()}
+	m.resetUsersLocked()
+	return m
+}
+
+func (m *CoreManager) resetUsersLocked() {
+	m.applied = make(map[string]map[string]appliedCred)
+	m.counted = make(map[string]struct{})
+	m.mono = make(map[string]*monoCounter)
 }
 
 // SessionID returns the session the current counters belong to.
@@ -91,6 +121,47 @@ func (m *CoreManager) SessionID() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.sessionID
+}
+
+// UserCount returns how many users have at least one live credential.
+func (m *CoreManager) UserCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.applied)
+}
+
+// Running reports whether an xray instance is up.
+func (m *CoreManager) Running() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.instance != nil
+}
+
+// stopLocked closes the current instance and returns its final counters
+// (old session), or nil. A fresh session id is minted: counters restart
+// with whatever instance comes next (or none).
+func (m *CoreManager) stopLocked() *pb.TrafficReport {
+	var final *pb.TrafficReport
+	if m.instance != nil {
+		if counters := m.countersLocked(nil); len(counters) > 0 {
+			final = &pb.TrafficReport{Users: counters, SessionId: m.sessionID}
+		}
+		_ = m.instance.Close()
+		m.instance = nil
+		m.gate = nil
+		m.tags = nil
+	}
+	m.sessionID = newSessionID()
+	m.resetUsersLocked()
+	return final
+}
+
+// Teardown stops xray (lease expiry). Returns the final counters of the
+// stopped instance under its (old) session, or nil.
+func (m *CoreManager) Teardown() *pb.TrafficReport {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stopLocked()
 }
 
 // Rebuild stops the current instance (if any) and starts a new one from the
@@ -102,121 +173,159 @@ func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) (*pb.Traf
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	var final *pb.TrafficReport
-	if m.instance != nil {
-		if counters := m.countersLocked(); len(counters) > 0 {
-			final = &pb.TrafficReport{Users: counters, SessionId: m.sessionID}
-		}
-		_ = m.instance.Close()
-		m.instance = nil
-		m.inboundTags = nil
-	}
-	// Counters restart with whatever instance comes next (or none).
-	m.sessionID = newSessionID()
+	final := m.stopLocked()
 
-	inst, tags, err := newInstance(inboundsJSON)
+	inst, gate, tags, err := newInstance(inboundsJSON)
 	if err != nil {
 		return final, err
 	}
 
 	m.instance = inst
-	m.inboundTags = tags
+	m.gate = gate
+	m.tags = tags
 	if m.onStart != nil {
 		m.onStart(inst)
 	}
-	m.emailsMu.Lock()
-	m.emails = make(map[string]struct{})
-	m.emailsMu.Unlock()
 
 	var firstErr error
 	for _, op := range users {
-		if err := m.applyOp(op); err != nil && firstErr == nil {
+		if _, err := m.applyOpLocked(op); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return final, firstErr
 }
 
-// ApplyDelta applies incremental user ops to the running instance.
-func (m *CoreManager) ApplyDelta(ops []*pb.UserOp) error {
+// ApplyUserOps applies UserDelta ops to the running instance, continuing
+// past failures (every op is idempotent; `applied` records what really took
+// effect). Users who lost a live credential get their final counters
+// returned (current session), read after their connections were closed.
+func (m *CoreManager) ApplyUserOps(ops []*pb.UserOp) (*pb.TrafficReport, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.instance == nil {
-		return fmt.Errorf("core not started")
+		return nil, fmt.Errorf("core not started")
 	}
 	var firstErr error
+	touched := map[string]struct{}{}
 	for _, op := range ops {
-		if err := m.applyOp(op); err != nil && firstErr == nil {
+		lost, err := m.applyOpLocked(op)
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
+		if lost {
+			touched[op.GetUserId()] = struct{}{}
+		}
 	}
-	return firstErr
+	var final *pb.TrafficReport
+	if len(touched) > 0 {
+		final = &pb.TrafficReport{Users: m.countersLocked(touched), SessionId: m.sessionID}
+	}
+	return final, firstErr
 }
 
-func (m *CoreManager) applyOp(op *pb.UserOp) error {
+// applyOpLocked applies one op with REPLACE semantics. Returns whether a
+// credential that was live got dropped or swapped.
+func (m *CoreManager) applyOpLocked(op *pb.UserOp) (lost bool, err error) {
+	uid := op.GetUserId()
+	if uid == "" {
+		return false, fmt.Errorf("user op without user id")
+	}
+	want := map[string]*pb.InboundUser{}
 	switch op.GetOp() {
 	case pb.UserOp_ADD:
-		m.emailsMu.Lock()
-		m.emails[op.UserId] = struct{}{}
-		m.emailsMu.Unlock()
-		for _, iu := range op.InboundUsers {
-			if err := m.addUser(iu.InboundTag, iu.Protocol, iu.AccountJson, op.UserId); err != nil {
-				return err
-			}
+		for _, iu := range op.GetInboundUsers() {
+			want[iu.GetInboundTag()] = iu // later entry for a tag wins
 		}
 	case pb.UserOp_REMOVE:
-		m.emailsMu.Lock()
-		delete(m.emails, op.UserId)
-		m.emailsMu.Unlock()
-		for _, tag := range m.inboundTags {
-			// The user may not exist on every inbound; ignore not-found.
-			_ = m.removeUser(tag, op.UserId)
-		}
 	default:
-		return fmt.Errorf("unknown user op %d", op.GetOp())
+		return false, fmt.Errorf("unknown user op %d", op.GetOp())
 	}
-	return nil
+
+	cur := m.applied[uid]
+	if cur == nil {
+		cur = make(map[string]appliedCred)
+	}
+	// 1. Drop everything not kept verbatim — on EVERY inbound of the
+	// instance, not only the ones we believe hold the user, so a stale or
+	// rotated credential can never stay live.
+	for _, tag := range m.tags {
+		if c, ok := cur[tag]; ok {
+			if w, keep := want[tag]; keep && w.GetProtocol() == c.protocol && w.GetAccountJson() == c.account {
+				continue
+			}
+			lost = true
+		}
+		m.gate.Revoke(gateKey{tag: tag, email: uid})
+		delete(cur, tag)
+		if store, e := m.store(tag); e == nil {
+			_ = store.RemoveUser(context.Background(), uid) // not-found is fine
+		}
+	}
+	// 2. Install what is missing, in a deterministic order.
+	tags := make([]string, 0, len(want))
+	for tag := range want {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	for _, tag := range tags {
+		if _, ok := cur[tag]; ok {
+			continue // identical credential already live: untouched
+		}
+		w := want[tag]
+		if e := m.addUserLocked(tag, w, uid, cur); e != nil && err == nil {
+			err = e
+		}
+	}
+	if len(cur) > 0 {
+		m.applied[uid] = cur
+		m.counted[uid] = struct{}{}
+	} else {
+		delete(m.applied, uid)
+	}
+	return lost, err
 }
 
-func (m *CoreManager) manager() inbound.Manager {
-	return m.instance.GetFeature(inbound.ManagerType()).(inbound.Manager)
-}
-
-func (m *CoreManager) addUser(tag, protocolName, accountJSON, userID string) error {
-	user, err := buildUser(protocolName, accountJSON, userID)
+func (m *CoreManager) store(tag string) (userManager, error) {
+	handler, err := m.manager().GetHandler(context.Background(), tag)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("inbound %q: %w", tag, err)
+	}
+	store, err := userStore(handler)
+	if err != nil {
+		return nil, fmt.Errorf("inbound %q: %w", tag, err)
+	}
+	return store, nil
+}
+
+func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, cur map[string]appliedCred) error {
+	user, err := buildUser(iu.GetProtocol(), iu.GetAccountJson(), uid)
+	if err != nil {
+		return fmt.Errorf("inbound %q: %w", tag, err)
 	}
 	memoryUser, err := user.ToMemoryUser()
 	if err != nil {
 		return fmt.Errorf("materialize user: %w", err)
 	}
-	handler, err := m.manager().GetHandler(context.Background(), tag)
+	store, err := m.store(tag)
 	if err != nil {
-		return fmt.Errorf("inbound %q: %w", tag, err)
+		return err
 	}
-	store, err := userStore(handler)
-	if err != nil {
-		return fmt.Errorf("inbound %q: %w", tag, err)
-	}
-	// Idempotent: a stale snapshot replay must not fail on "already exists".
-	_ = store.RemoveUser(context.Background(), userID)
+	key := gateKey{tag: tag, email: uid}
+	// Admit the new identity before the validator can authenticate it.
+	m.gate.Allow(key, memoryUser)
+	_ = store.RemoveUser(context.Background(), uid)
 	if err := store.AddUser(context.Background(), memoryUser); err != nil {
+		m.gate.Revoke(key)
 		return fmt.Errorf("add user to inbound %q: %w", tag, err)
 	}
+	cur[tag] = appliedCred{protocol: iu.GetProtocol(), account: iu.GetAccountJson(), user: memoryUser}
+	m.counted[uid] = struct{}{}
 	return nil
 }
 
-func (m *CoreManager) removeUser(tag, userID string) error {
-	handler, err := m.manager().GetHandler(context.Background(), tag)
-	if err != nil {
-		return err
-	}
-	store, err := userStore(handler)
-	if err != nil {
-		return err
-	}
-	return store.RemoveUser(context.Background(), userID)
+func (m *CoreManager) manager() inbound.Manager {
+	return m.instance.GetFeature(inbound.ManagerType()).(inbound.Manager)
 }
 
 // buildUser constructs an xray user whose "email" field carries the panel
@@ -256,6 +365,20 @@ func buildUser(protocolName, accountJSON, userID string) (*protocol.User, error)
 	}, nil
 }
 
+// StateHash hashes what is actually installed, bound to configVersion (see
+// agent.proto "State hash").
+func (m *CoreManager) StateHash(configVersion uint64) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var recs []hashRecord
+	for uid, tags := range m.applied {
+		for tag, c := range tags {
+			recs = append(recs, hashRecord{UserID: uid, Tag: tag, Protocol: c.protocol, Account: c.account})
+		}
+	}
+	return stateHash(configVersion, recs)
+}
+
 // TrafficSnapshot returns the current session id together with the
 // cumulative per-user counters of the instance that session names. Both are
 // read under mu, so a concurrent Rebuild cannot split them.
@@ -265,27 +388,30 @@ func (m *CoreManager) TrafficSnapshot() *pb.TrafficReport {
 	if m.instance == nil {
 		return nil
 	}
-	return &pb.TrafficReport{Users: m.countersLocked(), SessionId: m.sessionID}
+	return &pb.TrafficReport{Users: m.countersLocked(nil), SessionId: m.sessionID}
 }
 
-// countersLocked reads per-user counters of m.instance. Caller holds mu.
-func (m *CoreManager) countersLocked() []*pb.UserTraffic {
+// countersLocked reads per-user counters of m.instance for `only` (nil =
+// every counted email). Caller holds mu.
+func (m *CoreManager) countersLocked(only map[string]struct{}) []*pb.UserTraffic {
 	sm, ok := m.instance.GetFeature(stats.ManagerType()).(stats.Manager)
 	if !ok {
 		return nil
 	}
-
-	m.emailsMu.RLock()
-	emails := make([]string, 0, len(m.emails))
-	for e := range m.emails {
+	set := only
+	if set == nil {
+		set = m.counted
+	}
+	emails := make([]string, 0, len(set))
+	for e := range set {
 		emails = append(emails, e)
 	}
-	m.emailsMu.RUnlock()
+	sort.Strings(emails)
 
 	var out []*pb.UserTraffic
 	for _, email := range emails {
-		up := counterValue(sm, "user>>>"+email+">>>traffic>>>uplink")
-		down := counterValue(sm, "user>>>"+email+">>>traffic>>>downlink")
+		up := m.readCounter(sm, "user>>>"+email+">>>traffic>>>uplink")
+		down := m.readCounter(sm, "user>>>"+email+">>>traffic>>>downlink")
 		if up == 0 && down == 0 {
 			continue
 		}
@@ -298,6 +424,26 @@ func (m *CoreManager) countersLocked() []*pb.UserTraffic {
 	return out
 }
 
+// readCounter returns a session-monotonic value for an xray counter. xray
+// v26.3.27 never unregisters or resets per-user counters when a user is
+// removed and re-added (RemoveUser only touches the validator; nothing
+// calls stats.UnregisterCounter), so the offset stays 0 in practice. It is a
+// guard against a future core doing so: any drop is carried as an offset,
+// so the cumulative value the panel bills per session never goes backwards.
+func (m *CoreManager) readCounter(sm stats.Manager, name string) int64 {
+	raw := counterValue(sm, name)
+	st := m.mono[name]
+	if st == nil {
+		st = &monoCounter{}
+		m.mono[name] = st
+	}
+	if raw < st.lastRaw {
+		st.offset += st.lastRaw
+	}
+	st.lastRaw = raw
+	return raw + st.offset
+}
+
 func counterValue(sm stats.Manager, name string) int64 {
 	c := sm.GetCounter(name)
 	if c == nil {
@@ -306,10 +452,10 @@ func counterValue(sm stats.Manager, name string) int64 {
 	return c.Value()
 }
 
-func newInstance(inboundsJSON string) (*core.Instance, []string, error) {
+func newInstance(inboundsJSON string) (*core.Instance, *gateDispatcher, []string, error) {
 	var inbounds []json.RawMessage
 	if err := json.Unmarshal([]byte(inboundsJSON), &inbounds); err != nil {
-		return nil, nil, fmt.Errorf("parse inbounds: %w", err)
+		return nil, nil, nil, fmt.Errorf("parse inbounds: %w", err)
 	}
 	if len(inbounds) == 0 {
 		inbounds = []json.RawMessage{}
@@ -338,24 +484,42 @@ func newInstance(inboundsJSON string) (*core.Instance, []string, error) {
 	}
 	b, err := json.Marshal(full)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	jsonConfig, err := confserial.DecodeJSONConfig(bytes.NewReader(b))
 	if err != nil {
-		return nil, nil, fmt.Errorf("decode xray config: %w", err)
+		return nil, nil, nil, fmt.Errorf("decode xray config: %w", err)
 	}
 	pbConfig, err := jsonConfig.Build()
 	if err != nil {
-		return nil, nil, fmt.Errorf("build xray config: %w", err)
+		return nil, nil, nil, fmt.Errorf("build xray config: %w", err)
+	}
+	// Swap xray's dispatcher for the gate (same slot in the app list, so
+	// every inbound resolves the gate when it is created).
+	stock := commonserial.GetMessageType(&dispatcher.Config{})
+	swapped := false
+	for i, app := range pbConfig.App {
+		if app.GetType() == stock {
+			pbConfig.App[i] = commonserial.ToTypedMessage(&pb.GateDispatcherConfig{})
+			swapped = true
+		}
+	}
+	if !swapped {
+		return nil, nil, nil, fmt.Errorf("xray config has no dispatcher to replace")
 	}
 	inst, err := core.New(pbConfig)
 	if err != nil {
-		return nil, nil, fmt.Errorf("build xray instance: %w", err)
+		return nil, nil, nil, fmt.Errorf("build xray instance: %w", err)
+	}
+	gate, ok := inst.GetFeature(routing.DispatcherType()).(*gateDispatcher)
+	if !ok {
+		_ = inst.Close()
+		return nil, nil, nil, fmt.Errorf("gate dispatcher not installed")
 	}
 	if err := inst.Start(); err != nil {
 		_ = inst.Close()
-		return nil, nil, fmt.Errorf("start xray instance: %w", err)
+		return nil, nil, nil, fmt.Errorf("start xray instance: %w", err)
 	}
 
 	tags := make([]string, 0, len(inbounds))
@@ -367,5 +531,5 @@ func newInstance(inboundsJSON string) (*core.Instance, []string, error) {
 			tags = append(tags, probe.Tag)
 		}
 	}
-	return inst, tags, nil
+	return inst, gate, tags, nil
 }

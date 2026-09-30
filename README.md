@@ -9,7 +9,14 @@ the panel CA) is the node's identity.
 Responsibilities:
 
 - apply panel-pushed `ConfigSnapshot`s (start/rebuild the embedded core) and
-  incremental user ops (dynamic `AddUser`/`RemoveUser`, no restarts)
+  `UserDelta`s (base/target versions, REPLACE semantics; dynamic
+  `AddUser`/`RemoveUser`, no rebuild). A gate dispatcher replaces xray's
+  default one so removing or rotating a user also closes that user's live
+  connections (and refuses new mux sub-streams on them)
+- report a state hash of what actually runs (Hello, every Ack) so the panel
+  detects divergence
+- enforce the panel's fail-closed lease (CLOCK_BOOTTIME; stop xray when the
+  panel has not confirmed the desired state for the lease duration)
 - report cumulative per-user traffic counters (10s) and heartbeats (15s)
 - converge to the panel's desired state after any disconnect
 

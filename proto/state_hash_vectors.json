@@ -1,0 +1,147 @@
+{
+  "_comment": "Shared state-hash test vectors (see agent.proto, 'State hash'). Canonical copy: akari-panel/proto/; akari-agent vendors it next to agent.proto. Both repos' tests must pass against it.",
+  "cases": [
+    {
+      "name": "empty",
+      "config_version": 1,
+      "users": [],
+      "hash": "fe89124b9cb7ffeeef8c178d68f757b32b49fae65c0c50b5bf41c3b000221582"
+    },
+    {
+      "name": "one user one inbound",
+      "config_version": 3,
+      "users": [
+        {
+          "user_id": "11111111-1111-1111-1111-111111111111",
+          "inbound_users": [
+            {
+              "inbound_tag": "in-vless",
+              "protocol": "vless",
+              "account_json": "{\"flow\":\"\",\"id\":\"9d3c6f55-1b1e-4c55-8a4b-000000000001\"}"
+            }
+          ]
+        }
+      ],
+      "hash": "86ee7542cba3706a40678b99e49b1069b7e5109e61d82a7a82748b510b38b96e"
+    },
+    {
+      "name": "input order does not matter",
+      "config_version": 3,
+      "users": [
+        {
+          "user_id": "22222222-2222-2222-2222-222222222222",
+          "inbound_users": [
+            {
+              "inbound_tag": "in-vmess",
+              "protocol": "vmess",
+              "account_json": "{\"id\":\"b-vmess\"}"
+            },
+            {
+              "inbound_tag": "in-trojan",
+              "protocol": "trojan",
+              "account_json": "{\"password\":\"päss  日本\"}"
+            }
+          ]
+        },
+        {
+          "user_id": "11111111-1111-1111-1111-111111111111",
+          "inbound_users": [
+            {
+              "inbound_tag": "in-vless",
+              "protocol": "vless",
+              "account_json": "{\"flow\":\"\",\"id\":\"a\"}"
+            }
+          ]
+        },
+        {
+          "user_id": "0aaaaaaa-0000-0000-0000-000000000000",
+          "inbound_users": [
+            {
+              "inbound_tag": "in-vless",
+              "protocol": "vless",
+              "account_json": "{\"flow\":\"xtls-rprx-vision\",\"id\":\"c\"}"
+            }
+          ]
+        }
+      ],
+      "hash": "a45d9ea43eef715c2179c4e71780a9a7348b97e329ba769e97ec794cbad303b8"
+    },
+    {
+      "name": "later inbound for the same tag replaces the earlier one",
+      "config_version": 3,
+      "users": [
+        {
+          "user_id": "11111111-1111-1111-1111-111111111111",
+          "inbound_users": [
+            {
+              "inbound_tag": "in-vless",
+              "protocol": "vless",
+              "account_json": "{\"flow\":\"\",\"id\":\"old\"}"
+            },
+            {
+              "inbound_tag": "in-vless",
+              "protocol": "vless",
+              "account_json": "{\"flow\":\"\",\"id\":\"new\"}"
+            }
+          ]
+        }
+      ],
+      "hash": "630fce9038ed29f0ee475622ca698d847ed362728ed0bbf7cc61abced919023d"
+    },
+    {
+      "name": "user without inbounds contributes nothing",
+      "config_version": 3,
+      "users": [
+        {
+          "user_id": "22222222-2222-2222-2222-222222222222",
+          "inbound_users": []
+        },
+        {
+          "user_id": "11111111-1111-1111-1111-111111111111",
+          "inbound_users": [
+            {
+              "inbound_tag": "in-vless",
+              "protocol": "vless",
+              "account_json": "{\"flow\":\"\",\"id\":\"new\"}"
+            }
+          ]
+        }
+      ],
+      "hash": "630fce9038ed29f0ee475622ca698d847ed362728ed0bbf7cc61abced919023d"
+    },
+    {
+      "name": "config version is bound (u64 big-endian)",
+      "config_version": 9223372036854775813,
+      "users": [
+        {
+          "user_id": "11111111-1111-1111-1111-111111111111",
+          "inbound_users": [
+            {
+              "inbound_tag": "in-vless",
+              "protocol": "vless",
+              "account_json": "{\"flow\":\"\",\"id\":\"new\"}"
+            }
+          ]
+        }
+      ],
+      "hash": "831f0c3269302cb115fec8453528bf37c614b77b4e43127b70731e2ce890cb61"
+    },
+    {
+      "name": "account json is hashed verbatim",
+      "config_version": 3,
+      "users": [
+        {
+          "user_id": "11111111-1111-1111-1111-111111111111",
+          "inbound_users": [
+            {
+              "inbound_tag": "in-vless",
+              "protocol": "vless",
+              "account_json": "{\"id\":\"new\",\"flow\":\"\"}"
+            }
+          ]
+        }
+      ],
+      "hash": "db2853fe8b60ae07ab171bb3d7082ba02abb03a2b066c247d5b61750770aa3ca"
+    }
+  ]
+}

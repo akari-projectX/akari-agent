@@ -15,8 +15,8 @@ func newSessionID() string {
 	return uuid.NewString()
 }
 
-func heartbeatLoop(ctx context.Context, send func(*pb.AgentUp) error) {
-	ticker := time.NewTicker(15 * time.Second)
+func heartbeatLoop(ctx context.Context, every time.Duration, send func(*pb.AgentUp) error, lease func() (time.Duration, bool)) {
+	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	var lastCPU float64
 	for {
@@ -34,14 +34,20 @@ func heartbeatLoop(ctx context.Context, send func(*pb.AgentUp) error) {
 			hb.MemUsedBytes = vm.Used
 			hb.MemTotalBytes = vm.Total
 		}
+		if left, armed := lease(); armed {
+			secs := uint64(left / time.Second)
+			hb.LeaseRemainingSeconds = &secs
+		}
 		if err := send(&pb.AgentUp{Msg: &pb.AgentUp_Heartbeat{Heartbeat: hb}}); err != nil {
 			return
 		}
 	}
 }
 
-func trafficLoop(ctx context.Context, cm *CoreManager, send func(*pb.AgentUp) error) {
-	ticker := time.NewTicker(10 * time.Second)
+// trafficLoop reports cumulative counters every interval; onTick runs after
+// each tick on which the stream was still usable.
+func trafficLoop(ctx context.Context, every time.Duration, cm *CoreManager, send func(*pb.AgentUp) error, onTick func()) {
+	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
 		select {
@@ -50,11 +56,14 @@ func trafficLoop(ctx context.Context, cm *CoreManager, send func(*pb.AgentUp) er
 		case <-ticker.C:
 		}
 		report := cm.TrafficSnapshot()
-		if report == nil || len(report.Users) == 0 {
-			continue
+		if report != nil && len(report.Users) > 0 {
+			if err := send(&pb.AgentUp{Msg: &pb.AgentUp_Traffic{Traffic: report}}); err != nil {
+				return
+			}
 		}
-		if err := send(&pb.AgentUp{Msg: &pb.AgentUp_Traffic{Traffic: report}}); err != nil {
+		if ctx.Err() != nil {
 			return
 		}
+		onTick()
 	}
 }

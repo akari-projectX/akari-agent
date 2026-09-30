@@ -27,6 +27,63 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type Ack_Reason int32
+
+const (
+	Ack_REASON_UNSPECIFIED Ack_Reason = 0 // protocol 0 agent: use `ok`
+	Ack_REASON_OK          Ack_Reason = 1
+	// The apply was attempted and failed (possibly partially). The panel
+	// falls back to a Snapshot under its failure backoff.
+	Ack_REASON_APPLY_FAILED Ack_Reason = 2
+	// A UserDelta whose base is not what the agent holds (or the agent's
+	// state is dirty after a failed delta). Nothing was changed; the panel
+	// sends a Snapshot at once (not a failure, no backoff).
+	Ack_REASON_BASE_MISMATCH Ack_Reason = 3
+)
+
+// Enum value maps for Ack_Reason.
+var (
+	Ack_Reason_name = map[int32]string{
+		0: "REASON_UNSPECIFIED",
+		1: "REASON_OK",
+		2: "REASON_APPLY_FAILED",
+		3: "REASON_BASE_MISMATCH",
+	}
+	Ack_Reason_value = map[string]int32{
+		"REASON_UNSPECIFIED":   0,
+		"REASON_OK":            1,
+		"REASON_APPLY_FAILED":  2,
+		"REASON_BASE_MISMATCH": 3,
+	}
+)
+
+func (x Ack_Reason) Enum() *Ack_Reason {
+	p := new(Ack_Reason)
+	*p = x
+	return p
+}
+
+func (x Ack_Reason) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Ack_Reason) Descriptor() protoreflect.EnumDescriptor {
+	return file_agent_proto_enumTypes[0].Descriptor()
+}
+
+func (Ack_Reason) Type() protoreflect.EnumType {
+	return &file_agent_proto_enumTypes[0]
+}
+
+func (x Ack_Reason) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Ack_Reason.Descriptor instead.
+func (Ack_Reason) EnumDescriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{5, 0}
+}
+
 type UserOp_Op int32
 
 const (
@@ -57,11 +114,11 @@ func (x UserOp_Op) String() string {
 }
 
 func (UserOp_Op) Descriptor() protoreflect.EnumDescriptor {
-	return file_agent_proto_enumTypes[0].Descriptor()
+	return file_agent_proto_enumTypes[1].Descriptor()
 }
 
 func (UserOp_Op) Type() protoreflect.EnumType {
-	return &file_agent_proto_enumTypes[0]
+	return &file_agent_proto_enumTypes[1]
 }
 
 func (x UserOp_Op) Number() protoreflect.EnumNumber {
@@ -142,13 +199,24 @@ func (x *AgentInfo) GetArch() string {
 }
 
 // First message on every stream, and re-sent whenever the agent rebuilds
-// its xray instance (traffic counters reset -> new session_id).
+// its xray instance (traffic counters reset -> new session_id) or tears it
+// down (lease expiry).
 type Hello struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`              // fresh whenever traffic counters reset
 	ConfigVersion uint64                 `protobuf:"varint,2,opt,name=config_version,json=configVersion,proto3" json:"config_version,omitempty"` // inbound config the agent currently holds
 	UserVersion   uint64                 `protobuf:"varint,3,opt,name=user_version,json=userVersion,proto3" json:"user_version,omitempty"`       // user set the agent currently holds
 	Info          *AgentInfo             `protobuf:"bytes,4,opt,name=info,proto3" json:"info,omitempty"`
+	// Control-protocol revision the agent speaks. Agents that predate the
+	// field send 0. The panel serves agents below its MIN_AGENT_PROTOCOL the
+	// EMPTY desired state (no inbounds, no users) and never trusts their
+	// Hello/Ack for convergence. Revisions:
+	//   1 = UserDelta base/target + REPLACE semantics, Ack.reason/held_*,
+	//       state_hash, LeaseGrant.
+	ProtocolVersion uint32 `protobuf:"varint,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	// State hash of what the agent actually runs (see "State hash" below),
+	// for config_version + the applied user set. Empty for protocol 0.
+	StateHash     string `protobuf:"bytes,6,opt,name=state_hash,json=stateHash,proto3" json:"state_hash,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -211,6 +279,20 @@ func (x *Hello) GetInfo() *AgentInfo {
 	return nil
 }
 
+func (x *Hello) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return 0
+}
+
+func (x *Hello) GetStateHash() string {
+	if x != nil {
+		return x.StateHash
+	}
+	return ""
+}
+
 type Heartbeat struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	CpuPercent    float64                `protobuf:"fixed64,1,opt,name=cpu_percent,json=cpuPercent,proto3" json:"cpu_percent,omitempty"`
@@ -218,8 +300,11 @@ type Heartbeat struct {
 	MemTotalBytes uint64                 `protobuf:"varint,3,opt,name=mem_total_bytes,json=memTotalBytes,proto3" json:"mem_total_bytes,omitempty"`
 	Connections   uint64                 `protobuf:"varint,4,opt,name=connections,proto3" json:"connections,omitempty"`
 	UptimeSeconds uint64                 `protobuf:"varint,5,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Seconds left on the fail-closed lease (see LeaseGrant); unset while no
+	// lease is armed (no grant received since the agent started).
+	LeaseRemainingSeconds *uint64 `protobuf:"varint,6,opt,name=lease_remaining_seconds,json=leaseRemainingSeconds,proto3,oneof" json:"lease_remaining_seconds,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -283,6 +368,13 @@ func (x *Heartbeat) GetConnections() uint64 {
 func (x *Heartbeat) GetUptimeSeconds() uint64 {
 	if x != nil {
 		return x.UptimeSeconds
+	}
+	return 0
+}
+
+func (x *Heartbeat) GetLeaseRemainingSeconds() uint64 {
+	if x != nil && x.LeaseRemainingSeconds != nil {
+		return *x.LeaseRemainingSeconds
 	}
 	return 0
 }
@@ -410,14 +502,21 @@ func (x *TrafficReport) GetSessionId() string {
 	return ""
 }
 
-// Result of applying a Snapshot/Delta. Versions are the ATTEMPTED ones; on
-// ok=false the agent keeps (and reports in Hello) its previous versions.
+// Result of applying a Snapshot/Delta. Versions are the ATTEMPTED ones
+// (the target); on ok=false the agent keeps (and reports in Hello) its
+// previous versions.
 type Ack struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ConfigVersion uint64                 `protobuf:"varint,1,opt,name=config_version,json=configVersion,proto3" json:"config_version,omitempty"`
 	UserVersion   uint64                 `protobuf:"varint,2,opt,name=user_version,json=userVersion,proto3" json:"user_version,omitempty"`
 	Ok            bool                   `protobuf:"varint,3,opt,name=ok,proto3" json:"ok,omitempty"`
 	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	Reason        Ack_Reason             `protobuf:"varint,5,opt,name=reason,proto3,enum=akari.v1.Ack_Reason" json:"reason,omitempty"` // protocol >= 1
+	// What the agent holds AFTER handling the message (protocol >= 1).
+	HeldConfigVersion uint64 `protobuf:"varint,6,opt,name=held_config_version,json=heldConfigVersion,proto3" json:"held_config_version,omitempty"`
+	HeldUserVersion   uint64 `protobuf:"varint,7,opt,name=held_user_version,json=heldUserVersion,proto3" json:"held_user_version,omitempty"`
+	// State hash of the held state (see Hello.state_hash).
+	StateHash     string `protobuf:"bytes,8,opt,name=state_hash,json=stateHash,proto3" json:"state_hash,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -476,6 +575,34 @@ func (x *Ack) GetOk() bool {
 func (x *Ack) GetError() string {
 	if x != nil {
 		return x.Error
+	}
+	return ""
+}
+
+func (x *Ack) GetReason() Ack_Reason {
+	if x != nil {
+		return x.Reason
+	}
+	return Ack_REASON_UNSPECIFIED
+}
+
+func (x *Ack) GetHeldConfigVersion() uint64 {
+	if x != nil {
+		return x.HeldConfigVersion
+	}
+	return 0
+}
+
+func (x *Ack) GetHeldUserVersion() uint64 {
+	if x != nil {
+		return x.HeldUserVersion
+	}
+	return 0
+}
+
+func (x *Ack) GetStateHash() string {
+	if x != nil {
+		return x.StateHash
 	}
 	return ""
 }
@@ -658,6 +785,12 @@ func (x *InboundUser) GetProtocol() string {
 	return ""
 }
 
+// ADD has REPLACE semantics (protocol >= 1): the user ends up on EXACTLY
+// the listed inbounds; tags not listed are removed, a changed account is
+// swapped (and that user's live connections on the changed/removed tags are
+// closed), an identical account is left untouched. REMOVE removes the user
+// from every inbound and closes their live connections. Both are
+// idempotent.
 type UserOp struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Op            UserOp_Op              `protobuf:"varint,1,opt,name=op,proto3,enum=akari.v1.UserOp_Op" json:"op,omitempty"`
@@ -789,12 +922,24 @@ func (x *ConfigSnapshot) GetUsers() []*UserOp {
 	return nil
 }
 
+// Incremental user-set change (protocol >= 1). Applies only on top of
+// base: the agent applies it iff it holds exactly (base_config_version,
+// base_user_version); if it already holds the target (config_version,
+// user_version) it acks ok without changing anything (idempotent resend);
+// otherwise it answers REASON_BASE_MISMATCH and keeps its state. A delta
+// never changes inbounds: config_version == base_config_version. On a
+// (partial) failure the agent keeps the base versions, marks its state
+// dirty (further deltas get BASE_MISMATCH until a Snapshot) and its
+// state_hash reflects what actually applied.
 type UserDelta struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	UserVersion   uint64                 `protobuf:"varint,1,opt,name=user_version,json=userVersion,proto3" json:"user_version,omitempty"` // version after applying all ops
-	Ops           []*UserOp              `protobuf:"bytes,2,rep,name=ops,proto3" json:"ops,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	UserVersion       uint64                 `protobuf:"varint,1,opt,name=user_version,json=userVersion,proto3" json:"user_version,omitempty"` // target user version, after applying all ops
+	Ops               []*UserOp              `protobuf:"bytes,2,rep,name=ops,proto3" json:"ops,omitempty"`
+	BaseConfigVersion uint64                 `protobuf:"varint,3,opt,name=base_config_version,json=baseConfigVersion,proto3" json:"base_config_version,omitempty"`
+	BaseUserVersion   uint64                 `protobuf:"varint,4,opt,name=base_user_version,json=baseUserVersion,proto3" json:"base_user_version,omitempty"`
+	ConfigVersion     uint64                 `protobuf:"varint,5,opt,name=config_version,json=configVersion,proto3" json:"config_version,omitempty"` // target config version == base_config_version
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *UserDelta) Reset() {
@@ -841,6 +986,78 @@ func (x *UserDelta) GetOps() []*UserOp {
 	return nil
 }
 
+func (x *UserDelta) GetBaseConfigVersion() uint64 {
+	if x != nil {
+		return x.BaseConfigVersion
+	}
+	return 0
+}
+
+func (x *UserDelta) GetBaseUserVersion() uint64 {
+	if x != nil {
+		return x.BaseUserVersion
+	}
+	return 0
+}
+
+func (x *UserDelta) GetConfigVersion() uint64 {
+	if x != nil {
+		return x.ConfigVersion
+	}
+	return 0
+}
+
+// Fail-closed lease (protocol >= 1). Sent only after the panel successfully
+// read this node's desired state from its database for this stream
+// (initial sync and every reconcile). The agent measures it on a clock that
+// keeps running during suspend (CLOCK_BOOTTIME), accepts grants only from
+// its current stream, treats 0 as the 24h default and clamps to >= 1h. On
+// expiry it tears xray down, resets its held versions to (0,0) (next Hello
+// forces a Snapshot) and keeps the final counters for the next stream.
+type LeaseGrant struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	DurationSeconds uint64                 `protobuf:"varint,1,opt,name=duration_seconds,json=durationSeconds,proto3" json:"duration_seconds,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *LeaseGrant) Reset() {
+	*x = LeaseGrant{}
+	mi := &file_agent_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LeaseGrant) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LeaseGrant) ProtoMessage() {}
+
+func (x *LeaseGrant) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LeaseGrant.ProtoReflect.Descriptor instead.
+func (*LeaseGrant) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *LeaseGrant) GetDurationSeconds() uint64 {
+	if x != nil {
+		return x.DurationSeconds
+	}
+	return 0
+}
+
 type Noop struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -849,7 +1066,7 @@ type Noop struct {
 
 func (x *Noop) Reset() {
 	*x = Noop{}
-	mi := &file_agent_proto_msgTypes[11]
+	mi := &file_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -861,7 +1078,7 @@ func (x *Noop) String() string {
 func (*Noop) ProtoMessage() {}
 
 func (x *Noop) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[11]
+	mi := &file_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -874,7 +1091,7 @@ func (x *Noop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Noop.ProtoReflect.Descriptor instead.
 func (*Noop) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{11}
+	return file_agent_proto_rawDescGZIP(), []int{12}
 }
 
 type PanelDown struct {
@@ -884,6 +1101,7 @@ type PanelDown struct {
 	//	*PanelDown_Snapshot
 	//	*PanelDown_Delta
 	//	*PanelDown_Noop
+	//	*PanelDown_Lease
 	Msg           isPanelDown_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -891,7 +1109,7 @@ type PanelDown struct {
 
 func (x *PanelDown) Reset() {
 	*x = PanelDown{}
-	mi := &file_agent_proto_msgTypes[12]
+	mi := &file_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -903,7 +1121,7 @@ func (x *PanelDown) String() string {
 func (*PanelDown) ProtoMessage() {}
 
 func (x *PanelDown) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[12]
+	mi := &file_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -916,7 +1134,7 @@ func (x *PanelDown) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PanelDown.ProtoReflect.Descriptor instead.
 func (*PanelDown) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{12}
+	return file_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *PanelDown) GetMsg() isPanelDown_Msg {
@@ -953,6 +1171,15 @@ func (x *PanelDown) GetNoop() *Noop {
 	return nil
 }
 
+func (x *PanelDown) GetLease() *LeaseGrant {
+	if x != nil {
+		if x, ok := x.Msg.(*PanelDown_Lease); ok {
+			return x.Lease
+		}
+	}
+	return nil
+}
+
 type isPanelDown_Msg interface {
 	isPanelDown_Msg()
 }
@@ -969,11 +1196,17 @@ type PanelDown_Noop struct {
 	Noop *Noop `protobuf:"bytes,3,opt,name=noop,proto3,oneof"`
 }
 
+type PanelDown_Lease struct {
+	Lease *LeaseGrant `protobuf:"bytes,4,opt,name=lease,proto3,oneof"`
+}
+
 func (*PanelDown_Snapshot) isPanelDown_Msg() {}
 
 func (*PanelDown_Delta) isPanelDown_Msg() {}
 
 func (*PanelDown_Noop) isPanelDown_Msg() {}
+
+func (*PanelDown_Lease) isPanelDown_Msg() {}
 
 var File_agent_proto protoreflect.FileDescriptor
 
@@ -984,20 +1217,25 @@ const file_agent_proto_rawDesc = "" +
 	"\ragent_version\x18\x01 \x01(\tR\fagentVersion\x12!\n" +
 	"\fcore_version\x18\x02 \x01(\tR\vcoreVersion\x12\x0e\n" +
 	"\x02os\x18\x03 \x01(\tR\x02os\x12\x12\n" +
-	"\x04arch\x18\x04 \x01(\tR\x04arch\"\x99\x01\n" +
+	"\x04arch\x18\x04 \x01(\tR\x04arch\"\xe3\x01\n" +
 	"\x05Hello\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12%\n" +
 	"\x0econfig_version\x18\x02 \x01(\x04R\rconfigVersion\x12!\n" +
 	"\fuser_version\x18\x03 \x01(\x04R\vuserVersion\x12'\n" +
-	"\x04info\x18\x04 \x01(\v2\x13.akari.v1.AgentInfoR\x04info\"\xc3\x01\n" +
+	"\x04info\x18\x04 \x01(\v2\x13.akari.v1.AgentInfoR\x04info\x12)\n" +
+	"\x10protocol_version\x18\x05 \x01(\rR\x0fprotocolVersion\x12\x1d\n" +
+	"\n" +
+	"state_hash\x18\x06 \x01(\tR\tstateHash\"\x9c\x02\n" +
 	"\tHeartbeat\x12\x1f\n" +
 	"\vcpu_percent\x18\x01 \x01(\x01R\n" +
 	"cpuPercent\x12$\n" +
 	"\x0emem_used_bytes\x18\x02 \x01(\x04R\fmemUsedBytes\x12&\n" +
 	"\x0fmem_total_bytes\x18\x03 \x01(\x04R\rmemTotalBytes\x12 \n" +
 	"\vconnections\x18\x04 \x01(\x04R\vconnections\x12%\n" +
-	"\x0euptime_seconds\x18\x05 \x01(\x04R\ruptimeSeconds\"`\n" +
+	"\x0euptime_seconds\x18\x05 \x01(\x04R\ruptimeSeconds\x12;\n" +
+	"\x17lease_remaining_seconds\x18\x06 \x01(\x04H\x00R\x15leaseRemainingSeconds\x88\x01\x01B\x1a\n" +
+	"\x18_lease_remaining_seconds\"`\n" +
 	"\vUserTraffic\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x19\n" +
 	"\bup_bytes\x18\x02 \x01(\x04R\aupBytes\x12\x1d\n" +
@@ -1007,12 +1245,22 @@ const file_agent_proto_rawDesc = "" +
 	"\x05users\x18\x01 \x03(\v2\x15.akari.v1.UserTrafficR\x05users\x12!\n" +
 	"\fmonotonic_ms\x18\x02 \x01(\x04R\vmonotonicMs\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x03 \x01(\tR\tsessionId\"u\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\"\x82\x03\n" +
 	"\x03Ack\x12%\n" +
 	"\x0econfig_version\x18\x01 \x01(\x04R\rconfigVersion\x12!\n" +
 	"\fuser_version\x18\x02 \x01(\x04R\vuserVersion\x12\x0e\n" +
 	"\x02ok\x18\x03 \x01(\bR\x02ok\x12\x14\n" +
-	"\x05error\x18\x04 \x01(\tR\x05error\"\xc6\x01\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\x12,\n" +
+	"\x06reason\x18\x05 \x01(\x0e2\x14.akari.v1.Ack.ReasonR\x06reason\x12.\n" +
+	"\x13held_config_version\x18\x06 \x01(\x04R\x11heldConfigVersion\x12*\n" +
+	"\x11held_user_version\x18\a \x01(\x04R\x0fheldUserVersion\x12\x1d\n" +
+	"\n" +
+	"state_hash\x18\b \x01(\tR\tstateHash\"b\n" +
+	"\x06Reason\x12\x16\n" +
+	"\x12REASON_UNSPECIFIED\x10\x00\x12\r\n" +
+	"\tREASON_OK\x10\x01\x12\x17\n" +
+	"\x13REASON_APPLY_FAILED\x10\x02\x12\x18\n" +
+	"\x14REASON_BASE_MISMATCH\x10\x03\"\xc6\x01\n" +
 	"\aAgentUp\x12'\n" +
 	"\x05hello\x18\x01 \x01(\v2\x0f.akari.v1.HelloH\x00R\x05hello\x123\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x13.akari.v1.HeartbeatH\x00R\theartbeat\x123\n" +
@@ -1036,15 +1284,22 @@ const file_agent_proto_rawDesc = "" +
 	"\x0econfig_version\x18\x01 \x01(\x04R\rconfigVersion\x12#\n" +
 	"\rinbounds_json\x18\x02 \x01(\tR\finboundsJson\x12!\n" +
 	"\fuser_version\x18\x03 \x01(\x04R\vuserVersion\x12&\n" +
-	"\x05users\x18\x04 \x03(\v2\x10.akari.v1.UserOpR\x05users\"R\n" +
+	"\x05users\x18\x04 \x03(\v2\x10.akari.v1.UserOpR\x05users\"\xd5\x01\n" +
 	"\tUserDelta\x12!\n" +
 	"\fuser_version\x18\x01 \x01(\x04R\vuserVersion\x12\"\n" +
-	"\x03ops\x18\x02 \x03(\v2\x10.akari.v1.UserOpR\x03ops\"\x06\n" +
-	"\x04Noop\"\x9d\x01\n" +
+	"\x03ops\x18\x02 \x03(\v2\x10.akari.v1.UserOpR\x03ops\x12.\n" +
+	"\x13base_config_version\x18\x03 \x01(\x04R\x11baseConfigVersion\x12*\n" +
+	"\x11base_user_version\x18\x04 \x01(\x04R\x0fbaseUserVersion\x12%\n" +
+	"\x0econfig_version\x18\x05 \x01(\x04R\rconfigVersion\"7\n" +
+	"\n" +
+	"LeaseGrant\x12)\n" +
+	"\x10duration_seconds\x18\x01 \x01(\x04R\x0fdurationSeconds\"\x06\n" +
+	"\x04Noop\"\xcb\x01\n" +
 	"\tPanelDown\x126\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x18.akari.v1.ConfigSnapshotH\x00R\bsnapshot\x12+\n" +
 	"\x05delta\x18\x02 \x01(\v2\x13.akari.v1.UserDeltaH\x00R\x05delta\x12$\n" +
-	"\x04noop\x18\x03 \x01(\v2\x0e.akari.v1.NoopH\x00R\x04noopB\x05\n" +
+	"\x04noop\x18\x03 \x01(\v2\x0e.akari.v1.NoopH\x00R\x04noop\x12,\n" +
+	"\x05lease\x18\x04 \x01(\v2\x14.akari.v1.LeaseGrantH\x00R\x05leaseB\x05\n" +
 	"\x03msg2I\n" +
 	"\fAgentChannel\x129\n" +
 	"\vOpenChannel\x12\x11.akari.v1.AgentUp\x1a\x13.akari.v1.PanelDown(\x010\x01B\x10Z\x0eakari/agent/pbb\x06proto3"
@@ -1061,45 +1316,49 @@ func file_agent_proto_rawDescGZIP() []byte {
 	return file_agent_proto_rawDescData
 }
 
-var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_agent_proto_goTypes = []any{
-	(UserOp_Op)(0),         // 0: akari.v1.UserOp.Op
-	(*AgentInfo)(nil),      // 1: akari.v1.AgentInfo
-	(*Hello)(nil),          // 2: akari.v1.Hello
-	(*Heartbeat)(nil),      // 3: akari.v1.Heartbeat
-	(*UserTraffic)(nil),    // 4: akari.v1.UserTraffic
-	(*TrafficReport)(nil),  // 5: akari.v1.TrafficReport
-	(*Ack)(nil),            // 6: akari.v1.Ack
-	(*AgentUp)(nil),        // 7: akari.v1.AgentUp
-	(*InboundUser)(nil),    // 8: akari.v1.InboundUser
-	(*UserOp)(nil),         // 9: akari.v1.UserOp
-	(*ConfigSnapshot)(nil), // 10: akari.v1.ConfigSnapshot
-	(*UserDelta)(nil),      // 11: akari.v1.UserDelta
-	(*Noop)(nil),           // 12: akari.v1.Noop
-	(*PanelDown)(nil),      // 13: akari.v1.PanelDown
+	(Ack_Reason)(0),        // 0: akari.v1.Ack.Reason
+	(UserOp_Op)(0),         // 1: akari.v1.UserOp.Op
+	(*AgentInfo)(nil),      // 2: akari.v1.AgentInfo
+	(*Hello)(nil),          // 3: akari.v1.Hello
+	(*Heartbeat)(nil),      // 4: akari.v1.Heartbeat
+	(*UserTraffic)(nil),    // 5: akari.v1.UserTraffic
+	(*TrafficReport)(nil),  // 6: akari.v1.TrafficReport
+	(*Ack)(nil),            // 7: akari.v1.Ack
+	(*AgentUp)(nil),        // 8: akari.v1.AgentUp
+	(*InboundUser)(nil),    // 9: akari.v1.InboundUser
+	(*UserOp)(nil),         // 10: akari.v1.UserOp
+	(*ConfigSnapshot)(nil), // 11: akari.v1.ConfigSnapshot
+	(*UserDelta)(nil),      // 12: akari.v1.UserDelta
+	(*LeaseGrant)(nil),     // 13: akari.v1.LeaseGrant
+	(*Noop)(nil),           // 14: akari.v1.Noop
+	(*PanelDown)(nil),      // 15: akari.v1.PanelDown
 }
 var file_agent_proto_depIdxs = []int32{
-	1,  // 0: akari.v1.Hello.info:type_name -> akari.v1.AgentInfo
-	4,  // 1: akari.v1.TrafficReport.users:type_name -> akari.v1.UserTraffic
-	2,  // 2: akari.v1.AgentUp.hello:type_name -> akari.v1.Hello
-	3,  // 3: akari.v1.AgentUp.heartbeat:type_name -> akari.v1.Heartbeat
-	5,  // 4: akari.v1.AgentUp.traffic:type_name -> akari.v1.TrafficReport
-	6,  // 5: akari.v1.AgentUp.ack:type_name -> akari.v1.Ack
-	0,  // 6: akari.v1.UserOp.op:type_name -> akari.v1.UserOp.Op
-	8,  // 7: akari.v1.UserOp.inbound_users:type_name -> akari.v1.InboundUser
-	9,  // 8: akari.v1.ConfigSnapshot.users:type_name -> akari.v1.UserOp
-	9,  // 9: akari.v1.UserDelta.ops:type_name -> akari.v1.UserOp
-	10, // 10: akari.v1.PanelDown.snapshot:type_name -> akari.v1.ConfigSnapshot
-	11, // 11: akari.v1.PanelDown.delta:type_name -> akari.v1.UserDelta
-	12, // 12: akari.v1.PanelDown.noop:type_name -> akari.v1.Noop
-	7,  // 13: akari.v1.AgentChannel.OpenChannel:input_type -> akari.v1.AgentUp
-	13, // 14: akari.v1.AgentChannel.OpenChannel:output_type -> akari.v1.PanelDown
-	14, // [14:15] is the sub-list for method output_type
-	13, // [13:14] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	2,  // 0: akari.v1.Hello.info:type_name -> akari.v1.AgentInfo
+	5,  // 1: akari.v1.TrafficReport.users:type_name -> akari.v1.UserTraffic
+	0,  // 2: akari.v1.Ack.reason:type_name -> akari.v1.Ack.Reason
+	3,  // 3: akari.v1.AgentUp.hello:type_name -> akari.v1.Hello
+	4,  // 4: akari.v1.AgentUp.heartbeat:type_name -> akari.v1.Heartbeat
+	6,  // 5: akari.v1.AgentUp.traffic:type_name -> akari.v1.TrafficReport
+	7,  // 6: akari.v1.AgentUp.ack:type_name -> akari.v1.Ack
+	1,  // 7: akari.v1.UserOp.op:type_name -> akari.v1.UserOp.Op
+	9,  // 8: akari.v1.UserOp.inbound_users:type_name -> akari.v1.InboundUser
+	10, // 9: akari.v1.ConfigSnapshot.users:type_name -> akari.v1.UserOp
+	10, // 10: akari.v1.UserDelta.ops:type_name -> akari.v1.UserOp
+	11, // 11: akari.v1.PanelDown.snapshot:type_name -> akari.v1.ConfigSnapshot
+	12, // 12: akari.v1.PanelDown.delta:type_name -> akari.v1.UserDelta
+	14, // 13: akari.v1.PanelDown.noop:type_name -> akari.v1.Noop
+	13, // 14: akari.v1.PanelDown.lease:type_name -> akari.v1.LeaseGrant
+	8,  // 15: akari.v1.AgentChannel.OpenChannel:input_type -> akari.v1.AgentUp
+	15, // 16: akari.v1.AgentChannel.OpenChannel:output_type -> akari.v1.PanelDown
+	16, // [16:17] is the sub-list for method output_type
+	15, // [15:16] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_agent_proto_init() }
@@ -1107,24 +1366,26 @@ func file_agent_proto_init() {
 	if File_agent_proto != nil {
 		return
 	}
+	file_agent_proto_msgTypes[2].OneofWrappers = []any{}
 	file_agent_proto_msgTypes[6].OneofWrappers = []any{
 		(*AgentUp_Hello)(nil),
 		(*AgentUp_Heartbeat)(nil),
 		(*AgentUp_Traffic)(nil),
 		(*AgentUp_Ack)(nil),
 	}
-	file_agent_proto_msgTypes[12].OneofWrappers = []any{
+	file_agent_proto_msgTypes[13].OneofWrappers = []any{
 		(*PanelDown_Snapshot)(nil),
 		(*PanelDown_Delta)(nil),
 		(*PanelDown_Noop)(nil),
+		(*PanelDown_Lease)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_proto_rawDesc), len(file_agent_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   13,
+			NumEnums:      2,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
