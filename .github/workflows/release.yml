@@ -1,0 +1,74 @@
+name: release
+
+# Tag `vX.Y.Z` (commit must be on main): static linux amd64/arm64 binaries
+# with version + commit stamped, CycloneDX SBOM, SHA256SUMS, cosign keyless
+# signatures (GitHub OIDC), GitHub Release. Verification recipe:
+# akari-panel docs/DEPLOY.md ("Verify a release").
+#
+# Third-party actions are pinned to commit SHAs (comment = tag).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write # create the release
+      id-token: write # cosign keyless
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: tag commit is on main
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::tag commit is not on main"; exit 1; }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Same gate as CI, on the exact commit that is released.
+      - run: make fmt-check vet test
+      - name: build
+        run: |
+          make dist VERSION="$GITHUB_REF_NAME" COMMIT="$(git rev-parse --short=12 "$GITHUB_SHA")"
+          dist/akari-agent-linux-amd64 -version
+          [ "$(dist/akari-agent-linux-amd64 -version | cut -d' ' -f2)" = "$GITHUB_REF_NAME" ]
+      - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: dist/akari-agent-${{ github.ref_name }}.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - name: checksums and signatures
+        working-directory: dist
+        run: |
+          sha256sum akari-agent-linux-amd64 akari-agent-linux-arm64 "akari-agent-${GITHUB_REF_NAME}.cdx.json" > SHA256SUMS
+          # Keyless: the certificate binds each signature to this workflow
+          # run (identity = this workflow at this tag, issuer = GitHub OIDC).
+          for f in akari-agent-linux-amd64 akari-agent-linux-arm64 "akari-agent-${GITHUB_REF_NAME}.cdx.json" SHA256SUMS; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+          done
+          ls -l
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes $prerelease \
+            --title "$GITHUB_REF_NAME"

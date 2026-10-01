@@ -24,13 +24,19 @@ Go 1.27 单包（`package main`，模块名 `akari/agent`），内嵌 xray-core 
 ## 命令
 
 ```bash
-make build        # → ./agent（gitignored）
+make build        # → ./agent（gitignored）；静态、-trimpath、版本=git describe、提交=短 sha（-ldflags 注入）
+./agent -version  # akari-agent <version> (<sha>) <go> <os/arch>
+make dist         # dist/akari-agent-linux-{amd64,arm64} + SHA256SUMS（发布同款构建，CI `reproducible` 校验字节一致）
 make vet fmt-check
 make test         # test-canary + go test -race ./...
 make test-canary  # rt_canary_test.go（build tag canary，不带 -race：xray 的 Vision 客户端在 -race 下触发 checkptr）
 make sync-proto   # 从 ../akari-panel 拷贝契约并 buf generate
 make check-proto  # 契约漂移校验
 ```
+
+## 发布
+
+tag `v*` 触发 `.github/workflows/release.yml`：fmt-check/vet/test → `make dist` → CycloneDX SBOM → SHA256SUMS → cosign 无密钥签名（GitHub OIDC，`*.sigstore.json`）→ GitHub Release。第三方 action 固定 commit SHA。验证方法见 `akari-panel/docs/DEPLOY.md`。systemd 单元在 `akari-panel/deploy/systemd/akari-agent.service`。
 
 ## 须知
 

@@ -3,18 +3,35 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 )
 
-// Set via -ldflags "-X main.agentVersion=v1.0.0" at build time.
-var agentVersion = "dev"
+// Set at build time (see the Makefile): -ldflags "-X main.agentVersion=v1.0.0
+// -X main.gitSHA=abc123def456".
+var (
+	agentVersion = "dev"
+	gitSHA       = "unknown"
+)
+
+// versionString is what `agent -version` prints.
+func versionString() string {
+	return fmt.Sprintf("akari-agent %s (%s) %s %s/%s",
+		agentVersion, gitSHA, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+}
 
 func main() {
 	configPath := flag.String("config", "agent.toml", "path to agent bootstrap config")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(versionString())
+		return
+	}
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -33,6 +50,7 @@ func main() {
 
 	slog.Info("agent starting",
 		"agent_version", agentVersion,
+		"git_sha", gitSHA,
 		"panel", cfg.PanelAddr)
 
 	if err := a.Run(ctx); err != nil {

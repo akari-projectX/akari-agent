@@ -29,12 +29,16 @@ Responsibilities:
 ## Build
 
 ```bash
-make build            # go build (requires protobuf plugins on PATH for proto/)
+make build            # static go build, version + git sha stamped (`./agent -version`)
+make dist             # linux amd64/arm64 release binaries + SHA256SUMS in dist/
 make proto            # regenerate pb/ from proto/agent.proto
 make sync-proto       # pull the contract from the sibling akari-panel checkout
 make check-proto      # fail if the vendored contract drifted from akari-panel
 make vet fmt-check
 ```
+
+Releases (tag `v*`) are built, SBOM'd and cosign-signed by `.github/workflows/release.yml`;
+install as a hardened systemd service with `akari-panel/deploy/systemd/akari-agent.service`.
 
 Sibling checkout convention: akari-panel and akari-agent live side by side
 (`../akari-panel` / `../akari-agent`), same as the panel's smoke test expects.
