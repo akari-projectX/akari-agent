@@ -38,6 +38,8 @@ jobs:
           go-version-file: go.mod
       # Same gate as CI, on the exact commit that is released.
       - run: make fmt-check vet test
+      # A reachable vulnerability blocks the release (allow-list in the Makefile).
+      - run: make vulncheck
       - name: build
         run: |
           make dist VERSION="$GITHUB_REF_NAME" COMMIT="$(git rev-parse --short=12 "$GITHUB_SHA")"
