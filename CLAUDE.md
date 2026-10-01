@@ -11,7 +11,7 @@ Go 1.27 单包（`package main`，模块名 `akari/agent`），内嵌 xray-core 
 | `config.go` | 解析 bootstrap.toml（未知键报错）：v2 = panel_addr / server_name / enrollment_token / identity.ca_pem；v1 = 再加 identity.cert_pem + key_pem（仍支持） |
 | `identity.go` | 身份存储（`-state-dir`，默认 `$STATE_DIRECTORY` 或配置文件目录，目录 0700）：`identity.pem`（当前：私钥+证书）、`identity.next.pem`（续期得到、面板尚未接受）、`enroll.key.pem`（注册前先落盘的密钥）、`enrolled.token.sha256`；全部 0600 原子写（临时文件+fsync+rename+fsync 目录）。ECDSA P-256、CSR 无任何扩展；存证书前校验 CA 链、ClientAuth、与私钥匹配。state 中的身份优先于配置里的 v1 密钥 |
 | `enroll.go` | 注册（`ensureEnrolled`：无身份或配置里是未用过的新 token 时注册；PERMISSION_DENIED/INVALID_ARGUMENT 为永久错误（无身份时退出），其余退避重试）与续期（`renewLoop`：剩余 < 1/3 有效期时在当前 mTLS 连接上 `Renew`，存 next，取消当前流以用新证书重连；新证书在其流上收到第一条面板消息才提升；被拒（UNAUTHENTICATED/TLS 告警）则丢弃并退避，其它失败则下一次改用当前证书交替；当前证书上的流持续 `nextRetryAfter` 后重试 next；续期失败 10s 起翻倍至 10min，Unimplemented（旧面板）1h） |
-| `agent.go` | 会话生命周期：指数退避重连（1s→30s，稳定 >1min 重置）、Hello、单写者 goroutine、处理 Snapshot/Delta/LeaseGrant、Ack、最终计数队列 `finalQueue`、租约检查 |
+| `agent.go` | 会话生命周期：指数退避重连（1s→30s，稳定 >1min 重置，计时在睡眠前；`nextBackoff`）、Hello、单写者 goroutine、处理 Snapshot/Delta/LeaseGrant、Ack、最终计数队列 `finalQueue`、租约检查 |
 | `core.go` | `CoreManager`：xray 实例构建（`DecodeJSONConfig→Build`，把 dispatcher app 换成 gate →`core.New`）、REPLACE 语义的用户操作、`applied`（实际生效的凭据，喂 state hash）、按 `user>>>{id}>>>traffic>>>*` 读计数（会话内单调保护） |
 | `gate.go` | `gateDispatcher`：替换 xray 的 DefaultDispatcher（内部包一个）。每次分发要求 (inbound tag, email) 当前安装的 `*MemoryUser` 指针；撤销/轮换时取消并中断该 key 的所有活连接 |
 | `statehash.go` | state hash（定义见 proto，向量 `proto/state_hash_vectors.json`） |
@@ -62,7 +62,7 @@ tag `v*` 触发 `.github/workflows/release.yml`：fmt-check/vet/test → `make d
 - **无用户的 inbound**（dokodemo/socks/http 不带 clients）：分发上下文没有 user，gate 直接放行、不计费、不能撤权。面板只给 vless/vmess/trojan 发凭据；这类 inbound 若由管理员配置，等同于开放代理，自负其责。面板拒绝 fakedns（gate 内部的 DefaultDispatcher 没有接 FakeDNS 引擎）；agent 在 xray 自己解析（`jsonConfig.Build()`）之后由 `refuseFakeDNS` 再查一次 `SniffingSettings.DestinationOverride`，含 fakedns → Rebuild 失败（APPLY_FAILED），这是权威检查，面板的 JSON 检查只是提前报错。
 - **remove mode（R10 回退开关）**：`LeaseGrant.remove_mode` = REBUILD 时，会删除/轮换活凭据的 delta 一律 `BASE_MISMATCH`（不做任何改动），由面板改发 Snapshot（整体重建）；纯新增仍走 delta。只接受当前流 grant 设置。
 - **xray 计数器**：v26.3.27 中 RemoveUser/AddUser 不会注销或重置 `user>>>…` 计数器（没有任何调用 `UnregisterCounter`），同实例内重新添加后累计值连续；`readCounter` 另有单调保护（计数下降则累加偏移）。被移除用户的计数在本 session 内继续上报（尾部流量不丢）。
-- session id 归 `CoreManager` 所有，只在 `Rebuild`/`Teardown` 内持锁更换；`TrafficSnapshot` 在同一把锁下返回 (session, 计数)，每个 `TrafficReport` 都带 `session_id`（面板按它记账）。最终计数进 `finalQueue`：每条新流 Hello 后重发，直到某条流发出后又存活一个流量周期（面板记账幂等，重发安全）。
+- session id 归 `CoreManager` 所有，只在 `Rebuild`/`Teardown` 内持锁更换；`TrafficSnapshot` 在同一把锁下返回 (session, 计数)，每个 `TrafficReport` 都带 `session_id`（面板按它记账）。最终计数进 `finalQueue`：每条新流 Hello 后重发，直到某条流发出后又存活 `finalsConfirmAfter`（60s，> keepalive 判死 30s+10s：写入死 socket 也"成功"）（面板记账幂等，重发安全）。**优雅停机（A29）**：SIGTERM → 会话 goroutine 在**仍存活的流**上 `gracefulStop`（Teardown → 最终计数入队并发送 → 有界 flush `shutdownFlush`=5s，期间不再应用面板消息）→ `Run` 返回前 `stopped()` 把未确认队列持久化到 state dir 的 `finals.json`（`finalsStore`，与自更新器无关；自更新重启同用）；下个进程启动时载入并先于其他消息重发，队列排空后删文件。
 - **F3**：`session()` 返回前 join 所有子 goroutine（读协程可能正在 Rebuild）→ 任意时刻至多一个 handleDown；`handleDown` 持 `applyMu`，先查流 ctx，流已死则不 Rebuild、不改版本、不发送（Rebuild 期间流死 → 置 dirty）。
 - **租约**：首次收到 `LeaseGrant` 才武装（旧面板永不武装）；只接受当前流的 grant；到期（`checkLease`，5s 一次）拆 xray、最终计数入队、持有版本归 (0,0)；若流仍在（面板活着但 DB 挂了）立即发 Hello (0,0)。
 - state hash v2 绑定 inbounds：`CoreManager.inboundsJSON` = 当前实例 Snapshot 的 inbounds_json 原文（无实例时为 ""）。
