@@ -28,6 +28,9 @@ import (
 	confserial "github.com/xtls/xray-core/infra/conf/serial"
 	"github.com/xtls/xray-core/proxy"
 	_ "github.com/xtls/xray-core/proxy/freedom"
+	_ "github.com/xtls/xray-core/proxy/hysteria"
+	_ "github.com/xtls/xray-core/proxy/shadowsocks_2022"
+	_ "github.com/xtls/xray-core/proxy/trojan"
 	_ "github.com/xtls/xray-core/proxy/vless/inbound"
 	_ "github.com/xtls/xray-core/proxy/vmess/inbound"
 	_ "github.com/xtls/xray-core/transport/internet"
@@ -35,11 +38,6 @@ import (
 	_ "github.com/xtls/xray-core/transport/internet/tcp"
 	_ "github.com/xtls/xray-core/transport/internet/tls"
 	_ "github.com/xtls/xray-core/transport/internet/websocket"
-
-	"github.com/xtls/xray-core/proxy/trojan"
-	"github.com/xtls/xray-core/proxy/vless"
-	"github.com/xtls/xray-core/proxy/vmess"
-	"google.golang.org/protobuf/proto"
 
 	"akari/agent/pb"
 )
@@ -92,6 +90,8 @@ type CoreManager struct {
 	// heartbeat never waits for a Rebuild holding mu.
 	liveGate atomic.Pointer[gateDispatcher]
 	tags     []string
+	// kinds: what each running inbound is (protocols.go).
+	kinds map[string]inboundKind
 	// inboundsJSON is the running instance's Snapshot.inbounds_json
 	// verbatim ("" when none runs); bound into the state hash.
 	inboundsJSON string
@@ -169,6 +169,7 @@ func (m *CoreManager) stopLocked() *pb.TrafficReport {
 		m.gate = nil
 		m.liveGate.Store(nil)
 		m.tags = nil
+		m.kinds = nil
 	}
 	m.inboundsJSON = ""
 	m.sessionID = newSessionID()
@@ -195,18 +196,19 @@ func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) (*pb.Traf
 
 	final := m.stopLocked()
 
-	inst, gate, tags, err := newInstance(inboundsJSON)
+	b, err := newInstance(inboundsJSON)
 	if err != nil {
 		return final, err
 	}
 
-	m.instance = inst
-	m.gate = gate
-	m.liveGate.Store(gate)
-	m.tags = tags
+	m.instance = b.inst
+	m.gate = b.gate
+	m.liveGate.Store(b.gate)
+	m.tags = b.tags
+	m.kinds = b.kinds
 	m.inboundsJSON = inboundsJSON
 	if m.onStart != nil {
-		m.onStart(inst)
+		m.onStart(b.inst)
 	}
 
 	var firstErr error
@@ -236,6 +238,33 @@ func (m *CoreManager) WouldDropCredential(ops []*pb.UserOp) bool {
 			want[iu.GetInboundTag()] = iu
 		}
 		for tag, c := range cur {
+			w, ok := want[tag]
+			if !ok || w.GetProtocol() != c.protocol || w.GetAccountJson() != c.account {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// WouldShrinkUnsafe reports whether ops would remove or change a live
+// credential on an inbound users must not leave while it runs
+// (shrinkUnsafe: Shadowsocks 2022 multi-user). Such deltas are refused
+// whatever the remove mode; the Snapshot that follows rebuilds.
+func (m *CoreManager) WouldShrinkUnsafe(ops []*pb.UserOp) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, op := range ops {
+		want := map[string]*pb.InboundUser{}
+		if op.GetOp() == pb.UserOp_ADD {
+			for _, iu := range op.GetInboundUsers() {
+				want[iu.GetInboundTag()] = iu
+			}
+		}
+		for tag, c := range m.applied[op.GetUserId()] {
+			if !shrinkUnsafe(m.kinds[tag]) {
+				continue
+			}
 			w, ok := want[tag]
 			if !ok || w.GetProtocol() != c.protocol || w.GetAccountJson() != c.account {
 				return true
@@ -352,7 +381,7 @@ func (m *CoreManager) store(tag string) (userManager, error) {
 }
 
 func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, cur map[string]appliedCred) error {
-	user, err := buildUser(iu.GetProtocol(), iu.GetAccountJson(), uid)
+	user, err := buildUser(iu.GetProtocol(), iu.GetAccountJson(), uid, m.kinds[tag])
 	if err != nil {
 		return fmt.Errorf("inbound %q: %w", tag, err)
 	}
@@ -383,43 +412,6 @@ func (m *CoreManager) manager() (inbound.Manager, error) {
 		return nil, fmt.Errorf("xray core has no inbound manager")
 	}
 	return im, nil
-}
-
-// buildUser constructs an xray user whose "email" field carries the panel
-// user id — the stats counter namespace (user>>>{email}>>>traffic>>>*) is
-// keyed on it, which keeps the panel <-> core identity mapping trivial.
-func buildUser(protocolName, accountJSON, userID string) (*protocol.User, error) {
-	var account proto.Message
-	switch protocolName {
-	case "vless":
-		a := &vless.Account{}
-		if err := json.Unmarshal([]byte(accountJSON), a); err != nil {
-			return nil, fmt.Errorf("vless account: %w", err)
-		}
-		account = a
-	case "vmess":
-		a := &vmess.Account{}
-		if err := json.Unmarshal([]byte(accountJSON), a); err != nil {
-			return nil, fmt.Errorf("vmess account: %w", err)
-		}
-		account = a
-	case "trojan":
-		a := &trojan.Account{}
-		if err := json.Unmarshal([]byte(accountJSON), a); err != nil {
-			return nil, fmt.Errorf("trojan account: %w", err)
-		}
-		account = a
-	default:
-		return nil, fmt.Errorf("unsupported protocol %q", protocolName)
-	}
-	if account == nil {
-		return nil, fmt.Errorf("empty account for protocol %q", protocolName)
-	}
-	return &protocol.User{
-		Level:   0,
-		Email:   userID,
-		Account: commonserial.ToTypedMessage(account),
-	}, nil
 }
 
 // StateHash hashes what is actually installed, bound to configVersion (see
@@ -536,36 +528,18 @@ func refuseFakeDNS(cfg *core.Config) error {
 	return nil
 }
 
-// refuseGRPCTransport refuses inbounds whose transport is gRPC (JSON
-// streamSettings.network "grpc"; xray's parse normalizes the spelling):
-// grpc-go < 1.85 panics on a request without :authority (GO-2026-6443),
-// which would take the whole agent down. Checked on what xray parsed, like
-// refuseFakeDNS; the panel's 400 is only a courtesy. Lift once the
-// embedded grpc-go is >= 1.85.0.
-func refuseGRPCTransport(cfg *core.Config) error {
-	for _, in := range cfg.Inbound {
-		if in.ReceiverSettings == nil {
-			continue
-		}
-		msg, err := in.ReceiverSettings.GetInstance()
-		if err != nil {
-			return fmt.Errorf("inbound %q: receiver settings: %w", in.Tag, err)
-		}
-		rc, ok := msg.(*proxyman.ReceiverConfig)
-		if !ok {
-			continue
-		}
-		if strings.EqualFold(rc.GetStreamSettings().GetProtocolName(), "grpc") {
-			return fmt.Errorf("inbound %q: the grpc transport is not supported by this agent (GO-2026-6443)", in.Tag)
-		}
-	}
-	return nil
+// built is a started instance and what newInstance learned about it.
+type built struct {
+	inst  *core.Instance
+	gate  *gateDispatcher
+	tags  []string
+	kinds map[string]inboundKind
 }
 
-func newInstance(inboundsJSON string) (*core.Instance, *gateDispatcher, []string, error) {
+func newInstance(inboundsJSON string) (*built, error) {
 	var inbounds []json.RawMessage
 	if err := json.Unmarshal([]byte(inboundsJSON), &inbounds); err != nil {
-		return nil, nil, nil, fmt.Errorf("parse inbounds: %w", err)
+		return nil, fmt.Errorf("parse inbounds: %w", err)
 	}
 	if len(inbounds) == 0 {
 		inbounds = []json.RawMessage{}
@@ -578,6 +552,12 @@ func newInstance(inboundsJSON string) (*core.Instance, *gateDispatcher, []string
 			map[string]any{"protocol": "freedom"},
 		},
 		// Per-user traffic counters live behind these policy switches.
+		// No per-inbound counters (W8): nothing reads them, and with them
+		// on proxyman wraps every accepted connection in a
+		// stat.CounterConnection, which hides the transport's identity
+		// from the proxy — xray's Hysteria inbound finds its user with
+		// conn.(interface{ User() }) and, wrapped, ran every client as an
+		// anonymous user: unbilled and invisible to the gate.
 		"policy": map[string]any{
 			"levels": map[string]any{
 				"0": map[string]any{
@@ -585,31 +565,31 @@ func newInstance(inboundsJSON string) (*core.Instance, *gateDispatcher, []string
 					"statsUserDownlink": true,
 				},
 			},
-			"system": map[string]any{
-				"statsInboundUplink":   true,
-				"statsInboundDownlink": true,
-			},
 		},
 		"stats": map[string]any{},
 	}
 	b, err := json.Marshal(full)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 
 	jsonConfig, err := confserial.DecodeJSONConfig(bytes.NewReader(b))
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("decode xray config: %w", err)
+		return nil, fmt.Errorf("decode xray config: %w", err)
 	}
 	pbConfig, err := jsonConfig.Build()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("build xray config: %w", err)
+		return nil, fmt.Errorf("build xray config: %w", err)
 	}
 	if err := refuseFakeDNS(pbConfig); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	if err := refuseGRPCTransport(pbConfig); err != nil {
-		return nil, nil, nil, err
+	if err := multiUserShadowsocks(inbounds, pbConfig); err != nil {
+		return nil, err
+	}
+	kinds, err := inboundKinds(pbConfig)
+	if err != nil {
+		return nil, err
 	}
 	// Swap xray's dispatcher for the gate (same slot in the app list, so
 	// every inbound resolves the gate when it is created).
@@ -622,20 +602,20 @@ func newInstance(inboundsJSON string) (*core.Instance, *gateDispatcher, []string
 		}
 	}
 	if !swapped {
-		return nil, nil, nil, fmt.Errorf("xray config has no dispatcher to replace")
+		return nil, fmt.Errorf("xray config has no dispatcher to replace")
 	}
 	inst, err := core.New(pbConfig)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("build xray instance: %w", err)
+		return nil, fmt.Errorf("build xray instance: %w", err)
 	}
 	gate, ok := inst.GetFeature(routing.DispatcherType()).(*gateDispatcher)
 	if !ok {
 		_ = inst.Close()
-		return nil, nil, nil, fmt.Errorf("gate dispatcher not installed")
+		return nil, fmt.Errorf("gate dispatcher not installed")
 	}
 	if err := inst.Start(); err != nil {
 		_ = inst.Close()
-		return nil, nil, nil, fmt.Errorf("start xray instance: %w", err)
+		return nil, fmt.Errorf("start xray instance: %w", err)
 	}
 
 	tags := make([]string, 0, len(inbounds))
@@ -647,5 +627,5 @@ func newInstance(inboundsJSON string) (*core.Instance, *gateDispatcher, []string
 			tags = append(tags, probe.Tag)
 		}
 	}
-	return inst, gate, tags, nil
+	return &built{inst: inst, gate: gate, tags: tags, kinds: kinds}, nil
 }

@@ -8,19 +8,12 @@ package main
 
 import (
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
 	"strings"
 	"testing"
@@ -35,24 +28,6 @@ import (
 
 	"akari/agent/pb"
 )
-
-func selfSigned(t *testing.T) (certPEM, keyPEM string, c tls.Certificate) {
-	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	tpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "rt.test"}, DNSNames: []string{"rt.test"},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
-	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &k.PublicKey, k)
-	if err != nil {
-		t.Fatal(err)
-	}
-	kb, _ := x509.MarshalECPrivateKey(k)
-	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
-	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kb}))
-	c, err = tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return
-}
 
 func tlsEcho(t *testing.T, c tls.Certificate) int {
 	l, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{c}, MinVersion: tls.VersionTLS13})
