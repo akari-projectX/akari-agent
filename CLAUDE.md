@@ -21,6 +21,7 @@ Go 1.27 单包（`package main`，模块名 `akari/agent`），内嵌 xray-core 
 | `proto/state_hash_vectors.json` | 面板正本的副本（共享测试向量） |
 | `proto/gate.proto` | agent 内部（非契约、不同步）：gate 的 xray app 配置消息类型 |
 | `rt_canary_test.go` | red team 撤权金丝雀（Vision/splice over TLS、trojan），`make test-canary` |
+| `bench_test.go` | M2-6 开销基准（每节点 10k 用户 × 2 inbound）：Rebuild、实例堆、单用户 delta、流量快照、state hash、gate admit/release、心跳连接数；`make bench`，结果记录在 `akari-panel/docs/PERF.md` |
 | `pb/` | buf 生成物（已提交，`buf generate proto`） |
 
 ## 命令
@@ -34,6 +35,7 @@ make test         # test-canary + go test -race ./...
 make test-canary  # rt_canary_test.go（build tag canary，不带 -race：xray 的 Vision 客户端在 -race 下触发 checkptr）
 make sync-proto   # 从 ../akari-panel 拷贝契约并 buf generate
 make check-proto  # 契约漂移校验
+make bench        # 开销基准（bench_test.go；-run '^$' 只跑基准）
 ```
 
 ## 发布

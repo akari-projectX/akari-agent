@@ -1,4 +1,4 @@
-.PHONY: build dist proto sync-proto check-proto check-pb vet fmt-check test test-canary vulncheck ci
+.PHONY: bench build dist proto sync-proto check-proto check-pb vet fmt-check test test-canary vulncheck ci
 
 # Canonical contract lives in akari-panel/proto/agent.proto. This repo vendors
 # a copy: `make sync-proto` pulls the sibling checkout's version and
@@ -71,3 +71,8 @@ test: test-canary
 # Bump xray-core only when these are green.
 test-canary:
 	go test -tags canary -count=1 -run 'TestRT_' .
+
+# M2-6 overhead benchmarks at 10k users per node (bench_test.go; results in
+# akari-panel/docs/PERF.md).
+bench:
+	go test -run '^$$' -bench . -benchmem ./...
