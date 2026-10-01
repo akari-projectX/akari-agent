@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/xtls/xray-core/app/dispatcher"
 	_ "github.com/xtls/xray-core/app/dns"
@@ -87,6 +88,9 @@ type CoreManager struct {
 	mu       sync.Mutex
 	instance *core.Instance
 	gate     *gateDispatcher
+	// liveGate mirrors gate for lock-free readers (heartbeat), so a
+	// heartbeat never waits for a Rebuild holding mu.
+	liveGate atomic.Pointer[gateDispatcher]
 	tags     []string
 	// inboundsJSON is the running instance's Snapshot.inbounds_json
 	// verbatim ("" when none runs); bound into the state hash.
@@ -134,6 +138,16 @@ func (m *CoreManager) UserCount() int {
 	return len(m.applied)
 }
 
+// Connections returns how many proxied dispatches the gate tracks right
+// now (0 when no instance runs). Heartbeat.connections.
+func (m *CoreManager) Connections() uint64 {
+	g := m.liveGate.Load()
+	if g == nil {
+		return 0
+	}
+	return uint64(g.LiveTotal())
+}
+
 // Running reports whether an xray instance is up.
 func (m *CoreManager) Running() bool {
 	m.mu.Lock()
@@ -153,6 +167,7 @@ func (m *CoreManager) stopLocked() *pb.TrafficReport {
 		_ = m.instance.Close()
 		m.instance = nil
 		m.gate = nil
+		m.liveGate.Store(nil)
 		m.tags = nil
 	}
 	m.inboundsJSON = ""
@@ -187,6 +202,7 @@ func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) (*pb.Traf
 
 	m.instance = inst
 	m.gate = gate
+	m.liveGate.Store(gate)
 	m.tags = tags
 	m.inboundsJSON = inboundsJSON
 	if m.onStart != nil {
@@ -512,6 +528,32 @@ func refuseFakeDNS(cfg *core.Config) error {
 	return nil
 }
 
+// refuseGRPCTransport refuses inbounds whose transport is gRPC (JSON
+// streamSettings.network "grpc"; xray's parse normalizes the spelling):
+// grpc-go < 1.85 panics on a request without :authority (GO-2026-6443),
+// which would take the whole agent down. Checked on what xray parsed, like
+// refuseFakeDNS; the panel's 400 is only a courtesy. Lift once the
+// embedded grpc-go is >= 1.85.0.
+func refuseGRPCTransport(cfg *core.Config) error {
+	for _, in := range cfg.Inbound {
+		if in.ReceiverSettings == nil {
+			continue
+		}
+		msg, err := in.ReceiverSettings.GetInstance()
+		if err != nil {
+			return fmt.Errorf("inbound %q: receiver settings: %w", in.Tag, err)
+		}
+		rc, ok := msg.(*proxyman.ReceiverConfig)
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(rc.GetStreamSettings().GetProtocolName(), "grpc") {
+			return fmt.Errorf("inbound %q: the grpc transport is not supported by this agent (GO-2026-6443)", in.Tag)
+		}
+	}
+	return nil
+}
+
 func newInstance(inboundsJSON string) (*core.Instance, *gateDispatcher, []string, error) {
 	var inbounds []json.RawMessage
 	if err := json.Unmarshal([]byte(inboundsJSON), &inbounds); err != nil {
@@ -556,6 +598,9 @@ func newInstance(inboundsJSON string) (*core.Instance, *gateDispatcher, []string
 		return nil, nil, nil, fmt.Errorf("build xray config: %w", err)
 	}
 	if err := refuseFakeDNS(pbConfig); err != nil {
+		return nil, nil, nil, err
+	}
+	if err := refuseGRPCTransport(pbConfig); err != nil {
 		return nil, nil, nil, err
 	}
 	// Swap xray's dispatcher for the gate (same slot in the app list, so

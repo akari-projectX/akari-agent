@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 )
 
@@ -26,6 +28,8 @@ func versionString() string {
 
 func main() {
 	configPath := flag.String("config", "agent.toml", "path to agent bootstrap config")
+	stateDir := flag.String("state-dir", "", "directory for the agent's key and certificates "+
+		"(default: $STATE_DIRECTORY when run by systemd, else the config file's directory)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -43,19 +47,39 @@ func main() {
 		os.Exit(1)
 	}
 
+	dir := *stateDir
+	if dir == "" {
+		dir = defaultStateDir(*configPath)
+	}
+	ids, err := loadIdentities(dir, cfg)
+	if err != nil {
+		slog.Error("failed to load identity", "error", err, "state_dir", dir)
+		os.Exit(1)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	a := NewAgent(cfg, agentVersion)
+	a := NewAgent(cfg, agentVersion, ids)
 
 	slog.Info("agent starting",
 		"agent_version", agentVersion,
 		"git_sha", gitSHA,
-		"panel", cfg.PanelAddr)
+		"panel", cfg.PanelAddr,
+		"state_dir", dir)
 
 	if err := a.Run(ctx); err != nil {
 		slog.Error("agent exited with error", "error", err)
 		os.Exit(1)
 	}
 	slog.Info("agent stopped")
+}
+
+// defaultStateDir: systemd's StateDirectory= ($STATE_DIRECTORY, first entry)
+// or the config file's directory.
+func defaultStateDir(configPath string) string {
+	if d := os.Getenv("STATE_DIRECTORY"); d != "" {
+		return strings.SplitN(d, ":", 2)[0]
+	}
+	return filepath.Dir(configPath)
 }

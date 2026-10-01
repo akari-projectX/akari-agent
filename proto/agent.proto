@@ -1,18 +1,67 @@
 // Akari panel <-> agent control-plane contract.
 //
-// Transport: the agent dials OUT to the panel over mutual TLS. The agent's
-// client certificate is issued by the panel CA and identifies the node;
-// no enrollment or management port exists on the agent side.
+// Transport: the agent dials OUT to the panel's gRPC port over TLS. The
+// agent's client certificate is issued by the panel CA and identifies the
+// node; no management port exists on the agent side.
+//
+// Client certificates are OPTIONAL at the TLS layer (a presented one must
+// still verify against the panel CA) so that a fresh agent can reach
+// AgentEnrollment.Enroll. Every AgentChannel method requires a verified
+// client certificate and refuses the call (UNAUTHENTICATED) without one.
 syntax = "proto3";
 
 package akari.v1;
 
 option go_package = "akari/agent/pb";
 
+// Requires a verified client certificate on every method.
 service AgentChannel {
   // Persistent bidirectional stream. The agent keeps it open for its whole
   // lifetime; the panel pushes config / user deltas on the same stream.
   rpc OpenChannel(stream AgentUp) returns (stream PanelDown);
+  // Certificate rotation (protocol >= 2). The caller is identified by its
+  // client certificate; the CSR carries a NEW key (same rules as
+  // EnrollRequest.csr_der). The panel records the new serial; the calling
+  // certificate stays valid until the new one is first seen on a
+  // connection (then it is revoked) or until it expires. Calling again with
+  // the old certificate before the new one was seen replaces the unseen
+  // one (it is revoked), so an agent that lost the answer simply retries.
+  // Errors: UNAUTHENTICATED (no/unknown/revoked certificate),
+  // FAILED_PRECONDITION (node being deleted), INVALID_ARGUMENT (bad CSR),
+  // RESOURCE_EXHAUSTED (rate limited), UNAVAILABLE (retry later).
+  rpc Renew(RenewRequest) returns (IssuedCertificate);
+}
+
+// Callable WITHOUT a client certificate (server TLS is still verified by
+// the agent against the CA from its bootstrap file).
+service AgentEnrollment {
+  // Exchange a one-time enrollment token (from `akari node add` / the admin
+  // API) and a CSR for the node's first client certificate. The token is
+  // single use and expires (default 24h). Every token problem (unknown,
+  // used, expired, node being deleted) is the same PERMISSION_DENIED
+  // "enrollment refused". INVALID_ARGUMENT: bad CSR (checked before the
+  // token, which stays unused). RESOURCE_EXHAUSTED: rate limited (per source
+  // address and globally). UNAVAILABLE: retry later (token unused).
+  rpc Enroll(EnrollRequest) returns (IssuedCertificate);
+}
+
+message EnrollRequest {
+  string token = 1;
+  // PKCS#10 CSR (DER) for an ECDSA P-256 key generated on the node, signed
+  // with ecdsa-with-SHA256. It must carry no attributes (no extension
+  // request: no SANs, no key usages); the subject is ignored. The panel
+  // decides every field of the certificate: subject CN=agent-<node id>,
+  // ClientAuth only, a fresh random serial, its configured validity.
+  bytes csr_der = 2;
+}
+
+message RenewRequest {
+  bytes csr_der = 1; // as EnrollRequest.csr_der, for a NEW key
+}
+
+message IssuedCertificate {
+  string cert_pem = 1; // the node's client certificate (leaf only)
+  string ca_pem = 2;   // the panel CA that issued it
 }
 
 message AgentInfo {
@@ -36,6 +85,8 @@ message Hello {
   // Hello/Ack for convergence. Revisions:
   //   1 = UserDelta base/target + REPLACE semantics, Ack.reason/held_*,
   //       state_hash, LeaseGrant.
+  //   2 = renews its certificate (AgentChannel.Renew). Protocol 1 agents
+  //       are served as before; they just never rotate their certificate.
   uint32 protocol_version = 5;
   // State hash of what the agent actually runs (see "State hash" below),
   // for config_version + the applied user set. Empty for protocol 0.
@@ -66,7 +117,10 @@ message Heartbeat {
   double cpu_percent = 1;
   uint64 mem_used_bytes = 2;
   uint64 mem_total_bytes = 3;
+  // Proxied connections currently open through xray (the gate's tracked
+  // dispatches; 0 when no instance runs).
   uint64 connections = 4;
+  // Seconds since the agent process started.
   uint64 uptime_seconds = 5;
   // Seconds left on the fail-closed lease (see LeaseGrant); unset while no
   // lease is armed (no grant received since the agent started).

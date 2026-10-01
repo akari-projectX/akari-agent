@@ -148,6 +148,17 @@ func (g *gateDispatcher) takeLocked(key gateKey) []*liveConn {
 	return out
 }
 
+// LiveTotal returns the number of tracked dispatches over all keys.
+func (g *gateDispatcher) LiveTotal() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n := 0
+	for _, conns := range g.live {
+		n += len(conns)
+	}
+	return n
+}
+
 // Live returns the number of tracked dispatches for key (tests).
 func (g *gateDispatcher) Live(key gateKey) int {
 	g.mu.Lock()

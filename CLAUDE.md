@@ -8,13 +8,15 @@ Go 1.27 单包（`package main`，模块名 `akari/agent`），内嵌 xray-core 
 | 文件 | 职责 |
 |---|---|
 | `main.go` | flag、slog JSON、SIGINT/SIGTERM |
-| `config.go` | 解析 bootstrap.toml（panel_addr / server_name / identity 三件套 PEM） |
+| `config.go` | 解析 bootstrap.toml（未知键报错）：v2 = panel_addr / server_name / enrollment_token / identity.ca_pem；v1 = 再加 identity.cert_pem + key_pem（仍支持） |
+| `identity.go` | 身份存储（`-state-dir`，默认 `$STATE_DIRECTORY` 或配置文件目录，目录 0700）：`identity.pem`（当前：私钥+证书）、`identity.next.pem`（续期得到、面板尚未接受）、`enroll.key.pem`（注册前先落盘的密钥）、`enrolled.token.sha256`；全部 0600 原子写（临时文件+fsync+rename+fsync 目录）。ECDSA P-256、CSR 无任何扩展；存证书前校验 CA 链、ClientAuth、与私钥匹配。state 中的身份优先于配置里的 v1 密钥 |
+| `enroll.go` | 注册（`ensureEnrolled`：无身份或配置里是未用过的新 token 时注册；PERMISSION_DENIED/INVALID_ARGUMENT 为永久错误（无身份时退出），其余退避重试）与续期（`renewLoop`：剩余 < 1/3 有效期时在当前 mTLS 连接上 `Renew`，存 next，取消当前流以用新证书重连；新证书在其流上收到第一条面板消息才提升；被拒（UNAUTHENTICATED/TLS 告警）则丢弃并退避，其它失败则下一次改用当前证书交替；当前证书上的流持续 `nextRetryAfter` 后重试 next；续期失败 10s 起翻倍至 10min，Unimplemented（旧面板）1h） |
 | `agent.go` | 会话生命周期：指数退避重连（1s→30s，稳定 >1min 重置）、Hello、单写者 goroutine、处理 Snapshot/Delta/LeaseGrant、Ack、最终计数队列 `finalQueue`、租约检查 |
 | `core.go` | `CoreManager`：xray 实例构建（`DecodeJSONConfig→Build`，把 dispatcher app 换成 gate →`core.New`）、REPLACE 语义的用户操作、`applied`（实际生效的凭据，喂 state hash）、按 `user>>>{id}>>>traffic>>>*` 读计数（会话内单调保护） |
 | `gate.go` | `gateDispatcher`：替换 xray 的 DefaultDispatcher（内部包一个）。每次分发要求 (inbound tag, email) 当前安装的 `*MemoryUser` 指针；撤销/轮换时取消并中断该 key 的所有活连接 |
 | `statehash.go` | state hash（定义见 proto，向量 `proto/state_hash_vectors.json`） |
 | `lease.go` / `boottime_*.go` | 失联租约：CLOCK_BOOTTIME、0→24h、≥1h、≤30d、50%/90% 预警 |
-| `monitor.go` | 心跳 15s（cpu/mem/租约剩余）、流量 10s（累计值） |
+| `monitor.go` | 心跳 15s（cpu/mem/租约剩余、`connections` = gate 跟踪的分发数（无锁读，不等 Rebuild）、`uptime_seconds`）、流量 10s（累计值） |
 | `proto/agent.proto` | **vendor 副本**，禁止手改，只能 `make sync-proto`（worktree 中手工 cp + `buf generate proto` + diff） |
 | `proto/state_hash_vectors.json` | 面板正本的副本（共享测试向量） |
 | `proto/gate.proto` | agent 内部（非契约、不同步）：gate 的 xray app 配置消息类型 |
@@ -53,6 +55,7 @@ tag `v*` 触发 `.github/workflows/release.yml`：fmt-check/vet/test → `make d
 - **F3**：`session()` 返回前 join 所有子 goroutine（读协程可能正在 Rebuild）→ 任意时刻至多一个 handleDown；`handleDown` 持 `applyMu`，先查流 ctx，流已死则不 Rebuild、不改版本、不发送（Rebuild 期间流死 → 置 dirty）。
 - **租约**：首次收到 `LeaseGrant` 才武装（旧面板永不武装）；只接受当前流的 grant；到期（`checkLease`，5s 一次）拆 xray、最终计数入队、持有版本归 (0,0)；若流仍在（面板活着但 DB 挂了）立即发 Hello (0,0)。
 - state hash v2 绑定 inbounds：`CoreManager.inboundsJSON` = 当前实例 Snapshot 的 inbounds_json 原文（无实例时为 ""）。
-- Hello 带 `protocol_version`（常量 `agentProtocol`，当前 1）与 state hash；Ack 带 reason、处理后持有版本、state hash。
-- `tlsConfig()` 在密钥无效时返回错误（会话失败并重试），bootstrap 文件含私钥，权限应为 0600。
+- Hello 带 `protocol_version`（常量 `agentProtocol`，当前 2 = 会续期证书）与 state hash；Ack 带 reason、处理后持有版本、state hash。
+- **身份（M1c）**：私钥只在节点生成、永不出节点、不进日志；token 也不进日志（只存其 SHA-256 作“已用”标记）。连接时先用待确认的 next 身份（失败为暂时性则下次用当前身份，交替），收到面板第一条消息即提升为 `identity.pem`。面板在新证书首次出现前一直接受旧证书，所以接收后、持久化前崩溃都无害。当前证书过期时每次连接都打错误日志（需 `akari node enroll-token` 发新 token 重新注册）。
+- **GO-2026-6443**：`refuseGRPCTransport` 在 xray 解析后拒绝 `streamSettings.network` = grpc 的 inbound（Rebuild 失败 → APPLY_FAILED），与 `refuseFakeDNS` 同为权威检查；grpc-go ≥ 1.85 后可解除。
 - 应用失败（Snapshot 的 `Rebuild` 或 Delta 返回错误）时**不**更新持有版本：Hello 继续报旧版本，Ack 携带**尝试的**版本、`ok=false`、reason `APPLY_FAILED`，面板据此记录 `last_error` 并按退避重试。

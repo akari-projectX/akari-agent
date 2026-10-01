@@ -46,10 +46,19 @@ Sibling checkout convention: akari-panel and akari-agent live side by side
 ## Run
 
 ```bash
-./agent -config test-node-bootstrap.toml
+./agent -config test-node-bootstrap.toml -state-dir /var/lib/akari-agent
 ```
 
-The bootstrap file is produced by `akari node add <name>` on the panel and
-contains the agent's client certificate **and private key** (v1 enrollment —
-CSR-based enrollment is planned, see PLAN.md Phase 4). Treat the file as a
-secret: transfer securely, delete after provisioning.
+The bootstrap file is produced by `akari node add <name>` on the panel: panel
+address, TLS server name, the panel CA and a **one-time enrollment token** —
+no private key. On first start the agent generates an ECDSA P-256 key in its
+state directory (`-state-dir`; default `$STATE_DIRECTORY` under systemd, else
+the config file's directory; files 0600), enrolls with a CSR (the only call
+that works without a client certificate) and stores the issued certificate.
+The key never leaves the node and is never logged. Once less than a third of
+the certificate's validity is left (protocol 2), it renews over the live mTLS
+connection with a new key, reconnects with the new certificate and keeps the
+old one until the panel has accepted the new one. A bootstrap file with a new
+token re-enrolls the node once. v1 bootstrap files (`identity.cert_pem` +
+`identity.key_pem`) still work and move onto a local key at the first
+renewal. See `akari-panel/docs/DEPLOY.md`.
