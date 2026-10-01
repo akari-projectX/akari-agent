@@ -88,19 +88,19 @@ func startFakePanel(t *testing.T, f *fakePanel) string {
 }
 
 func testAgent(t *testing.T, addr string) *Agent {
-	a := NewAgent(&Config{PanelAddr: addr}, "test")
+	a := NewAgent(&Config{PanelAddr: addr}, "test", newTestCA(t).enrolledIDs(t))
 	a.backoffBase = 10 * time.Millisecond
-	a.dial = func(ctx context.Context) (pb.AgentChannel_OpenChannelClient, func(), error) {
+	a.dial = func(ctx context.Context, _ *nodeIdentity) (*dialed, error) {
 		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
-			return nil, func() {}, err
+			return nil, err
 		}
 		s, err := pb.NewAgentChannelClient(conn).OpenChannel(ctx)
 		if err != nil {
 			_ = conn.Close()
-			return nil, func() {}, err
+			return nil, err
 		}
-		return s, func() { _ = conn.Close() }, nil
+		return &dialed{stream: s, conn: conn, close: func() { _ = conn.Close() }}, nil
 	}
 	t.Cleanup(func() { a.core.Teardown() })
 	return a

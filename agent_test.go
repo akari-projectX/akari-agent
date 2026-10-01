@@ -39,7 +39,7 @@ func lastAck(t *testing.T, out []*pb.AgentUp) *pb.Ack {
 // A failed apply must not move the held versions: the post-rebuild Hello
 // keeps the previous versions and the Ack carries the attempted ones.
 func TestFailedSnapshotKeepsPreviousVersions(t *testing.T) {
-	a := NewAgent(&Config{}, "test")
+	a := NewAgent(&Config{}, "test", nil)
 	defer a.core.Teardown()
 	inb, users := testSnapshot(freePort(t))
 	ctx := context.Background()
@@ -78,7 +78,7 @@ func TestFailedSnapshotKeepsPreviousVersions(t *testing.T) {
 // The delta decision table: apply iff held == base, no-op iff held ==
 // target, otherwise BASE_MISMATCH; failures keep base and dirty the state.
 func TestDeltaBaseTargetTable(t *testing.T) {
-	a := NewAgent(&Config{}, "test")
+	a := NewAgent(&Config{}, "test", nil)
 	defer a.core.Teardown()
 	ctx := context.Background()
 	inb := twoInbounds(freePort(t), freePort(t))
@@ -147,7 +147,7 @@ func TestDeltaBaseTargetTable(t *testing.T) {
 // Removing a user reports its final counters (current session) before the
 // Ack, without a rebuild.
 func TestRemovalEmitsFinalCountersBeforeAck(t *testing.T) {
-	a := NewAgent(&Config{}, "test")
+	a := NewAgent(&Config{}, "test", nil)
 	defer a.core.Teardown()
 	ctx := context.Background()
 	inb := twoInbounds(freePort(t), freePort(t))
@@ -205,7 +205,7 @@ func TestRemoveModeGateVsRebuild(t *testing.T) {
 		{pb.RemoveMode_REMOVE_MODE_GATE, pb.Ack_REASON_OK, pb.Ack_REASON_OK, pb.Ack_REASON_OK},
 		{pb.RemoveMode_REMOVE_MODE_REBUILD, pb.Ack_REASON_OK, pb.Ack_REASON_BASE_MISMATCH, pb.Ack_REASON_BASE_MISMATCH},
 	} {
-		a := NewAgent(&Config{}, "test")
+		a := NewAgent(&Config{}, "test", nil)
 		ctx := context.Background()
 		nop := func(*pb.AgentUp) error { return nil }
 		_ = a.handleDown(ctx, 0, nop, grant(c.mode))

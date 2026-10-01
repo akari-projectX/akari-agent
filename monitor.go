@@ -15,7 +15,7 @@ func newSessionID() string {
 	return uuid.NewString()
 }
 
-func heartbeatLoop(ctx context.Context, every time.Duration, send func(*pb.AgentUp) error, lease func() (time.Duration, bool)) {
+func heartbeatLoop(ctx context.Context, every time.Duration, send func(*pb.AgentUp) error, lease func() (time.Duration, bool), stats func() (connections, uptime uint64)) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	var lastCPU float64
@@ -30,6 +30,7 @@ func heartbeatLoop(ctx context.Context, every time.Duration, send func(*pb.Agent
 			lastCPU = pcts[0]
 		}
 		hb := &pb.Heartbeat{CpuPercent: lastCPU}
+		hb.Connections, hb.UptimeSeconds = stats()
 		if vm, err := mem.VirtualMemory(); err == nil {
 			hb.MemUsedBytes = vm.Used
 			hb.MemTotalBytes = vm.Total

@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/core"
@@ -20,8 +20,9 @@ import (
 )
 
 // agentProtocol is the control-protocol revision this agent speaks
-// (Hello.protocol_version; see agent.proto).
-const agentProtocol = 1
+// (Hello.protocol_version; see agent.proto). 2 = renews its certificate
+// (AgentChannel.Renew).
+const agentProtocol = 2
 
 // Agent is the node-side supervisor: one persistent mTLS gRPC stream to the
 // panel, an embedded xray-core, and periodic heartbeat/traffic reporting.
@@ -29,6 +30,8 @@ type Agent struct {
 	cfg          *Config
 	core         *CoreManager
 	agentVersion string
+	ids          *identities
+	startedAt    time.Time
 
 	// applyMu serializes everything that changes the running state: panel
 	// messages (handleDown) and lease expiry.
@@ -52,27 +55,62 @@ type Agent struct {
 	streamMu  sync.Mutex
 	streamGen uint64
 	curSend   func(*pb.AgentUp) error // current stream's sender, nil if none
+	// The current stream's connection (Renew goes over it), how to end
+	// the stream (switch to a renewed certificate), whether it was dialed
+	// with the pending renewed identity, and when it started.
+	curConn    grpc.ClientConnInterface
+	curCancel  context.CancelFunc
+	curViaNext bool
+	curStart   time.Time
+
+	// skipNext: the last attempt with the pending renewed identity failed
+	// for a reason that may be transient; the next attempt uses the
+	// current one (then the renewed one again). Run's goroutine only.
+	skipNext bool
+	// Renewal backoff (a refused renewed certificate counts as a failure).
+	renewMu       sync.Mutex
+	renewFailures int
+	renewRetryAt  time.Time
 
 	// Seams (tests).
-	dial           func(ctx context.Context) (pb.AgentChannel_OpenChannelClient, func(), error)
-	backoffBase    time.Duration
-	leaseEvery     time.Duration
-	trafficEvery   time.Duration
-	heartbeatEvery time.Duration
+	dial            func(ctx context.Context, id *nodeIdentity) (*dialed, error)
+	enrollRPC       func(ctx context.Context, req *pb.EnrollRequest) (*pb.IssuedCertificate, error)
+	now             func() time.Time
+	backoffBase     time.Duration
+	leaseEvery      time.Duration
+	trafficEvery    time.Duration
+	heartbeatEvery  time.Duration
+	renewCheckEvery time.Duration
+	// How long a stream may run on the current certificate while a renewed
+	// one waits for its first successful connection.
+	nextRetryAfter time.Duration
 }
 
-func NewAgent(cfg *Config, agentVersion string) *Agent {
+// dialed is an open stream and its connection.
+type dialed struct {
+	stream pb.AgentChannel_OpenChannelClient
+	conn   grpc.ClientConnInterface
+	close  func()
+}
+
+func NewAgent(cfg *Config, agentVersion string, ids *identities) *Agent {
 	a := &Agent{
-		cfg:            cfg,
-		core:           NewCoreManager(),
-		agentVersion:   agentVersion,
-		lease:          newLeaseState(bootClock),
-		backoffBase:    time.Second,
-		leaseEvery:     5 * time.Second,
-		trafficEvery:   10 * time.Second,
-		heartbeatEvery: 15 * time.Second,
+		cfg:             cfg,
+		core:            NewCoreManager(),
+		agentVersion:    agentVersion,
+		ids:             ids,
+		startedAt:       time.Now(),
+		lease:           newLeaseState(bootClock),
+		now:             time.Now,
+		backoffBase:     time.Second,
+		leaseEvery:      5 * time.Second,
+		trafficEvery:    10 * time.Second,
+		heartbeatEvery:  15 * time.Second,
+		renewCheckEvery: 30 * time.Second,
+		nextRetryAfter:  2 * time.Minute,
 	}
 	a.dial = a.dialPanel
+	a.enrollRPC = a.enrollPanel
 	return a
 }
 
@@ -105,7 +143,14 @@ func (a *Agent) setDirty(d bool) {
 // capped exponential backoff. The lease is enforced independently of any
 // stream.
 func (a *Agent) Run(ctx context.Context) error {
+	if err := a.ensureEnrolled(ctx); err != nil {
+		return err
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
 	go a.leaseLoop(ctx)
+	go a.renewLoop(ctx)
 	backoff := a.backoffBase
 	for {
 		start := time.Now()
@@ -130,12 +175,25 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 }
 
-func (a *Agent) dialPanel(ctx context.Context) (pb.AgentChannel_OpenChannelClient, func(), error) {
-	tlsCfg, err := a.tlsConfig()
+func (a *Agent) dialPanel(ctx context.Context, id *nodeIdentity) (*dialed, error) {
+	conn, err := a.clientConn(id)
 	if err != nil {
-		return nil, func() {}, err
+		return nil, err
 	}
-	conn, err := grpc.NewClient(
+	stream, err := pb.NewAgentChannelClient(conn).OpenChannel(ctx)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return &dialed{stream: stream, conn: conn, close: func() { _ = conn.Close() }}, nil
+}
+
+// clientConn is a TLS connection to the panel, verified against the CA
+// from the bootstrap file, presenting id's certificate (nil: none — only
+// AgentEnrollment.Enroll accepts that).
+func (a *Agent) clientConn(id *nodeIdentity) (*grpc.ClientConn, error) {
+	tlsCfg := a.tlsConfig(id)
+	return grpc.NewClient(
 		a.cfg.PanelAddr,
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
@@ -144,31 +202,50 @@ func (a *Agent) dialPanel(ctx context.Context) (pb.AgentChannel_OpenChannelClien
 			PermitWithoutStream: true,
 		}),
 	)
-	if err != nil {
-		return nil, func() {}, err
-	}
-	stream, err := pb.NewAgentChannelClient(conn).OpenChannel(ctx)
-	if err != nil {
-		_ = conn.Close()
-		return nil, func() {}, err
-	}
-	return stream, func() { _ = conn.Close() }, nil
 }
 
 // session runs one gRPC stream until it breaks. It returns only after every
 // goroutine it started has exited — in particular the reader, which may be
 // in the middle of a Rebuild: at most one handleDown runs at any time, and
 // a dead stream's reader can never race the next stream's (F3).
-func (a *Agent) session(parent context.Context) error {
+func (a *Agent) session(parent context.Context) (err error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
-	stream, closeConn, err := a.dial(ctx)
-	defer closeConn()
+	id, viaNext := a.pickIdentity()
+	if id == nil {
+		return errors.New("no client certificate")
+	}
+	if now := a.now(); now.After(id.leaf.NotAfter) {
+		slog.Error("client certificate expired: issue a new enrollment token (akari node enroll-token) "+
+			"and put it in the bootstrap file", "not_after", id.leaf.NotAfter, "source", id.source)
+	}
+	// A stream dialed with the renewed identity proves it once the panel
+	// sends anything (the panel only does after accepting the certificate).
+	var gotMsg atomic.Bool
+	if viaNext {
+		defer func() {
+			if gotMsg.Load() || parent.Err() != nil {
+				return
+			}
+			if refusedCert(err) {
+				slog.Error("panel refused the renewed certificate; keeping the current one", "error", err)
+				a.ids.dropNext(id)
+				a.renewFailed()
+			} else {
+				a.skipNext = true
+			}
+		}()
+	}
+
+	d, err := a.dial(ctx, id)
 	if err != nil {
 		return err
 	}
-	slog.Info("channel established", "panel", a.cfg.PanelAddr)
+	defer d.close()
+	stream := d.stream
+	slog.Info("channel established", "panel", a.cfg.PanelAddr, "identity", id.source,
+		"cert_not_after", id.leaf.NotAfter)
 
 	sendCh := make(chan *pb.AgentUp, 256)
 	done := make(chan error, 2)
@@ -208,7 +285,7 @@ func (a *Agent) session(parent context.Context) error {
 	// Hello (and any final counters still owed) before anything else. The
 	// apply lock keeps a concurrent lease expiry from interleaving.
 	a.applyMu.Lock()
-	gen := a.attachStream(send)
+	gen := a.attachStream(send, d.conn, cancel, viaNext)
 	err = send(a.helloLocked())
 	if err == nil {
 		a.finals.flush(gen, send)
@@ -220,7 +297,7 @@ func (a *Agent) session(parent context.Context) error {
 	}
 
 	wg.Add(3)
-	go func() { defer wg.Done(); heartbeatLoop(ctx, a.heartbeatEvery, send, a.lease.remaining) }()
+	go func() { defer wg.Done(); heartbeatLoop(ctx, a.heartbeatEvery, send, a.lease.remaining, a.stats) }()
 	go func() {
 		defer wg.Done()
 		trafficLoop(ctx, a.trafficEvery, a.core, send, func() { a.finals.confirm(gen, a.trafficEvery) })
@@ -234,6 +311,13 @@ func (a *Agent) session(parent context.Context) error {
 				done <- err
 				return
 			}
+			if viaNext && !gotMsg.Swap(true) {
+				if perr := a.ids.promote(id); perr != nil {
+					slog.Error("failed to switch to the renewed certificate", "error", perr)
+				} else {
+					slog.Info("renewed certificate accepted by the panel", "cert_not_after", id.leaf.NotAfter)
+				}
+			}
 			if err := a.handleDown(ctx, gen, send, in); err != nil {
 				slog.Error("failed to handle panel message", "error", err)
 			}
@@ -243,11 +327,12 @@ func (a *Agent) session(parent context.Context) error {
 	return <-done
 }
 
-func (a *Agent) attachStream(send func(*pb.AgentUp) error) uint64 {
+func (a *Agent) attachStream(send func(*pb.AgentUp) error, conn grpc.ClientConnInterface, cancel context.CancelFunc, viaNext bool) uint64 {
 	a.streamMu.Lock()
 	defer a.streamMu.Unlock()
 	a.streamGen++
 	a.curSend = send
+	a.curConn, a.curCancel, a.curViaNext, a.curStart = conn, cancel, viaNext, a.now()
 	return a.streamGen
 }
 
@@ -256,7 +341,18 @@ func (a *Agent) detachStream(gen uint64) {
 	defer a.streamMu.Unlock()
 	if a.streamGen == gen {
 		a.curSend = nil
+		a.curConn, a.curCancel = nil, nil
 	}
+}
+
+// pickIdentity: the pending renewed identity first, the current one when
+// the last attempt with the renewed one failed (alternating).
+func (a *Agent) pickIdentity() (*nodeIdentity, bool) {
+	if next := a.ids.pending(); next != nil && !a.skipNext {
+		return next, true
+	}
+	a.skipNext = false
+	return a.ids.current(), false
 }
 
 // current returns the live stream's generation and sender (nil if none).
@@ -478,22 +574,23 @@ func (a *Agent) checkLease() {
 	}
 }
 
-func (a *Agent) tlsConfig() (*tls.Config, error) {
-	cert, err := tls.X509KeyPair([]byte(a.cfg.Identity.CertPEM), []byte(a.cfg.Identity.KeyPEM))
-	if err != nil {
-		return nil, fmt.Errorf("invalid identity keypair: %w", err)
+// stats: Heartbeat.connections (the gate's tracked dispatches) and
+// uptime_seconds (since the agent process started).
+func (a *Agent) stats() (connections, uptime uint64) {
+	return a.core.Connections(), uint64(time.Since(a.startedAt) / time.Second)
+}
+
+func (a *Agent) tlsConfig(id *nodeIdentity) *tls.Config {
+	c := &tls.Config{
+		RootCAs:    a.ids.pool,
+		ServerName: a.cfg.ServerName,
+		MinVersion: tls.VersionTLS13,
+		NextProtos: []string{"h2"},
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM([]byte(a.cfg.Identity.CAPEM)) {
-		return nil, fmt.Errorf("cannot parse identity.ca_pem")
+	if id != nil {
+		c.Certificates = []tls.Certificate{id.cert}
 	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		RootCAs:      pool,
-		ServerName:   a.cfg.ServerName,
-		MinVersion:   tls.VersionTLS13,
-		NextProtos:   []string{"h2"},
-	}, nil
+	return c
 }
 
 // finalQueue holds final counter reports of instances (or removed users)

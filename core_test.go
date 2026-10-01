@@ -488,3 +488,31 @@ func TestFakeDNSRefusedAfterXrayParse(t *testing.T) {
 	}
 	_ = inst.Close()
 }
+
+// GO-2026-6443: a grpc-transport inbound is refused after xray's parse,
+// whatever the JSON spelling; other transports are fine.
+func TestGRPCTransportRefusedAfterXrayParse(t *testing.T) {
+	base := `"listen":"127.0.0.1","port":0,"protocol":"vless","settings":{"clients":[],"decryption":"none"}`
+	for _, net := range []string{"grpc", "GRPC", "gRPC"} {
+		in := `{"tag":"a",` + base + `,"streamSettings":{"network":"` + net + `","grpcSettings":{"serviceName":"x"}}}`
+		inst, _, _, err := newInstance("[" + in + "]")
+		if err == nil {
+			_ = inst.Close()
+			t.Fatalf("accepted grpc transport: %s", in)
+		}
+		if !strings.Contains(err.Error(), "grpc transport is not supported") {
+			t.Fatalf("unexpected error for %s: %v", in, err)
+		}
+	}
+	// Stray grpcSettings on another transport do not start a gRPC server.
+	for _, in := range []string{
+		`{"tag":"a",` + base + `,"streamSettings":{"network":"tcp","grpcSettings":{"serviceName":"x"}}}`,
+		`{"tag":"grpc-in",` + base + `,"streamSettings":{"network":"ws"}}`,
+	} {
+		inst, _, _, err := newInstance("[" + in + "]")
+		if err != nil {
+			t.Fatalf("rejected %s: %v", in, err)
+		}
+		_ = inst.Close()
+	}
+}
