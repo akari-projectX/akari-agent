@@ -90,17 +90,17 @@ func main() {
 	a := NewAgent(cfg, agentVersion, ids)
 	a.upd = upd
 	a.trial = newTrialState(trial)
-	if upd != nil {
-		// Final counters a previous process persisted before a restart.
-		if finals := upd.loadFinals(); len(finals) > 0 {
-			for _, r := range finals {
-				a.finals.add(r)
-			}
-			a.finalsPersisted.Store(true)
-			slog.Info("resending final traffic counters from before the restart", "reports", len(finals))
-		} else {
-			upd.dropFinals()
+	a.finalsStore = &finalsStore{dir: dir}
+	// Final counters a previous process persisted when it stopped (SIGTERM
+	// or a self-update restart); they go out first on the next stream.
+	if finals := a.finalsStore.load(); len(finals) > 0 {
+		for _, r := range finals {
+			a.finals.add(r)
 		}
+		a.finalsPersisted.Store(true)
+		slog.Info("resending final traffic counters from before the restart", "reports", len(finals))
+	} else {
+		a.finalsStore.drop()
 	}
 
 	slog.Info("agent starting",

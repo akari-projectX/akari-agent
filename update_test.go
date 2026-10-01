@@ -295,18 +295,19 @@ func TestLaunchInstalledNewerWinsAndCorruptStagedRollsBack(t *testing.T) {
 func TestFinalsPersistRoundTrip(t *testing.T) {
 	u, _ := testUpdater(t, t.TempDir(), "v1.0.0", nil)
 	in := []*pb.TrafficReport{{SessionId: "s1", Users: []*pb.UserTraffic{{UserId: "u", UpBytes: 5, DownBytes: 7}}}}
-	if err := u.saveFinals(in); err != nil {
+	if err := (&finalsStore{dir: u.dir}).save(in); err != nil {
 		t.Fatal(err)
 	}
-	if st, _ := os.Stat(u.finalsPath()); st.Mode().Perm() != 0o600 {
+	if st, _ := os.Stat((&finalsStore{dir: u.dir}).finalsPath()); st.Mode().Perm() != 0o600 {
 		t.Fatal("finals file not 0600")
 	}
-	out := u.loadFinals()
+	fs := &finalsStore{dir: u.dir}
+	out := fs.load()
 	if len(out) != 1 || out[0].SessionId != "s1" || out[0].Users[0].DownBytes != 7 {
 		t.Fatalf("round trip %v", out)
 	}
-	u.dropFinals()
-	if u.loadFinals() != nil {
+	fs.drop()
+	if fs.load() != nil {
 		t.Fatal("finals not dropped")
 	}
 }
@@ -446,7 +447,7 @@ func TestUpdateOfferDownloadVerifySwitch(t *testing.T) {
 	if s.Current == nil || s.Current.Version != "v1.1.0" || s.Trial == nil || s.Trial.Boots != 1 || s.Trial.RolloutID != "r1" {
 		t.Fatalf("state %+v", s)
 	}
-	fin := u.loadFinals()
+	fin := (&finalsStore{dir: u.dir}).load()
 	if len(fin) != 1 || fin[0].SessionId != "old" {
 		t.Fatalf("final counters not persisted before the switch: %v", fin)
 	}

@@ -31,6 +31,7 @@ import (
 	_ "github.com/xtls/xray-core/proxy/dokodemo"
 	_ "github.com/xtls/xray-core/proxy/trojan"
 	_ "github.com/xtls/xray-core/proxy/vless/outbound"
+	_ "github.com/xtls/xray-core/proxy/vmess/outbound"
 
 	"akari/agent/pb"
 )
@@ -204,4 +205,104 @@ func TestRT_TrojanRevocation(t *testing.T) {
 	if still {
 		t.Fatal("RT: revoked trojan connection still relays")
 	}
+}
+
+// VMess live connection revoke (no vmess canary existed: the protocol had
+// no test of any kind).
+func TestRT_VmessRevocation(t *testing.T) {
+	m := NewCoreManager()
+	defer m.Teardown()
+	sp := freePort(t)
+	inb := fmt.Sprintf(`[{"tag":"in-m","listen":"127.0.0.1","port":%d,"protocol":"vmess","settings":{"clients":[]},"streamSettings":{"network":"tcp"}}]`, sp)
+	op := &pb.UserOp{Op: pb.UserOp_ADD, UserId: userA, InboundUsers: []*pb.InboundUser{{InboundTag: "in-m", Protocol: "vmess", AccountJson: fmt.Sprintf(`{"id":%q}`, idA)}}}
+	if _, err := m.Rebuild(inb, []*pb.UserOp{op}); err != nil {
+		t.Fatal(err)
+	}
+	cp := freePort(t)
+	echo := echoServer(t)
+	clientInstance(t, map[string]any{
+		"inbounds": []any{map[string]any{"listen": "127.0.0.1", "port": cp, "protocol": "dokodemo-door", "settings": map[string]any{"address": "127.0.0.1", "port": echo, "network": "tcp"}}},
+		"outbounds": []any{map[string]any{"protocol": "vmess", "settings": map[string]any{"vnext": []any{map[string]any{
+			"address": "127.0.0.1", "port": sp, "users": []any{map[string]any{"id": idA, "security": "auto"}}}}}}},
+	})
+	c, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", cp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := echoOnce(c, "pre"); err != nil {
+		t.Fatalf("pre: %v", err)
+	}
+	if _, err := m.ApplyUserOps([]*pb.UserOp{{Op: pb.UserOp_REMOVE, UserId: userA}}); err != nil {
+		t.Fatal(err)
+	}
+	still := echoOnce(c, "after") == nil
+	t.Logf("RT-VMESS: echo_after_revoke_ok=%v", still)
+	if still {
+		t.Fatal("RT: revoked vmess connection still relays")
+	}
+	// A new connection with the revoked credential gets nothing either.
+	c2, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", cp))
+	if err == nil {
+		defer c2.Close()
+		if echoOnce(c2, "new") == nil {
+			t.Fatal("RT: revoked vmess credential opened a new connection")
+		}
+	}
+}
+
+// Mux: sub-streams of one multiplexed VLESS connection all belong to the
+// user. Revocation must cut the established sub-stream and refuse NEW
+// sub-streams on the same (still open) mux connection.
+func TestRT_MuxSubStreamRevocation(t *testing.T) {
+	m := NewCoreManager()
+	defer m.Teardown()
+	sp := freePort(t)
+	inb := fmt.Sprintf(`[{"tag":"in-v","listen":"127.0.0.1","port":%d,"protocol":"vless","settings":{"clients":[],"decryption":"none"},"streamSettings":{"network":"tcp"}}]`, sp)
+	op := &pb.UserOp{Op: pb.UserOp_ADD, UserId: userA, InboundUsers: []*pb.InboundUser{{InboundTag: "in-v", Protocol: "vless", AccountJson: fmt.Sprintf(`{"id":%q}`, idA)}}}
+	if _, err := m.Rebuild(inb, []*pb.UserOp{op}); err != nil {
+		t.Fatal(err)
+	}
+	echo := echoServer(t)
+	cp := freePort(t)
+	clientInstance(t, map[string]any{
+		"inbounds": []any{map[string]any{"listen": "127.0.0.1", "port": cp, "protocol": "dokodemo-door", "settings": map[string]any{"address": "127.0.0.1", "port": echo, "network": "tcp"}}},
+		"outbounds": []any{map[string]any{"protocol": "vless", "settings": map[string]any{"vnext": []any{map[string]any{
+			"address": "127.0.0.1", "port": sp, "users": []any{map[string]any{"id": idA, "encryption": "none"}}}}},
+			"mux": map[string]any{"enabled": true, "concurrency": 8}}},
+	})
+	dial := func() (net.Conn, error) { return net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", cp)) }
+	c1, err := dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c1.Close()
+	if err := echoOnce(c1, "pre"); err != nil {
+		t.Fatalf("pre: %v", err)
+	}
+	// A second sub-stream over the same mux connection works before revoke.
+	c2, err := dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	if err := echoOnce(c2, "pre2"); err != nil {
+		t.Fatalf("second mux sub-stream: %v", err)
+	}
+	if _, err := m.ApplyUserOps([]*pb.UserOp{{Op: pb.UserOp_REMOVE, UserId: userA}}); err != nil {
+		t.Fatal(err)
+	}
+	for i, c := range []net.Conn{c1, c2} {
+		if echoOnce(c, "after") == nil {
+			t.Fatalf("RT: established mux sub-stream %d still relays after revoke", i+1)
+		}
+	}
+	c3, err := dial()
+	if err == nil {
+		defer c3.Close()
+		if echoOnce(c3, "new") == nil {
+			t.Fatal("RT: a NEW mux sub-stream was admitted after revoke")
+		}
+	}
+	t.Log("RT-MUX: established and new sub-streams refused after revoke")
 }

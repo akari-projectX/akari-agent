@@ -478,10 +478,15 @@ type finalsFile struct {
 	Reports [][]byte `json:"reports"` // protobuf TrafficReport
 }
 
-func (u *updater) finalsPath() string { return filepath.Join(u.dir, finalsFileName) }
+// finalsStore persists the final-counter queue in the state directory.
+// It is independent of the self-updater: a graceful stop (SIGTERM) and an
+// update restart both use it.
+type finalsStore struct{ dir string }
 
-// saveFinals persists reports owed to the panel (before a restart).
-func (u *updater) saveFinals(reports []*pb.TrafficReport) error {
+func (u *finalsStore) finalsPath() string { return filepath.Join(u.dir, finalsFileName) }
+
+// save persists reports owed to the panel (before a restart).
+func (u *finalsStore) save(reports []*pb.TrafficReport) error {
 	var f finalsFile
 	for _, r := range reports {
 		b, err := proto.Marshal(r)
@@ -497,9 +502,9 @@ func (u *updater) saveFinals(reports []*pb.TrafficReport) error {
 	return writeSecret(u.finalsPath(), b)
 }
 
-// loadFinals returns the persisted reports (the file stays until
-// dropFinals: a crash before delivery keeps them).
-func (u *updater) loadFinals() []*pb.TrafficReport {
+// load returns the persisted reports (the file stays until
+// drop: a crash before delivery keeps them).
+func (u *finalsStore) load() []*pb.TrafficReport {
 	b, err := os.ReadFile(u.finalsPath())
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -510,7 +515,7 @@ func (u *updater) loadFinals() []*pb.TrafficReport {
 	var f finalsFile
 	if err := json.Unmarshal(b, &f); err != nil {
 		slog.Error("persisted final counters unreadable; dropping them", "error", err)
-		u.dropFinals()
+		u.drop()
 		return nil
 	}
 	var out []*pb.TrafficReport
@@ -523,7 +528,7 @@ func (u *updater) loadFinals() []*pb.TrafficReport {
 	return out
 }
 
-func (u *updater) dropFinals() {
+func (u *finalsStore) drop() {
 	if err := os.Remove(u.finalsPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		slog.Warn("cannot remove persisted final counters", "error", err)
 	}

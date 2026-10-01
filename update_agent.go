@@ -278,11 +278,7 @@ func (a *Agent) stopForRestartLocked() {
 	a.finals.add(a.core.Teardown())
 	a.setVersions(0, 0)
 	a.setDirty(false)
-	if err := a.upd.saveFinals(a.finals.all()); err != nil {
-		// Still restart: the reports also went out on the live stream
-		// (best effort) and the panel's caps bound what can be lost.
-		slog.Error("cannot persist final traffic counters before the restart", "error", err)
-	}
+	a.persistFinalsLocked("restart")
 }
 
 // switchLocked restarts into the staged binary: final counters flushed
