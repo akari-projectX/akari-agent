@@ -68,13 +68,29 @@ func (a *Agent) ensureEnrolled(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		// The panel accepted the request (its one-time token is spent) but
+		// this machine cannot keep the result: retrying can only fail with
+		// "token used" and hide the real cause.
+		var se *storeError
+		if errors.As(err, &se) {
+			if cur != nil {
+				slog.Error("enrollment succeeded on the panel but the identity could not be stored; "+
+					"keeping the current identity (issue a new token after fixing the cause)", "error", se.err)
+				a.recordEnrolledToken(token)
+				return nil
+			}
+			return fmt.Errorf("enrollment succeeded on the panel but the identity cannot be stored "+
+				"(the token is spent; fix the cause, then issue a new one): %w", se.err)
+		}
 		switch status.Code(err) {
 		case codes.PermissionDenied:
 			msg := "enrollment refused: the token is unknown, used or expired; issue a new one " +
 				"(akari node enroll-token <node id>) and put it in the bootstrap file"
 			if cur != nil {
-				// Keep running with what we have.
+				// Keep running with what we have, and do not ask again with
+				// this token on every restart (G5).
 				slog.Error(msg)
+				a.recordEnrolledToken(token)
 				return nil
 			}
 			return errors.New(msg)
@@ -107,14 +123,28 @@ func (a *Agent) enrollOnce(ctx context.Context, token string) error {
 		return err
 	}
 	if err := a.ids.storeEnrolled(key, []byte(resp.GetCertPem())); err != nil {
-		return status.Errorf(codes.Internal, "store enrolled identity: %v", err)
+		return &storeError{err}
 	}
-	if err := writeSecret(filepath.Join(a.ids.dir, enrolledMarker), []byte(tokenDigest(token)+"\n")); err != nil {
-		slog.Warn("failed to record the enrollment token digest", "error", err)
-	}
+	a.recordEnrolledToken(token)
 	cur := a.ids.current()
 	slog.Info("enrolled", "cert_not_after", cur.leaf.NotAfter, "serial", cur.leaf.SerialNumber.Text(16))
 	return nil
+}
+
+// storeError: the enrollment RPC succeeded but the result could not be
+// stored locally (a permanent, local failure: the token is already spent).
+type storeError struct{ err error }
+
+func (e *storeError) Error() string { return "store enrolled identity: " + e.err.Error() }
+func (e *storeError) Unwrap() error { return e.err }
+
+// recordEnrolledToken remembers which bootstrap token this state directory
+// has dealt with (enrolled, or been refused for), so a restart does not ask
+// the panel again.
+func (a *Agent) recordEnrolledToken(token string) {
+	if err := writeSecret(filepath.Join(a.ids.dir, enrolledMarker), []byte(tokenDigest(token)+"\n")); err != nil {
+		slog.Warn("failed to record the enrollment token digest", "error", err)
+	}
 }
 
 // enrollPanel calls AgentEnrollment.Enroll without a client certificate.
