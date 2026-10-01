@@ -99,18 +99,19 @@ func (a *Agent) onUpdateOffer(ctx context.Context, gen uint64, send func(*pb.Age
 	if t := a.trial; t != nil && !t.isConfirmed() {
 		return reject(version, errors.New("the running update has not passed its self-check yet"))
 	}
-	if !a.upd.tryBusy() {
+	tok, ok := a.upd.tryBusy(gen)
+	if !ok {
 		slog.Info("update offer ignored: an update is already in progress", "version", version)
 		return nil
 	}
 	conn := a.connFor(gen)
 	if conn == nil {
-		a.upd.setIdle()
+		a.upd.setIdle(tok)
 		return errStreamGone
 	}
 	slog.Info("update offer accepted", "version", m.Version, "key", keyID, "rollout", o.GetRolloutId())
 	off := acceptedOffer{rolloutID: o.GetRolloutId(), m: m, raw: o.GetManifest(), sigs: sigs}
-	go a.runUpdate(ctx, gen, send, conn, off)
+	go a.runUpdate(ctx, gen, send, conn, off, tok)
 	return nil
 }
 
@@ -134,8 +135,8 @@ func (a *Agent) connFor(gen uint64) grpc.ClientConnInterface {
 // runUpdate downloads, verifies and stages the offered binary, then
 // switches to it. Bound to the offering stream: if it dies, nothing is
 // switched (the panel offers again on the next stream).
-func (a *Agent) runUpdate(ctx context.Context, gen uint64, send func(*pb.AgentUp) error, conn grpc.ClientConnInterface, off acceptedOffer) {
-	defer a.upd.setIdle()
+func (a *Agent) runUpdate(ctx context.Context, gen uint64, send func(*pb.AgentUp) error, conn grpc.ClientConnInterface, off acceptedOffer, tok uint64) {
+	defer a.upd.setIdle(tok)
 	m := off.m
 	fail := func(err error) {
 		slog.Error("agent update failed", "version", m.Version, "error", err)

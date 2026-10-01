@@ -609,3 +609,27 @@ func TestPendingReportDeliveredAfterHello(t *testing.T) {
 		t.Fatal("delivered report not cleared")
 	}
 }
+
+// An update of a dead stream never blocks the next stream's offer.
+func TestBusySlotPerStream(t *testing.T) {
+	u, _ := testUpdater(t, t.TempDir(), "v1.0.0", nil)
+	t1, ok := u.tryBusy(1)
+	if !ok {
+		t.Fatal("first claim refused")
+	}
+	if _, ok := u.tryBusy(1); ok {
+		t.Fatal("second update on the same stream allowed")
+	}
+	t2, ok := u.tryBusy(2)
+	if !ok {
+		t.Fatal("new stream blocked by a dead stream's update")
+	}
+	u.setIdle(t1) // the old one finishing must not release the new claim
+	if _, ok := u.tryBusy(2); ok {
+		t.Fatal("stale release freed the current claim")
+	}
+	u.setIdle(t2)
+	if _, ok := u.tryBusy(2); !ok {
+		t.Fatal("slot not released")
+	}
+}

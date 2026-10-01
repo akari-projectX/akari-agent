@@ -43,6 +43,47 @@ install as a hardened systemd service with `akari-panel/deploy/systemd/akari-age
 Sibling checkout convention: akari-panel and akari-agent live side by side
 (`../akari-panel` / `../akari-agent`), same as the panel's smoke test expects.
 
+## Self-update (protocol 3)
+
+The panel can roll out new agent releases (staged waves, health gate, automatic halt; see
+`akari-panel/docs/DEPLOY.md`, "Agent updates"). The agent trusts **only** manifests signed by a
+release key pinned in this repository (`release-keys.txt`, compiled in); the panel is a relay.
+An offer is accepted only if a signature verifies, the platform matches, the version is newer
+than the running one (or the signed manifest is an explicit `rollback` target) and the node has
+not rolled back from that version before. The binary comes over the existing mTLS connection
+(`AgentChannel.FetchArtifact`), is checked for size and SHA-256, staged in
+`<state dir>/update/bin/`, and the agent replaces its process image with it after persisting its
+final traffic counters. The new binary must connect and get an apply acknowledged within
+`-update-self-check` (default 5m) or it returns to the previous binary; one that crashes on start
+is rolled back by the installed binary (the launcher) after `-update-max-boots` (default 3)
+starts. `./agent -release-keys` lists the pinned keys.
+
+### Release signing keys
+
+Manifests (`akari-agent-linux-<arch>.manifest.json`: version, os, arch, sha256, size,
+min_panel_protocol, created_at, rollback) are signed with Ed25519 over
+`"akari-agent-manifest-v1\n" || manifest` (`release/`, contract in akari-panel
+`proto/agent.proto`). Cosign keyless signatures stay for humans and CI; nodes do not need
+Rekor/Fulcio connectivity.
+
+```bash
+go run ./cmd/akari-sign keygen -out /offline/release.key   # prints the public line
+# add that line to release-keys.txt, commit, release (agents now pin it)
+make dist VERSION=v1.2.3
+make sign-manifest VERSION=v1.2.3 KEY=/offline/release.key  # dist/*.manifest.{json,sig}
+go run ./cmd/akari-sign verify -keys release-keys.txt -manifest dist/akari-agent-linux-amd64.manifest.json \
+  -sig dist/akari-agent-linux-amd64.manifest.sig -binary dist/akari-agent-linux-amd64
+```
+
+Custody: generate and keep the key offline (encrypted media, two copies); whoever holds it can
+update every node. CI signs only if the `AKARI_RELEASE_SIGNING_KEY` repository secret is set
+(`.github/workflows/release.yml`; without it the release has no manifests and a warning) and
+refuses manifests that do not verify under `release-keys.txt`. Rotation: pin the next key next to
+the current one and release; sign with both (`akari-sign countersign`) until every node runs a
+build pinning the next key; then drop the old key. `testdata/TEST-ONLY-release.key` is a public
+test key used only by builds with the `akari_testkeys` tag (`make build-testkeys`, smoke);
+`make dist` refuses binaries that contain it.
+
 ## Run
 
 ```bash

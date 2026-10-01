@@ -108,9 +108,12 @@ type updater struct {
 	exec func(path string, argv, env []string) error
 	now  func() time.Time
 
-	mu   sync.Mutex
-	st   updState
-	busy bool // an offer is being downloaded / applied
+	mu sync.Mutex
+	st updState
+	// The update in progress (0 = none): its token and the stream it
+	// belongs to. An update of a dead stream never blocks the next
+	// stream's offer (it aborts on its own: its context is done).
+	busyTok, busyGen, nextTok uint64
 }
 
 func newUpdater(stateDir, version string, keys []release.PublicKey) (*updater, error) {
@@ -279,7 +282,7 @@ func (u *updater) gcLocked() {
 	}
 	for _, e := range entries {
 		p := filepath.Join(u.binDir(), e.Name())
-		if keep[p] || (u.busy && strings.HasPrefix(e.Name(), ".download-")) {
+		if keep[p] || (u.busyTok != 0 && strings.HasPrefix(e.Name(), ".download-")) {
 			continue
 		}
 		if err := os.Remove(p); err == nil {
@@ -356,21 +359,26 @@ func (u *updater) rolledBack(v string) bool {
 	return slices.Contains(u.st.RolledBack, v)
 }
 
-// tryBusy claims the single update slot.
-func (u *updater) tryBusy() bool {
+// tryBusy claims the update slot for stream gen: refused while an update
+// of the same stream runs; one of an older (dead) stream is superseded.
+func (u *updater) tryBusy(gen uint64) (uint64, bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if u.busy {
-		return false
+	if u.busyTok != 0 && u.busyGen == gen {
+		return 0, false
 	}
-	u.busy = true
-	return true
+	u.nextTok++
+	u.busyTok, u.busyGen = u.nextTok, gen
+	return u.busyTok, true
 }
 
-func (u *updater) setIdle() {
+// setIdle releases the slot if tok still holds it.
+func (u *updater) setIdle(tok uint64) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.busy = false
+	if u.busyTok == tok {
+		u.busyTok = 0
+	}
 }
 
 // stagedPath is where a verified download of m is kept.
