@@ -681,6 +681,10 @@ func (a *Agent) applyDeltaLocked(ctx context.Context, gen uint64, send func(*pb.
 		why := fmt.Errorf("remove_mode=rebuild: removals/rotations need a snapshot")
 		slog.Warn("rejecting user delta", "error", why)
 		return a.sendAckLocked(send, target[0], target[1], pb.Ack_REASON_BASE_MISMATCH, why)
+	case a.core.WouldShrinkUnsafe(d.Ops):
+		why := fmt.Errorf("removals/rotations on shadowsocks inbounds need a snapshot")
+		slog.Warn("rejecting user delta", "error", why)
+		return a.sendAckLocked(send, target[0], target[1], pb.Ack_REASON_BASE_MISMATCH, why)
 	}
 
 	final, err := a.core.ApplyUserOps(d.Ops)

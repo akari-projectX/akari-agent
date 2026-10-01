@@ -72,15 +72,14 @@ check-pb: proto
 	git diff --exit-code -- pb
 
 # govulncheck fails on any reachable vulnerability. VULN_ALLOW lists accepted
-# IDs (each needs a reason); anything else fails.
-#   GO-2026-6443: grpc server panic on missing :authority. Fix exists only as
-#   a v1.85.0-dev pseudo-version; reached via xray's internal gRPC transport,
-#   not an endpoint the agent exposes (agent dials out only). Revisit when
-#   grpc v1.85.0 is released.
-VULN_ALLOW ?= GO-2026-6443
+# IDs (each needs a reason here); anything else fails. Empty since R26
+# (GO-2026-6443 fixed by pinning grpc-go to upstream 93e31b48545e; move to
+# the v1.85.0 tag when it is released).
+VULN_ALLOW ?=
 vulncheck:
 	@out=$$(go run golang.org/x/vuln/cmd/govulncheck@latest ./... 2>&1); rc=$$?; echo "$$out"; \
 	[ $$rc -eq 0 ] && exit 0; \
+	[ -z "$(strip $(VULN_ALLOW))" ] && { echo "reachable vulnerabilities (no allow-list)"; exit 1; }; \
 	bad=$$(echo "$$out" | grep -oE '^Vulnerability #[0-9]+: GO-[0-9]+-[0-9]+' | grep -oE 'GO-[0-9]+-[0-9]+' | sort -u | grep -vxF "$$(echo $(VULN_ALLOW) | tr ' ' '\n')"); \
 	if [ -n "$$bad" ]; then echo "NEW reachable vulnerabilities: $$bad"; exit 1; fi; \
 	echo "only allow-listed vulnerabilities: $(VULN_ALLOW)"

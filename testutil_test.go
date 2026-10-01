@@ -2,9 +2,17 @@ package main
 
 import (
 	"bufio"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"testing"
 	"time"
@@ -119,4 +127,23 @@ func twoInbounds(p1, p2 int) string {
 		`"settings":{"clients":[],"decryption":"none"},"streamSettings":{"network":"tcp"}},`+
 		`{"tag":"in-b","listen":"127.0.0.1","port":%d,"protocol":"vless",`+
 		`"settings":{"clients":[],"decryption":"none"},"streamSettings":{"network":"tcp"}}]`, p1, p2)
+}
+
+// selfSigned: a P-256 certificate for "rt.test" (PEM and parsed).
+func selfSigned(t *testing.T) (certPEM, keyPEM string, c tls.Certificate) {
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "rt.test"}, DNSNames: []string{"rt.test"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &k.PublicKey, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb, _ := x509.MarshalECPrivateKey(k)
+	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kb}))
+	c, err = tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return
 }
