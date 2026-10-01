@@ -194,6 +194,9 @@ func (u *updater) launch(launched bool) (*trialRec, error) {
 			return nil, u.saveGC()
 		}
 		if launched {
+			// Drop staged files nothing refers to any more (e.g. the binary
+			// the launcher just rolled back from).
+			u.gcLocked()
 			if cur.Path == u.self && u.st.Trial != nil && u.st.Trial.Version == cur.Version && cur.Version == u.version {
 				t := *u.st.Trial
 				return &t, nil

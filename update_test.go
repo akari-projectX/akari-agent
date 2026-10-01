@@ -224,6 +224,18 @@ func TestLaunchProbationAndConfirmedChain(t *testing.T) {
 	if st := readState(t, ui); st.Trial != nil || !contains(st.RolledBack, "v1.2.0") {
 		t.Fatalf("state %+v", st)
 	}
+	// b, exec'd by the launcher, drops c's file.
+	ub2, _ := testUpdater(t, dir, "v1.1.0", []release.PublicKey{k.pub})
+	ub2.self = b.Path
+	if trial, err := ub2.launch(true); err != nil || trial != nil {
+		t.Fatalf("launched b: %v %v", trial, err)
+	}
+	if _, err := os.Stat(c.Path); !os.IsNotExist(err) {
+		t.Fatal("rolled-back binary left in bin/")
+	}
+	if _, err := os.Stat(b.Path); err != nil {
+		t.Fatal("running binary removed")
+	}
 }
 
 func contains(s []string, v string) bool {
