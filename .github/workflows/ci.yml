@@ -30,6 +30,28 @@ jobs:
       - run: make test # canary (no -race) + go test -race ./...
       - run: make build
 
+  reproducible:
+    # Same commit -> byte-identical release binary (the Makefile's build
+    # flags: no cgo, -trimpath, no VCS stamp, empty build id).
+    name: reproducible build (linux/amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: |
+          sha="$(git rev-parse --short=12 HEAD)"
+          for i in 1 2; do
+            go clean -cache
+            make dist DIST_ARCHS=amd64 VERSION=v0.0.0-ci COMMIT="$sha"
+            sha256sum dist/akari-agent-linux-amd64 | cut -d' ' -f1 >"build$i.sha"
+          done
+          cat build1.sha build2.sha
+          diff build1.sha build2.sha
+
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest

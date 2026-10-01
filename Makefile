@@ -1,11 +1,28 @@
-.PHONY: build proto sync-proto check-proto check-pb vet fmt-check test test-canary vulncheck ci
+.PHONY: build dist proto sync-proto check-proto check-pb vet fmt-check test test-canary vulncheck ci
 
 # Canonical contract lives in akari-panel/proto/agent.proto. This repo vendors
 # a copy: `make sync-proto` pulls the sibling checkout's version and
 # regenerates pb/; `make check-proto` fails when the vendored copy drifts.
 
+# Version = nearest tag (or the short sha); injected together with the commit.
+# Override for a release: make build VERSION=v0.2.0
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+LDFLAGS  = -s -w -buildid= -X main.agentVersion=$(VERSION) -X main.gitSHA=$(COMMIT)
+# Static, reproducible: no cgo, no VCS stamping, no build paths in the binary.
+GOBUILD  = CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)"
+
 build:
-	go build -o agent -ldflags "-X main.agentVersion=v0.1.0" .
+	$(GOBUILD) -o agent .
+
+# Release binaries (linux amd64 + arm64) and their checksums in dist/.
+DIST_ARCHS ?= amd64 arm64
+dist:
+	rm -rf dist && mkdir dist
+	for a in $(DIST_ARCHS); do \
+	  GOOS=linux GOARCH=$$a $(GOBUILD) -o dist/akari-agent-linux-$$a . || exit 1; \
+	done
+	cd dist && sha256sum akari-agent-linux-* > SHA256SUMS
 
 proto:
 	buf generate proto
