@@ -11,6 +11,9 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
+
+	"akari/agent/release"
 )
 
 // Set at build time (see the Makefile): -ldflags "-X main.agentVersion=v1.0.0
@@ -31,9 +34,28 @@ func main() {
 	stateDir := flag.String("state-dir", "", "directory for the agent's key and certificates "+
 		"(default: $STATE_DIRECTORY when run by systemd, else the config file's directory)")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	showKeys := flag.Bool("release-keys", false, "print the pinned self-update release keys and exit")
+	selfCheck := flag.Duration("update-self-check", defaultSelfCheck,
+		"after a self-update: how long the new binary has to connect and apply the panel's state before it is rolled back")
+	maxBoots := flag.Int("update-max-boots", defaultMaxBoots,
+		"after a self-update: starts the new binary gets to pass its self-check before the launcher rolls it back")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(versionString())
+		return
+	}
+	keys, keyErr := pinnedReleaseKeys()
+	if *showKeys {
+		if keyErr != nil {
+			fmt.Fprintln(os.Stderr, keyErr)
+			os.Exit(1)
+		}
+		if len(keys) == 0 {
+			fmt.Println("no release keys pinned: self-update disabled")
+		}
+		for _, k := range keys {
+			fmt.Printf("%s %s %s\n", k.ID, release.FormatPublicKey(k.Key), k.Label)
+		}
 		return
 	}
 
@@ -41,15 +63,20 @@ func main() {
 		Level: slog.LevelInfo,
 	})))
 
+	dir := *stateDir
+	if dir == "" {
+		dir = defaultStateDir(*configPath)
+	}
+
+	// Self-update launcher (M6): before anything else, so a fresh start of
+	// the installed binary hands over to the newest staged one. A broken
+	// update directory never stops the agent; it only disables updates.
+	upd, trial := startUpdater(dir, keys, keyErr, *selfCheck, *maxBoots)
+
 	cfg, err := LoadConfig(*configPath)
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
-	}
-
-	dir := *stateDir
-	if dir == "" {
-		dir = defaultStateDir(*configPath)
 	}
 	ids, err := loadIdentities(dir, cfg)
 	if err != nil {
@@ -61,6 +88,20 @@ func main() {
 	defer stop()
 
 	a := NewAgent(cfg, agentVersion, ids)
+	a.upd = upd
+	a.trial = newTrialState(trial)
+	if upd != nil {
+		// Final counters a previous process persisted before a restart.
+		if finals := upd.loadFinals(); len(finals) > 0 {
+			for _, r := range finals {
+				a.finals.add(r)
+			}
+			a.finalsPersisted.Store(true)
+			slog.Info("resending final traffic counters from before the restart", "reports", len(finals))
+		} else {
+			upd.dropFinals()
+		}
+	}
 
 	slog.Info("agent starting",
 		"agent_version", agentVersion,
@@ -73,6 +114,30 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("agent stopped")
+}
+
+func startUpdater(dir string, keys []release.PublicKey, keyErr error, selfCheck time.Duration, maxBoots int) (*updater, *trialRec) {
+	if keyErr != nil {
+		slog.Error("self-update disabled", "error", keyErr)
+		return nil, nil
+	}
+	upd, err := newUpdater(dir, agentVersion, keys)
+	if err != nil {
+		slog.Error("self-update disabled", "error", err)
+		return nil, nil
+	}
+	upd.selfCheck = max(selfCheck, 10*time.Second)
+	upd.maxBoots = max(maxBoots, 1)
+	trial, err := upd.launch(os.Getenv(envLaunched) != "")
+	if err != nil {
+		slog.Error("update state", "error", err)
+	}
+	ids := make([]string, 0, len(keys))
+	for _, k := range keys {
+		ids = append(ids, k.ID)
+	}
+	slog.Info("self-update", "release_keys", ids, "on_probation", trial != nil)
+	return upd, trial
 }
 
 // defaultStateDir: systemd's StateDirectory= ($STATE_DIRECTORY, first entry)

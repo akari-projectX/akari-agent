@@ -186,6 +186,78 @@ func (UserOp_Op) EnumDescriptor() ([]byte, []int) {
 	return file_agent_proto_rawDescGZIP(), []int{11, 0}
 }
 
+type UpdateStatus_State int32
+
+const (
+	UpdateStatus_STATE_UNSPECIFIED UpdateStatus_State = 0
+	// The offer failed a check (signature, platform, version policy,
+	// panel protocol, already rolled back from); nothing was downloaded.
+	UpdateStatus_STATE_REJECTED    UpdateStatus_State = 1
+	UpdateStatus_STATE_DOWNLOADING UpdateStatus_State = 2
+	// Download or verification failed, or the switch could not happen;
+	// the running binary stays.
+	UpdateStatus_STATE_FAILED UpdateStatus_State = 3
+	// Verified and staged; final counters flushed; about to restart.
+	UpdateStatus_STATE_RESTARTING UpdateStatus_State = 4
+	// The new binary did not come up healthy (crashed on start, or no
+	// connected + acked apply within the self-check timeout); the agent
+	// went back to the previous binary. Sent by the binary that runs after
+	// the rollback, after its Hello.
+	UpdateStatus_STATE_ROLLED_BACK UpdateStatus_State = 5
+	// The new binary passed its self-check (sent after its Hello + first
+	// ok apply).
+	UpdateStatus_STATE_CONFIRMED UpdateStatus_State = 6
+)
+
+// Enum value maps for UpdateStatus_State.
+var (
+	UpdateStatus_State_name = map[int32]string{
+		0: "STATE_UNSPECIFIED",
+		1: "STATE_REJECTED",
+		2: "STATE_DOWNLOADING",
+		3: "STATE_FAILED",
+		4: "STATE_RESTARTING",
+		5: "STATE_ROLLED_BACK",
+		6: "STATE_CONFIRMED",
+	}
+	UpdateStatus_State_value = map[string]int32{
+		"STATE_UNSPECIFIED": 0,
+		"STATE_REJECTED":    1,
+		"STATE_DOWNLOADING": 2,
+		"STATE_FAILED":      3,
+		"STATE_RESTARTING":  4,
+		"STATE_ROLLED_BACK": 5,
+		"STATE_CONFIRMED":   6,
+	}
+)
+
+func (x UpdateStatus_State) Enum() *UpdateStatus_State {
+	p := new(UpdateStatus_State)
+	*p = x
+	return p
+}
+
+func (x UpdateStatus_State) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (UpdateStatus_State) Descriptor() protoreflect.EnumDescriptor {
+	return file_agent_proto_enumTypes[3].Descriptor()
+}
+
+func (UpdateStatus_State) Type() protoreflect.EnumType {
+	return &file_agent_proto_enumTypes[3]
+}
+
+func (x UpdateStatus_State) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use UpdateStatus_State.Descriptor instead.
+func (UpdateStatus_State) EnumDescriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{20, 0}
+}
+
 type EnrollRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Token string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
@@ -424,6 +496,9 @@ type Hello struct {
 	//       state_hash, LeaseGrant.
 	//   2 = renews its certificate (AgentChannel.Renew). Protocol 1 agents
 	//       are served as before; they just never rotate their certificate.
+	//   3 = signed self-update (UpdateOffer, FetchArtifact, UpdateStatus).
+	//       Protocol 1/2 agents are served as before; they are never
+	//       offered an update.
 	ProtocolVersion uint32 `protobuf:"varint,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	// State hash of what the agent actually runs (see "State hash" below),
 	// for config_version + the applied user set. Empty for protocol 0.
@@ -829,6 +904,7 @@ type AgentUp struct {
 	//	*AgentUp_Heartbeat
 	//	*AgentUp_Traffic
 	//	*AgentUp_Ack
+	//	*AgentUp_UpdateStatus
 	Msg           isAgentUp_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -907,6 +983,15 @@ func (x *AgentUp) GetAck() *Ack {
 	return nil
 }
 
+func (x *AgentUp) GetUpdateStatus() *UpdateStatus {
+	if x != nil {
+		if x, ok := x.Msg.(*AgentUp_UpdateStatus); ok {
+			return x.UpdateStatus
+		}
+	}
+	return nil
+}
+
 type isAgentUp_Msg interface {
 	isAgentUp_Msg()
 }
@@ -927,6 +1012,10 @@ type AgentUp_Ack struct {
 	Ack *Ack `protobuf:"bytes,4,opt,name=ack,proto3,oneof"`
 }
 
+type AgentUp_UpdateStatus struct {
+	UpdateStatus *UpdateStatus `protobuf:"bytes,5,opt,name=update_status,json=updateStatus,proto3,oneof"` // protocol >= 3
+}
+
 func (*AgentUp_Hello) isAgentUp_Msg() {}
 
 func (*AgentUp_Heartbeat) isAgentUp_Msg() {}
@@ -934,6 +1023,8 @@ func (*AgentUp_Heartbeat) isAgentUp_Msg() {}
 func (*AgentUp_Traffic) isAgentUp_Msg() {}
 
 func (*AgentUp_Ack) isAgentUp_Msg() {}
+
+func (*AgentUp_UpdateStatus) isAgentUp_Msg() {}
 
 // One protocol account for one inbound. account_json follows the xray
 // per-protocol account schema, e.g. {"id": "...", "flow": "xtls-rprx-vision"}
@@ -1319,6 +1410,324 @@ func (*Noop) Descriptor() ([]byte, []int) {
 	return file_agent_proto_rawDescGZIP(), []int{15}
 }
 
+// --- Agent self-update (protocol >= 3, M6) --------------------------------
+//
+// Trust: the agent runs only binaries described by a manifest signed with
+// an Ed25519 release key PINNED in the agent binary (never the panel's key,
+// never a key the panel sends). The panel only relays: a compromised panel
+// can withhold or delay updates, not push an unsigned, foreign-platform or
+// downgraded binary.
+//
+// Manifest: UTF-8 JSON object, signed and transported VERBATIM (never
+// re-serialized):
+//
+//	{"schema":1, "version":"v1.2.3", "os":"linux", "arch":"amd64",
+//	 "sha256":"<64 lowercase hex>", "size":<bytes>,
+//	 "min_panel_protocol":3, "created_at":"<RFC 3339>", "rollback":false}
+//
+// version is semver with a leading "v". The agent accepts it only if:
+// some signature verifies under a pinned key; schema == 1; os/arch are its
+// own; version > its running version (semver precedence) — or rollback is
+// true (an explicitly signed rollback target), and never a version it
+// already rolled back from; min_panel_protocol <= the offer's
+// panel_protocol; size <= 256 MiB.
+// Signature: Ed25519 over "akari-agent-manifest-v1\n" || manifest bytes.
+// key_id: first 8 bytes of SHA-256(raw 32-byte public key), lowercase hex.
+type ManifestSignature struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	KeyId         string                 `protobuf:"bytes,1,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
+	Signature     []byte                 `protobuf:"bytes,2,opt,name=signature,proto3" json:"signature,omitempty"` // 64 bytes
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ManifestSignature) Reset() {
+	*x = ManifestSignature{}
+	mi := &file_agent_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ManifestSignature) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ManifestSignature) ProtoMessage() {}
+
+func (x *ManifestSignature) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ManifestSignature.ProtoReflect.Descriptor instead.
+func (*ManifestSignature) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *ManifestSignature) GetKeyId() string {
+	if x != nil {
+		return x.KeyId
+	}
+	return ""
+}
+
+func (x *ManifestSignature) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
+// Offer to update. Sent by the panel at most once per stream and rollout
+// (re-sent on a new stream while the node's rollout entry is open). The
+// agent answers with UpdateStatus (REJECTED on any check failure, else
+// DOWNLOADING ... RESTARTING); a duplicate offer of the version it is
+// already working on is ignored.
+type UpdateOffer struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	RolloutId  string                 `protobuf:"bytes,1,opt,name=rollout_id,json=rolloutId,proto3" json:"rollout_id,omitempty"` // opaque, echoed in UpdateStatus
+	Manifest   []byte                 `protobuf:"bytes,2,opt,name=manifest,proto3" json:"manifest,omitempty"`                    // the signed bytes, verbatim
+	Signatures []*ManifestSignature   `protobuf:"bytes,3,rep,name=signatures,proto3" json:"signatures,omitempty"`                // any one valid suffices
+	// The panel's control-protocol revision (the manifest's
+	// min_panel_protocol must not exceed it).
+	PanelProtocol uint32 `protobuf:"varint,4,opt,name=panel_protocol,json=panelProtocol,proto3" json:"panel_protocol,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateOffer) Reset() {
+	*x = UpdateOffer{}
+	mi := &file_agent_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateOffer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateOffer) ProtoMessage() {}
+
+func (x *UpdateOffer) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateOffer.ProtoReflect.Descriptor instead.
+func (*UpdateOffer) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *UpdateOffer) GetRolloutId() string {
+	if x != nil {
+		return x.RolloutId
+	}
+	return ""
+}
+
+func (x *UpdateOffer) GetManifest() []byte {
+	if x != nil {
+		return x.Manifest
+	}
+	return nil
+}
+
+func (x *UpdateOffer) GetSignatures() []*ManifestSignature {
+	if x != nil {
+		return x.Signatures
+	}
+	return nil
+}
+
+func (x *UpdateOffer) GetPanelProtocol() uint32 {
+	if x != nil {
+		return x.PanelProtocol
+	}
+	return 0
+}
+
+type FetchArtifactRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Sha256        string                 `protobuf:"bytes,1,opt,name=sha256,proto3" json:"sha256,omitempty"`  // lowercase hex, from the manifest
+	Offset        uint64                 `protobuf:"varint,2,opt,name=offset,proto3" json:"offset,omitempty"` // resume position; 0 = from the start
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FetchArtifactRequest) Reset() {
+	*x = FetchArtifactRequest{}
+	mi := &file_agent_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FetchArtifactRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FetchArtifactRequest) ProtoMessage() {}
+
+func (x *FetchArtifactRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FetchArtifactRequest.ProtoReflect.Descriptor instead.
+func (*FetchArtifactRequest) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *FetchArtifactRequest) GetSha256() string {
+	if x != nil {
+		return x.Sha256
+	}
+	return ""
+}
+
+func (x *FetchArtifactRequest) GetOffset() uint64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+type ArtifactChunk struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"` // consecutive bytes from the requested offset, <= 1 MiB
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ArtifactChunk) Reset() {
+	*x = ArtifactChunk{}
+	mi := &file_agent_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ArtifactChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ArtifactChunk) ProtoMessage() {}
+
+func (x *ArtifactChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ArtifactChunk.ProtoReflect.Descriptor instead.
+func (*ArtifactChunk) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *ArtifactChunk) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+// Progress / outcome of an update. Informational for the panel (its health
+// gate is its own: a Hello with the new agent_version followed by an ok
+// Ack within the rollout's timeout), except that REJECTED, FAILED and
+// ROLLED_BACK mark the node failed at once.
+type UpdateStatus struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RolloutId     string                 `protobuf:"bytes,1,opt,name=rollout_id,json=rolloutId,proto3" json:"rollout_id,omitempty"`
+	Version       string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"` // the offered / attempted version
+	State         UpdateStatus_State     `protobuf:"varint,3,opt,name=state,proto3,enum=akari.v1.UpdateStatus_State" json:"state,omitempty"`
+	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateStatus) Reset() {
+	*x = UpdateStatus{}
+	mi := &file_agent_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateStatus) ProtoMessage() {}
+
+func (x *UpdateStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateStatus.ProtoReflect.Descriptor instead.
+func (*UpdateStatus) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *UpdateStatus) GetRolloutId() string {
+	if x != nil {
+		return x.RolloutId
+	}
+	return ""
+}
+
+func (x *UpdateStatus) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+func (x *UpdateStatus) GetState() UpdateStatus_State {
+	if x != nil {
+		return x.State
+	}
+	return UpdateStatus_STATE_UNSPECIFIED
+}
+
+func (x *UpdateStatus) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
 type PanelDown struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Msg:
@@ -1327,6 +1736,7 @@ type PanelDown struct {
 	//	*PanelDown_Delta
 	//	*PanelDown_Noop
 	//	*PanelDown_Lease
+	//	*PanelDown_UpdateOffer
 	Msg           isPanelDown_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1334,7 +1744,7 @@ type PanelDown struct {
 
 func (x *PanelDown) Reset() {
 	*x = PanelDown{}
-	mi := &file_agent_proto_msgTypes[16]
+	mi := &file_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1346,7 +1756,7 @@ func (x *PanelDown) String() string {
 func (*PanelDown) ProtoMessage() {}
 
 func (x *PanelDown) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[16]
+	mi := &file_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1359,7 +1769,7 @@ func (x *PanelDown) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PanelDown.ProtoReflect.Descriptor instead.
 func (*PanelDown) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{16}
+	return file_agent_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *PanelDown) GetMsg() isPanelDown_Msg {
@@ -1405,6 +1815,15 @@ func (x *PanelDown) GetLease() *LeaseGrant {
 	return nil
 }
 
+func (x *PanelDown) GetUpdateOffer() *UpdateOffer {
+	if x != nil {
+		if x, ok := x.Msg.(*PanelDown_UpdateOffer); ok {
+			return x.UpdateOffer
+		}
+	}
+	return nil
+}
+
 type isPanelDown_Msg interface {
 	isPanelDown_Msg()
 }
@@ -1425,6 +1844,10 @@ type PanelDown_Lease struct {
 	Lease *LeaseGrant `protobuf:"bytes,4,opt,name=lease,proto3,oneof"`
 }
 
+type PanelDown_UpdateOffer struct {
+	UpdateOffer *UpdateOffer `protobuf:"bytes,5,opt,name=update_offer,json=updateOffer,proto3,oneof"` // protocol >= 3
+}
+
 func (*PanelDown_Snapshot) isPanelDown_Msg() {}
 
 func (*PanelDown_Delta) isPanelDown_Msg() {}
@@ -1432,6 +1855,8 @@ func (*PanelDown_Delta) isPanelDown_Msg() {}
 func (*PanelDown_Noop) isPanelDown_Msg() {}
 
 func (*PanelDown_Lease) isPanelDown_Msg() {}
+
+func (*PanelDown_UpdateOffer) isPanelDown_Msg() {}
 
 var File_agent_proto protoreflect.FileDescriptor
 
@@ -1493,12 +1918,13 @@ const file_agent_proto_rawDesc = "" +
 	"\x12REASON_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tREASON_OK\x10\x01\x12\x17\n" +
 	"\x13REASON_APPLY_FAILED\x10\x02\x12\x18\n" +
-	"\x14REASON_BASE_MISMATCH\x10\x03\"\xc6\x01\n" +
+	"\x14REASON_BASE_MISMATCH\x10\x03\"\x85\x02\n" +
 	"\aAgentUp\x12'\n" +
 	"\x05hello\x18\x01 \x01(\v2\x0f.akari.v1.HelloH\x00R\x05hello\x123\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x13.akari.v1.HeartbeatH\x00R\theartbeat\x123\n" +
 	"\atraffic\x18\x03 \x01(\v2\x17.akari.v1.TrafficReportH\x00R\atraffic\x12!\n" +
-	"\x03ack\x18\x04 \x01(\v2\r.akari.v1.AckH\x00R\x03ackB\x05\n" +
+	"\x03ack\x18\x04 \x01(\v2\r.akari.v1.AckH\x00R\x03ack\x12=\n" +
+	"\rupdate_status\x18\x05 \x01(\v2\x16.akari.v1.UpdateStatusH\x00R\fupdateStatusB\x05\n" +
 	"\x03msg\"m\n" +
 	"\vInboundUser\x12\x1f\n" +
 	"\vinbound_tag\x18\x01 \x01(\tR\n" +
@@ -1529,20 +1955,52 @@ const file_agent_proto_rawDesc = "" +
 	"\x10duration_seconds\x18\x01 \x01(\x04R\x0fdurationSeconds\x125\n" +
 	"\vremove_mode\x18\x02 \x01(\x0e2\x14.akari.v1.RemoveModeR\n" +
 	"removeMode\"\x06\n" +
-	"\x04Noop\"\xcb\x01\n" +
+	"\x04Noop\"H\n" +
+	"\x11ManifestSignature\x12\x15\n" +
+	"\x06key_id\x18\x01 \x01(\tR\x05keyId\x12\x1c\n" +
+	"\tsignature\x18\x02 \x01(\fR\tsignature\"\xac\x01\n" +
+	"\vUpdateOffer\x12\x1d\n" +
+	"\n" +
+	"rollout_id\x18\x01 \x01(\tR\trolloutId\x12\x1a\n" +
+	"\bmanifest\x18\x02 \x01(\fR\bmanifest\x12;\n" +
+	"\n" +
+	"signatures\x18\x03 \x03(\v2\x1b.akari.v1.ManifestSignatureR\n" +
+	"signatures\x12%\n" +
+	"\x0epanel_protocol\x18\x04 \x01(\rR\rpanelProtocol\"F\n" +
+	"\x14FetchArtifactRequest\x12\x16\n" +
+	"\x06sha256\x18\x01 \x01(\tR\x06sha256\x12\x16\n" +
+	"\x06offset\x18\x02 \x01(\x04R\x06offset\"#\n" +
+	"\rArtifactChunk\x12\x12\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\"\xb1\x02\n" +
+	"\fUpdateStatus\x12\x1d\n" +
+	"\n" +
+	"rollout_id\x18\x01 \x01(\tR\trolloutId\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\tR\aversion\x122\n" +
+	"\x05state\x18\x03 \x01(\x0e2\x1c.akari.v1.UpdateStatus.StateR\x05state\x12\x14\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\"\x9d\x01\n" +
+	"\x05State\x12\x15\n" +
+	"\x11STATE_UNSPECIFIED\x10\x00\x12\x12\n" +
+	"\x0eSTATE_REJECTED\x10\x01\x12\x15\n" +
+	"\x11STATE_DOWNLOADING\x10\x02\x12\x10\n" +
+	"\fSTATE_FAILED\x10\x03\x12\x14\n" +
+	"\x10STATE_RESTARTING\x10\x04\x12\x15\n" +
+	"\x11STATE_ROLLED_BACK\x10\x05\x12\x13\n" +
+	"\x0fSTATE_CONFIRMED\x10\x06\"\x87\x02\n" +
 	"\tPanelDown\x126\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x18.akari.v1.ConfigSnapshotH\x00R\bsnapshot\x12+\n" +
 	"\x05delta\x18\x02 \x01(\v2\x13.akari.v1.UserDeltaH\x00R\x05delta\x12$\n" +
 	"\x04noop\x18\x03 \x01(\v2\x0e.akari.v1.NoopH\x00R\x04noop\x12,\n" +
-	"\x05lease\x18\x04 \x01(\v2\x14.akari.v1.LeaseGrantH\x00R\x05leaseB\x05\n" +
+	"\x05lease\x18\x04 \x01(\v2\x14.akari.v1.LeaseGrantH\x00R\x05lease\x12:\n" +
+	"\fupdate_offer\x18\x05 \x01(\v2\x15.akari.v1.UpdateOfferH\x00R\vupdateOfferB\x05\n" +
 	"\x03msg*;\n" +
 	"\n" +
 	"RemoveMode\x12\x14\n" +
 	"\x10REMOVE_MODE_GATE\x10\x00\x12\x17\n" +
-	"\x13REMOVE_MODE_REBUILD\x10\x012\x87\x01\n" +
+	"\x13REMOVE_MODE_REBUILD\x10\x012\xd3\x01\n" +
 	"\fAgentChannel\x129\n" +
 	"\vOpenChannel\x12\x11.akari.v1.AgentUp\x1a\x13.akari.v1.PanelDown(\x010\x01\x12<\n" +
-	"\x05Renew\x12\x16.akari.v1.RenewRequest\x1a\x1b.akari.v1.IssuedCertificate2Q\n" +
+	"\x05Renew\x12\x16.akari.v1.RenewRequest\x1a\x1b.akari.v1.IssuedCertificate\x12J\n" +
+	"\rFetchArtifact\x12\x1e.akari.v1.FetchArtifactRequest\x1a\x17.akari.v1.ArtifactChunk0\x012Q\n" +
 	"\x0fAgentEnrollment\x12>\n" +
 	"\x06Enroll\x12\x17.akari.v1.EnrollRequest\x1a\x1b.akari.v1.IssuedCertificateB\x10Z\x0eakari/agent/pbb\x06proto3"
 
@@ -1558,58 +2016,70 @@ func file_agent_proto_rawDescGZIP() []byte {
 	return file_agent_proto_rawDescData
 }
 
-var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_agent_proto_goTypes = []any{
-	(RemoveMode)(0),           // 0: akari.v1.RemoveMode
-	(Ack_Reason)(0),           // 1: akari.v1.Ack.Reason
-	(UserOp_Op)(0),            // 2: akari.v1.UserOp.Op
-	(*EnrollRequest)(nil),     // 3: akari.v1.EnrollRequest
-	(*RenewRequest)(nil),      // 4: akari.v1.RenewRequest
-	(*IssuedCertificate)(nil), // 5: akari.v1.IssuedCertificate
-	(*AgentInfo)(nil),         // 6: akari.v1.AgentInfo
-	(*Hello)(nil),             // 7: akari.v1.Hello
-	(*Heartbeat)(nil),         // 8: akari.v1.Heartbeat
-	(*UserTraffic)(nil),       // 9: akari.v1.UserTraffic
-	(*TrafficReport)(nil),     // 10: akari.v1.TrafficReport
-	(*Ack)(nil),               // 11: akari.v1.Ack
-	(*AgentUp)(nil),           // 12: akari.v1.AgentUp
-	(*InboundUser)(nil),       // 13: akari.v1.InboundUser
-	(*UserOp)(nil),            // 14: akari.v1.UserOp
-	(*ConfigSnapshot)(nil),    // 15: akari.v1.ConfigSnapshot
-	(*UserDelta)(nil),         // 16: akari.v1.UserDelta
-	(*LeaseGrant)(nil),        // 17: akari.v1.LeaseGrant
-	(*Noop)(nil),              // 18: akari.v1.Noop
-	(*PanelDown)(nil),         // 19: akari.v1.PanelDown
+	(RemoveMode)(0),              // 0: akari.v1.RemoveMode
+	(Ack_Reason)(0),              // 1: akari.v1.Ack.Reason
+	(UserOp_Op)(0),               // 2: akari.v1.UserOp.Op
+	(UpdateStatus_State)(0),      // 3: akari.v1.UpdateStatus.State
+	(*EnrollRequest)(nil),        // 4: akari.v1.EnrollRequest
+	(*RenewRequest)(nil),         // 5: akari.v1.RenewRequest
+	(*IssuedCertificate)(nil),    // 6: akari.v1.IssuedCertificate
+	(*AgentInfo)(nil),            // 7: akari.v1.AgentInfo
+	(*Hello)(nil),                // 8: akari.v1.Hello
+	(*Heartbeat)(nil),            // 9: akari.v1.Heartbeat
+	(*UserTraffic)(nil),          // 10: akari.v1.UserTraffic
+	(*TrafficReport)(nil),        // 11: akari.v1.TrafficReport
+	(*Ack)(nil),                  // 12: akari.v1.Ack
+	(*AgentUp)(nil),              // 13: akari.v1.AgentUp
+	(*InboundUser)(nil),          // 14: akari.v1.InboundUser
+	(*UserOp)(nil),               // 15: akari.v1.UserOp
+	(*ConfigSnapshot)(nil),       // 16: akari.v1.ConfigSnapshot
+	(*UserDelta)(nil),            // 17: akari.v1.UserDelta
+	(*LeaseGrant)(nil),           // 18: akari.v1.LeaseGrant
+	(*Noop)(nil),                 // 19: akari.v1.Noop
+	(*ManifestSignature)(nil),    // 20: akari.v1.ManifestSignature
+	(*UpdateOffer)(nil),          // 21: akari.v1.UpdateOffer
+	(*FetchArtifactRequest)(nil), // 22: akari.v1.FetchArtifactRequest
+	(*ArtifactChunk)(nil),        // 23: akari.v1.ArtifactChunk
+	(*UpdateStatus)(nil),         // 24: akari.v1.UpdateStatus
+	(*PanelDown)(nil),            // 25: akari.v1.PanelDown
 }
 var file_agent_proto_depIdxs = []int32{
-	6,  // 0: akari.v1.Hello.info:type_name -> akari.v1.AgentInfo
-	9,  // 1: akari.v1.TrafficReport.users:type_name -> akari.v1.UserTraffic
+	7,  // 0: akari.v1.Hello.info:type_name -> akari.v1.AgentInfo
+	10, // 1: akari.v1.TrafficReport.users:type_name -> akari.v1.UserTraffic
 	1,  // 2: akari.v1.Ack.reason:type_name -> akari.v1.Ack.Reason
-	7,  // 3: akari.v1.AgentUp.hello:type_name -> akari.v1.Hello
-	8,  // 4: akari.v1.AgentUp.heartbeat:type_name -> akari.v1.Heartbeat
-	10, // 5: akari.v1.AgentUp.traffic:type_name -> akari.v1.TrafficReport
-	11, // 6: akari.v1.AgentUp.ack:type_name -> akari.v1.Ack
-	2,  // 7: akari.v1.UserOp.op:type_name -> akari.v1.UserOp.Op
-	13, // 8: akari.v1.UserOp.inbound_users:type_name -> akari.v1.InboundUser
-	14, // 9: akari.v1.ConfigSnapshot.users:type_name -> akari.v1.UserOp
-	14, // 10: akari.v1.UserDelta.ops:type_name -> akari.v1.UserOp
-	0,  // 11: akari.v1.LeaseGrant.remove_mode:type_name -> akari.v1.RemoveMode
-	15, // 12: akari.v1.PanelDown.snapshot:type_name -> akari.v1.ConfigSnapshot
-	16, // 13: akari.v1.PanelDown.delta:type_name -> akari.v1.UserDelta
-	18, // 14: akari.v1.PanelDown.noop:type_name -> akari.v1.Noop
-	17, // 15: akari.v1.PanelDown.lease:type_name -> akari.v1.LeaseGrant
-	12, // 16: akari.v1.AgentChannel.OpenChannel:input_type -> akari.v1.AgentUp
-	4,  // 17: akari.v1.AgentChannel.Renew:input_type -> akari.v1.RenewRequest
-	3,  // 18: akari.v1.AgentEnrollment.Enroll:input_type -> akari.v1.EnrollRequest
-	19, // 19: akari.v1.AgentChannel.OpenChannel:output_type -> akari.v1.PanelDown
-	5,  // 20: akari.v1.AgentChannel.Renew:output_type -> akari.v1.IssuedCertificate
-	5,  // 21: akari.v1.AgentEnrollment.Enroll:output_type -> akari.v1.IssuedCertificate
-	19, // [19:22] is the sub-list for method output_type
-	16, // [16:19] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	8,  // 3: akari.v1.AgentUp.hello:type_name -> akari.v1.Hello
+	9,  // 4: akari.v1.AgentUp.heartbeat:type_name -> akari.v1.Heartbeat
+	11, // 5: akari.v1.AgentUp.traffic:type_name -> akari.v1.TrafficReport
+	12, // 6: akari.v1.AgentUp.ack:type_name -> akari.v1.Ack
+	24, // 7: akari.v1.AgentUp.update_status:type_name -> akari.v1.UpdateStatus
+	2,  // 8: akari.v1.UserOp.op:type_name -> akari.v1.UserOp.Op
+	14, // 9: akari.v1.UserOp.inbound_users:type_name -> akari.v1.InboundUser
+	15, // 10: akari.v1.ConfigSnapshot.users:type_name -> akari.v1.UserOp
+	15, // 11: akari.v1.UserDelta.ops:type_name -> akari.v1.UserOp
+	0,  // 12: akari.v1.LeaseGrant.remove_mode:type_name -> akari.v1.RemoveMode
+	20, // 13: akari.v1.UpdateOffer.signatures:type_name -> akari.v1.ManifestSignature
+	3,  // 14: akari.v1.UpdateStatus.state:type_name -> akari.v1.UpdateStatus.State
+	16, // 15: akari.v1.PanelDown.snapshot:type_name -> akari.v1.ConfigSnapshot
+	17, // 16: akari.v1.PanelDown.delta:type_name -> akari.v1.UserDelta
+	19, // 17: akari.v1.PanelDown.noop:type_name -> akari.v1.Noop
+	18, // 18: akari.v1.PanelDown.lease:type_name -> akari.v1.LeaseGrant
+	21, // 19: akari.v1.PanelDown.update_offer:type_name -> akari.v1.UpdateOffer
+	13, // 20: akari.v1.AgentChannel.OpenChannel:input_type -> akari.v1.AgentUp
+	5,  // 21: akari.v1.AgentChannel.Renew:input_type -> akari.v1.RenewRequest
+	22, // 22: akari.v1.AgentChannel.FetchArtifact:input_type -> akari.v1.FetchArtifactRequest
+	4,  // 23: akari.v1.AgentEnrollment.Enroll:input_type -> akari.v1.EnrollRequest
+	25, // 24: akari.v1.AgentChannel.OpenChannel:output_type -> akari.v1.PanelDown
+	6,  // 25: akari.v1.AgentChannel.Renew:output_type -> akari.v1.IssuedCertificate
+	23, // 26: akari.v1.AgentChannel.FetchArtifact:output_type -> akari.v1.ArtifactChunk
+	6,  // 27: akari.v1.AgentEnrollment.Enroll:output_type -> akari.v1.IssuedCertificate
+	24, // [24:28] is the sub-list for method output_type
+	20, // [20:24] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_agent_proto_init() }
@@ -1623,20 +2093,22 @@ func file_agent_proto_init() {
 		(*AgentUp_Heartbeat)(nil),
 		(*AgentUp_Traffic)(nil),
 		(*AgentUp_Ack)(nil),
+		(*AgentUp_UpdateStatus)(nil),
 	}
-	file_agent_proto_msgTypes[16].OneofWrappers = []any{
+	file_agent_proto_msgTypes[21].OneofWrappers = []any{
 		(*PanelDown_Snapshot)(nil),
 		(*PanelDown_Delta)(nil),
 		(*PanelDown_Noop)(nil),
 		(*PanelDown_Lease)(nil),
+		(*PanelDown_UpdateOffer)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_proto_rawDesc), len(file_agent_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   17,
+			NumEnums:      4,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

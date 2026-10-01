@@ -30,6 +30,17 @@ service AgentChannel {
   // FAILED_PRECONDITION (node being deleted), INVALID_ARGUMENT (bad CSR),
   // RESOURCE_EXHAUSTED (rate limited), UNAVAILABLE (retry later).
   rpc Renew(RenewRequest) returns (IssuedCertificate);
+  // Agent self-update artifact download (protocol >= 3, M6). Streams the
+  // bytes of a release binary the panel holds, identified by its SHA-256
+  // (from a signed manifest in an UpdateOffer), starting at `offset`
+  // (resume). The panel only serves releases whose upload completed and
+  // whose manifest verified; the AGENT verifies size, SHA-256 and the
+  // manifest signature itself before using anything. Errors:
+  // UNAUTHENTICATED (no/unknown/revoked certificate), NOT_FOUND (unknown
+  // or incomplete artifact), INVALID_ARGUMENT (bad digest/offset),
+  // RESOURCE_EXHAUSTED (too many concurrent downloads; retry later),
+  // UNAVAILABLE (retry later).
+  rpc FetchArtifact(FetchArtifactRequest) returns (stream ArtifactChunk);
 }
 
 // Callable WITHOUT a client certificate (server TLS is still verified by
@@ -87,6 +98,9 @@ message Hello {
   //       state_hash, LeaseGrant.
   //   2 = renews its certificate (AgentChannel.Renew). Protocol 1 agents
   //       are served as before; they just never rotate their certificate.
+  //   3 = signed self-update (UpdateOffer, FetchArtifact, UpdateStatus).
+  //       Protocol 1/2 agents are served as before; they are never
+  //       offered an update.
   uint32 protocol_version = 5;
   // State hash of what the agent actually runs (see "State hash" below),
   // for config_version + the applied user set. Empty for protocol 0.
@@ -176,6 +190,7 @@ message AgentUp {
     Heartbeat heartbeat = 2;
     TrafficReport traffic = 3;
     Ack ack = 4;
+    UpdateStatus update_status = 5; // protocol >= 3
   }
 }
 
@@ -259,11 +274,92 @@ enum RemoveMode {
 
 message Noop {}
 
+// --- Agent self-update (protocol >= 3, M6) --------------------------------
+//
+// Trust: the agent runs only binaries described by a manifest signed with
+// an Ed25519 release key PINNED in the agent binary (never the panel's key,
+// never a key the panel sends). The panel only relays: a compromised panel
+// can withhold or delay updates, not push an unsigned, foreign-platform or
+// downgraded binary.
+//
+// Manifest: UTF-8 JSON object, signed and transported VERBATIM (never
+// re-serialized):
+//   {"schema":1, "version":"v1.2.3", "os":"linux", "arch":"amd64",
+//    "sha256":"<64 lowercase hex>", "size":<bytes>,
+//    "min_panel_protocol":3, "created_at":"<RFC 3339>", "rollback":false}
+// version is semver with a leading "v". The agent accepts it only if:
+// some signature verifies under a pinned key; schema == 1; os/arch are its
+// own; version > its running version (semver precedence) — or rollback is
+// true (an explicitly signed rollback target), and never a version it
+// already rolled back from; min_panel_protocol <= the offer's
+// panel_protocol; size <= 256 MiB.
+// Signature: Ed25519 over "akari-agent-manifest-v1\n" || manifest bytes.
+// key_id: first 8 bytes of SHA-256(raw 32-byte public key), lowercase hex.
+message ManifestSignature {
+  string key_id = 1;
+  bytes signature = 2; // 64 bytes
+}
+
+// Offer to update. Sent by the panel at most once per stream and rollout
+// (re-sent on a new stream while the node's rollout entry is open). The
+// agent answers with UpdateStatus (REJECTED on any check failure, else
+// DOWNLOADING ... RESTARTING); a duplicate offer of the version it is
+// already working on is ignored.
+message UpdateOffer {
+  string rollout_id = 1; // opaque, echoed in UpdateStatus
+  bytes manifest = 2;    // the signed bytes, verbatim
+  repeated ManifestSignature signatures = 3; // any one valid suffices
+  // The panel's control-protocol revision (the manifest's
+  // min_panel_protocol must not exceed it).
+  uint32 panel_protocol = 4;
+}
+
+message FetchArtifactRequest {
+  string sha256 = 1; // lowercase hex, from the manifest
+  uint64 offset = 2; // resume position; 0 = from the start
+}
+
+message ArtifactChunk {
+  bytes data = 1; // consecutive bytes from the requested offset, <= 1 MiB
+}
+
+// Progress / outcome of an update. Informational for the panel (its health
+// gate is its own: a Hello with the new agent_version followed by an ok
+// Ack within the rollout's timeout), except that REJECTED, FAILED and
+// ROLLED_BACK mark the node failed at once.
+message UpdateStatus {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    // The offer failed a check (signature, platform, version policy,
+    // panel protocol, already rolled back from); nothing was downloaded.
+    STATE_REJECTED = 1;
+    STATE_DOWNLOADING = 2;
+    // Download or verification failed, or the switch could not happen;
+    // the running binary stays.
+    STATE_FAILED = 3;
+    // Verified and staged; final counters flushed; about to restart.
+    STATE_RESTARTING = 4;
+    // The new binary did not come up healthy (crashed on start, or no
+    // connected + acked apply within the self-check timeout); the agent
+    // went back to the previous binary. Sent by the binary that runs after
+    // the rollback, after its Hello.
+    STATE_ROLLED_BACK = 5;
+    // The new binary passed its self-check (sent after its Hello + first
+    // ok apply).
+    STATE_CONFIRMED = 6;
+  }
+  string rollout_id = 1;
+  string version = 2; // the offered / attempted version
+  State state = 3;
+  string error = 4;
+}
+
 message PanelDown {
   oneof msg {
     ConfigSnapshot snapshot = 1;
     UserDelta delta = 2;
     Noop noop = 3;
     LeaseGrant lease = 4;
+    UpdateOffer update_offer = 5; // protocol >= 3
   }
 }
