@@ -30,8 +30,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AgentChannel_OpenChannel_FullMethodName = "/akari.v1.AgentChannel/OpenChannel"
-	AgentChannel_Renew_FullMethodName       = "/akari.v1.AgentChannel/Renew"
+	AgentChannel_OpenChannel_FullMethodName   = "/akari.v1.AgentChannel/OpenChannel"
+	AgentChannel_Renew_FullMethodName         = "/akari.v1.AgentChannel/Renew"
+	AgentChannel_FetchArtifact_FullMethodName = "/akari.v1.AgentChannel/FetchArtifact"
 )
 
 // AgentChannelClient is the client API for AgentChannel service.
@@ -54,6 +55,17 @@ type AgentChannelClient interface {
 	// FAILED_PRECONDITION (node being deleted), INVALID_ARGUMENT (bad CSR),
 	// RESOURCE_EXHAUSTED (rate limited), UNAVAILABLE (retry later).
 	Renew(ctx context.Context, in *RenewRequest, opts ...grpc.CallOption) (*IssuedCertificate, error)
+	// Agent self-update artifact download (protocol >= 3, M6). Streams the
+	// bytes of a release binary the panel holds, identified by its SHA-256
+	// (from a signed manifest in an UpdateOffer), starting at `offset`
+	// (resume). The panel only serves releases whose upload completed and
+	// whose manifest verified; the AGENT verifies size, SHA-256 and the
+	// manifest signature itself before using anything. Errors:
+	// UNAUTHENTICATED (no/unknown/revoked certificate), NOT_FOUND (unknown
+	// or incomplete artifact), INVALID_ARGUMENT (bad digest/offset),
+	// RESOURCE_EXHAUSTED (too many concurrent downloads; retry later),
+	// UNAVAILABLE (retry later).
+	FetchArtifact(ctx context.Context, in *FetchArtifactRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ArtifactChunk], error)
 }
 
 type agentChannelClient struct {
@@ -87,6 +99,25 @@ func (c *agentChannelClient) Renew(ctx context.Context, in *RenewRequest, opts .
 	return out, nil
 }
 
+func (c *agentChannelClient) FetchArtifact(ctx context.Context, in *FetchArtifactRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ArtifactChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &AgentChannel_ServiceDesc.Streams[1], AgentChannel_FetchArtifact_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[FetchArtifactRequest, ArtifactChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AgentChannel_FetchArtifactClient = grpc.ServerStreamingClient[ArtifactChunk]
+
 // AgentChannelServer is the server API for AgentChannel service.
 // All implementations must embed UnimplementedAgentChannelServer
 // for forward compatibility.
@@ -107,6 +138,17 @@ type AgentChannelServer interface {
 	// FAILED_PRECONDITION (node being deleted), INVALID_ARGUMENT (bad CSR),
 	// RESOURCE_EXHAUSTED (rate limited), UNAVAILABLE (retry later).
 	Renew(context.Context, *RenewRequest) (*IssuedCertificate, error)
+	// Agent self-update artifact download (protocol >= 3, M6). Streams the
+	// bytes of a release binary the panel holds, identified by its SHA-256
+	// (from a signed manifest in an UpdateOffer), starting at `offset`
+	// (resume). The panel only serves releases whose upload completed and
+	// whose manifest verified; the AGENT verifies size, SHA-256 and the
+	// manifest signature itself before using anything. Errors:
+	// UNAUTHENTICATED (no/unknown/revoked certificate), NOT_FOUND (unknown
+	// or incomplete artifact), INVALID_ARGUMENT (bad digest/offset),
+	// RESOURCE_EXHAUSTED (too many concurrent downloads; retry later),
+	// UNAVAILABLE (retry later).
+	FetchArtifact(*FetchArtifactRequest, grpc.ServerStreamingServer[ArtifactChunk]) error
 	mustEmbedUnimplementedAgentChannelServer()
 }
 
@@ -122,6 +164,9 @@ func (UnimplementedAgentChannelServer) OpenChannel(grpc.BidiStreamingServer[Agen
 }
 func (UnimplementedAgentChannelServer) Renew(context.Context, *RenewRequest) (*IssuedCertificate, error) {
 	return nil, status.Error(codes.Unimplemented, "method Renew not implemented")
+}
+func (UnimplementedAgentChannelServer) FetchArtifact(*FetchArtifactRequest, grpc.ServerStreamingServer[ArtifactChunk]) error {
+	return status.Error(codes.Unimplemented, "method FetchArtifact not implemented")
 }
 func (UnimplementedAgentChannelServer) mustEmbedUnimplementedAgentChannelServer() {}
 func (UnimplementedAgentChannelServer) testEmbeddedByValue()                      {}
@@ -169,6 +214,17 @@ func _AgentChannel_Renew_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentChannel_FetchArtifact_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(FetchArtifactRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(AgentChannelServer).FetchArtifact(m, &grpc.GenericServerStream[FetchArtifactRequest, ArtifactChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AgentChannel_FetchArtifactServer = grpc.ServerStreamingServer[ArtifactChunk]
+
 // AgentChannel_ServiceDesc is the grpc.ServiceDesc for AgentChannel service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -187,6 +243,11 @@ var AgentChannel_ServiceDesc = grpc.ServiceDesc{
 			Handler:       _AgentChannel_OpenChannel_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
+		},
+		{
+			StreamName:    "FetchArtifact",
+			Handler:       _AgentChannel_FetchArtifact_Handler,
+			ServerStreams: true,
 		},
 	},
 	Metadata: "agent.proto",

@@ -1,4 +1,4 @@
-.PHONY: bench build dist proto sync-proto check-proto check-pb vet fmt-check test test-canary vulncheck ci
+.PHONY: bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb vet fmt-check test test-canary vulncheck ci
 
 # Canonical contract lives in akari-panel/proto/agent.proto. This repo vendors
 # a copy: `make sync-proto` pulls the sibling checkout's version and
@@ -15,6 +15,37 @@ GOBUILD  = CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "$(LDFLAGS)
 build:
 	$(GOBUILD) -o agent .
 
+# TEST ONLY (smoke): an agent that also pins the public test release key
+# (testdata/TEST-ONLY-release.key is committed, i.e. anyone can sign for
+# it). Never ship this; `make dist` refuses binaries that contain it.
+#   make build-testkeys VERSION=v900.0.0 OUT=/tmp/agent-v900
+OUT ?= agent-testkeys
+build-testkeys:
+	CGO_ENABLED=0 go build -tags akari_testkeys -trimpath -buildvcs=false -ldflags "$(LDFLAGS)" -o $(OUT) .
+
+# Offline release-signing tool (cmd/akari-sign; see README "Release signing").
+sign-tool:
+	CGO_ENABLED=0 go build -trimpath -buildvcs=false -o akari-sign ./cmd/akari-sign
+
+# Signed self-update manifests for dist/ binaries:
+#   make sign-manifest VERSION=v1.2.3 KEY=/secure/release.key   (or KEY_ENV=NAME)
+# -> dist/akari-agent-linux-<arch>.manifest.json + .manifest.sig
+MIN_PANEL_PROTOCOL ?= 3
+sign-manifest:
+	@test -n "$(KEY)$(KEY_ENV)" || { echo "KEY=<file> or KEY_ENV=<variable> required"; exit 1; }
+	for a in $(DIST_ARCHS); do \
+	  go run ./cmd/akari-sign sign $(if $(KEY),-key $(KEY),-key-env $(KEY_ENV)) \
+	    -binary dist/akari-agent-linux-$$a -version $(VERSION) -min-panel-protocol $(MIN_PANEL_PROTOCOL) || exit 1; \
+	done
+
+# Release binaries must pin exactly release-keys.txt: never the test key.
+TEST_PUBKEY = $(shell cut -d' ' -f1 testdata/TEST-ONLY-release.pub)
+check-release-keys:
+	@for f in dist/akari-agent-linux-*; do \
+	  case "$$f" in *.manifest.*) continue ;; esac; \
+	  if grep -qF "$(TEST_PUBKEY)" "$$f"; then echo "FAIL: $$f pins the TEST release key"; exit 1; fi; \
+	done; echo "release keys: ok (no test key in dist/)"
+
 # Release binaries (linux amd64 + arm64) and their checksums in dist/.
 DIST_ARCHS ?= amd64 arm64
 dist:
@@ -22,6 +53,7 @@ dist:
 	for a in $(DIST_ARCHS); do \
 	  GOOS=linux GOARCH=$$a $(GOBUILD) -o dist/akari-agent-linux-$$a . || exit 1; \
 	done
+	$(MAKE) check-release-keys
 	cd dist && sha256sum akari-agent-linux-* > SHA256SUMS
 
 proto:

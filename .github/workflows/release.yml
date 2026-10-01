@@ -43,6 +43,27 @@ jobs:
           make dist VERSION="$GITHUB_REF_NAME" COMMIT="$(git rev-parse --short=12 "$GITHUB_SHA")"
           dist/akari-agent-linux-amd64 -version
           [ "$(dist/akari-agent-linux-amd64 -version | cut -d' ' -f2)" = "$GITHUB_REF_NAME" ]
+      # M6 self-update: Ed25519-signed manifests (what agents verify, with
+      # the keys pinned in release-keys.txt). The private key lives only in
+      # the AKARI_RELEASE_SIGNING_KEY secret (akari-sign keygen; see README
+      # "Release signing keys"). No secret -> no manifests, with a warning:
+      # such a release cannot be rolled out through the panel.
+      - name: self-update manifests
+        env:
+          AKARI_RELEASE_SIGNING_KEY: ${{ secrets.AKARI_RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "$AKARI_RELEASE_SIGNING_KEY" ]; then
+            echo "::warning::AKARI_RELEASE_SIGNING_KEY not set: no signed self-update manifests in this release"
+            exit 0
+          fi
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$GITHUB_SHA")"
+          make sign-manifest VERSION="$GITHUB_REF_NAME" KEY_ENV=AKARI_RELEASE_SIGNING_KEY
+          for a in amd64 arm64; do
+            go run ./cmd/akari-sign verify -keys release-keys.txt \
+              -manifest "dist/akari-agent-linux-$a.manifest.json" -sig "dist/akari-agent-linux-$a.manifest.sig" \
+              -binary "dist/akari-agent-linux-$a" \
+              || { echo "::error::manifest does not verify under the pinned release keys (release-keys.txt)"; exit 1; }
+          done
       - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           path: .
@@ -56,10 +77,13 @@ jobs:
       - name: checksums and signatures
         working-directory: dist
         run: |
-          sha256sum akari-agent-linux-amd64 akari-agent-linux-arm64 "akari-agent-${GITHUB_REF_NAME}.cdx.json" > SHA256SUMS
+          files="akari-agent-linux-amd64 akari-agent-linux-arm64 akari-agent-${GITHUB_REF_NAME}.cdx.json"
+          files="$files $(ls akari-agent-linux-*.manifest.json akari-agent-linux-*.manifest.sig 2>/dev/null | tr '\n' ' ')"
+          # shellcheck disable=SC2086
+          sha256sum $files > SHA256SUMS
           # Keyless: the certificate binds each signature to this workflow
           # run (identity = this workflow at this tag, issuer = GitHub OIDC).
-          for f in akari-agent-linux-amd64 akari-agent-linux-arm64 "akari-agent-${GITHUB_REF_NAME}.cdx.json" SHA256SUMS; do
+          for f in $files SHA256SUMS; do
             cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
           done
           ls -l

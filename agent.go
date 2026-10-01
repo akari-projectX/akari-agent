@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -21,8 +22,8 @@ import (
 
 // agentProtocol is the control-protocol revision this agent speaks
 // (Hello.protocol_version; see agent.proto). 2 = renews its certificate
-// (AgentChannel.Renew).
-const agentProtocol = 2
+// (AgentChannel.Renew); 3 = signed self-update (UpdateOffer/FetchArtifact).
+const agentProtocol = 3
 
 // Agent is the node-side supervisor: one persistent mTLS gRPC stream to the
 // panel, an embedded xray-core, and periodic heartbeat/traffic reporting.
@@ -62,6 +63,17 @@ type Agent struct {
 	curCancel  context.CancelFunc
 	curViaNext bool
 	curStart   time.Time
+	// curFlush waits until everything queued on the current stream was
+	// handed to the transport (bounded by its timeout).
+	curFlush func(timeout time.Duration)
+
+	// Self-update (M6): nil when unavailable. trial is set when this
+	// process runs a binary on probation.
+	upd   *updater
+	trial *trialState
+	// finalsPersisted: final counters were loaded from the update state
+	// dir; the file goes once the queue has drained.
+	finalsPersisted atomic.Bool
 
 	// skipNext: the last attempt with the pending renewed identity failed
 	// for a reason that may be transient; the next attempt uses the
@@ -84,6 +96,8 @@ type Agent struct {
 	// How long a stream may run on the current certificate while a renewed
 	// one waits for its first successful connection.
 	nextRetryAfter time.Duration
+	fetchBackoff   time.Duration
+	exit           func(code int)
 }
 
 // dialed is an open stream and its connection.
@@ -108,6 +122,8 @@ func NewAgent(cfg *Config, agentVersion string, ids *identities) *Agent {
 		heartbeatEvery:  15 * time.Second,
 		renewCheckEvery: 30 * time.Second,
 		nextRetryAfter:  2 * time.Minute,
+		fetchBackoff:    2 * time.Second,
+		exit:            os.Exit,
 	}
 	a.dial = a.dialPanel
 	a.enrollRPC = a.enrollPanel
@@ -151,6 +167,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	go a.leaseLoop(ctx)
 	go a.renewLoop(ctx)
+	if a.trial != nil {
+		go a.trialLoop(ctx)
+	}
 	backoff := a.backoffBase
 	for {
 		start := time.Now()
@@ -252,6 +271,9 @@ func (a *Agent) session(parent context.Context) (err error) {
 	var wg sync.WaitGroup
 	defer wg.Wait() // runs after cancel (defers are LIFO)
 	defer cancel()
+	// Barriers: a message with no payload is never sent; the writer closes
+	// its channel when it reaches it (everything queued before is out).
+	var barriers sync.Map // *pb.AgentUp -> chan struct{}
 
 	// Writer: serializes all upstream messages onto the stream.
 	wg.Add(1)
@@ -262,6 +284,14 @@ func (a *Agent) session(parent context.Context) (err error) {
 			case <-ctx.Done():
 				return
 			case msg := <-sendCh:
+				if msg.Msg == nil {
+					if ch, ok := barriers.LoadAndDelete(msg); ok {
+						if c, ok := ch.(chan struct{}); ok {
+							close(c)
+						}
+					}
+					continue
+				}
 				if err := stream.Send(msg); err != nil {
 					done <- err
 					return
@@ -282,13 +312,32 @@ func (a *Agent) session(parent context.Context) (err error) {
 		}
 	}
 
+	flush := func(timeout time.Duration) {
+		b := &pb.AgentUp{}
+		ch := make(chan struct{})
+		barriers.Store(b, ch)
+		if send(b) != nil {
+			barriers.Delete(b)
+			return
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+		case <-time.After(timeout):
+		}
+	}
+
 	// Hello (and any final counters still owed) before anything else. The
 	// apply lock keeps a concurrent lease expiry from interleaving.
 	a.applyMu.Lock()
 	gen := a.attachStream(send, d.conn, cancel, viaNext)
+	a.streamMu.Lock()
+	a.curFlush = flush
+	a.streamMu.Unlock()
 	err = send(a.helloLocked())
 	if err == nil {
 		a.finals.flush(gen, send)
+		a.sendPendingReportLocked(gen, send)
 	}
 	a.applyMu.Unlock()
 	defer a.detachStream(gen)
@@ -300,7 +349,12 @@ func (a *Agent) session(parent context.Context) (err error) {
 	go func() { defer wg.Done(); heartbeatLoop(ctx, a.heartbeatEvery, send, a.lease.remaining, a.stats) }()
 	go func() {
 		defer wg.Done()
-		trafficLoop(ctx, a.trafficEvery, a.core, send, func() { a.finals.confirm(gen, a.trafficEvery) })
+		trafficLoop(ctx, a.trafficEvery, a.core, send, func() {
+			a.finals.confirm(gen, a.trafficEvery)
+			if a.finals.len() == 0 && a.finalsPersisted.Swap(false) {
+				a.upd.dropFinals()
+			}
+		})
 	}()
 	// Reader: applies panel-pushed state.
 	go func() {
@@ -341,7 +395,7 @@ func (a *Agent) detachStream(gen uint64) {
 	defer a.streamMu.Unlock()
 	if a.streamGen == gen {
 		a.curSend = nil
-		a.curConn, a.curCancel = nil, nil
+		a.curConn, a.curCancel, a.curFlush = nil, nil, nil
 	}
 }
 
@@ -414,6 +468,8 @@ func (a *Agent) handleDown(ctx context.Context, gen uint64, send func(*pb.AgentU
 		a.removeRebuild = rebuild
 		slog.Debug("lease granted", "duration", d)
 		return nil
+	case *pb.PanelDown_UpdateOffer:
+		return a.onUpdateOffer(ctx, gen, send, msg.UpdateOffer)
 	case *pb.PanelDown_Noop:
 		return nil
 	case nil:
@@ -460,7 +516,13 @@ func (a *Agent) applySnapshotLocked(ctx context.Context, gen uint64, send func(*
 	if err != nil {
 		reason = pb.Ack_REASON_APPLY_FAILED
 	}
-	return a.sendAckLocked(send, snap.ConfigVersion, snap.UserVersion, reason, err)
+	if aerr := a.sendAckLocked(send, snap.ConfigVersion, snap.UserVersion, reason, err); aerr != nil {
+		return aerr
+	}
+	if err == nil {
+		a.confirmTrialLocked(send)
+	}
+	return nil
 }
 
 func (a *Agent) applyDeltaLocked(ctx context.Context, gen uint64, send func(*pb.AgentUp) error, d *pb.UserDelta) error {
@@ -505,7 +567,11 @@ func (a *Agent) applyDeltaLocked(ctx context.Context, gen uint64, send func(*pb.
 	}
 	a.setVersions(target[0], target[1])
 	a.logApplied("delta")
-	return a.sendAckLocked(send, target[0], target[1], pb.Ack_REASON_OK, nil)
+	if err := a.sendAckLocked(send, target[0], target[1], pb.Ack_REASON_OK, nil); err != nil {
+		return err
+	}
+	a.confirmTrialLocked(send)
+	return nil
 }
 
 // logApplied records a clean apply and what now runs (smoke keys on it).
@@ -652,6 +718,17 @@ func (q *finalQueue) confirm(gen uint64, after time.Duration) {
 		kept = append(kept, it)
 	}
 	q.items = kept
+}
+
+// all returns every queued report (persisted before a restart).
+func (q *finalQueue) all() []*pb.TrafficReport {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := make([]*pb.TrafficReport, 0, len(q.items))
+	for _, it := range q.items {
+		out = append(out, it.report)
+	}
+	return out
 }
 
 func (q *finalQueue) len() int {
