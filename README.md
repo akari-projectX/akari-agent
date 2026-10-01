@@ -75,8 +75,10 @@ go run ./cmd/akari-sign verify -keys release-keys.txt -manifest dist/akari-agent
   -sig dist/akari-agent-linux-amd64.manifest.sig -binary dist/akari-agent-linux-amd64
 ```
 
-Custody: generate and keep the key offline (encrypted media, two copies); whoever holds it can
-update every node. CI signs only if the `AKARI_RELEASE_SIGNING_KEY` repository secret is set
+Production key: `key-f2ad18a8bb718a1a` (`ciJILGk6W1TnPr56Dncgv0mVQFBzqOrawiOaH0/d5Pg=`, pinned since
+v0.2.0). Custody: the private key exists only as an offline file on the lead's machine
+(`~/secrets/akari-release-signing.key`, 0600) and as the `AKARI_RELEASE_SIGNING_KEY` repository
+secret; whoever holds it can update every node. CI signs only if the `AKARI_RELEASE_SIGNING_KEY` repository secret is set
 (`.github/workflows/release.yml`; without it the release has no manifests and a warning) and
 refuses manifests that do not verify under `release-keys.txt`. Rotation: pin the next key next to
 the current one and release; sign with both (`akari-sign countersign`) until every node runs a

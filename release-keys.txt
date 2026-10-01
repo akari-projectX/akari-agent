@@ -2,11 +2,15 @@
 # binaries whose signed manifest verifies under one of these keys; nothing
 # the panel sends can add a key. One "<base64 public key> <label>" per line.
 #
-# EMPTY = self-update disabled (every UpdateOffer is rejected). To enable it,
-# generate the release key OFFLINE (`akari-sign keygen`, see README "Release
-# signing keys"), commit its public line here, and release a new agent: only
-# agents built with the key can verify releases signed by it.
+# EMPTY = self-update disabled (every UpdateOffer is rejected). Only agents
+# built with a key pinned here can verify releases signed by it (first: v0.2.0).
+#
+# Custody of the production key (key-f2ad18a8bb718a1a, generated 2026-10-02
+# with `akari-sign keygen`): offline file on the lead's machine
+# (~/secrets/akari-release-signing.key, 0600) + the GitHub Actions secret
+# AKARI_RELEASE_SIGNING_KEY of this repository. Nowhere else.
 #
 # Rotation: add the next key here and release (both keys pinned); sign the
 # following releases with both keys (`akari-sign countersign`) until every
 # node runs a build that pins the next key; then drop the old key.
+ciJILGk6W1TnPr56Dncgv0mVQFBzqOrawiOaH0/d5Pg= key-f2ad18a8bb718a1a
