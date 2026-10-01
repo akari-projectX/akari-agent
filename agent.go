@@ -74,6 +74,12 @@ type Agent struct {
 	// finalsPersisted: final counters were loaded from the update state
 	// dir; the file goes once the queue has drained.
 	finalsPersisted atomic.Bool
+	// finalsStore: where unconfirmed final counters survive a restart
+	// (graceful stop, self-update). nil falls back to the updater's
+	// directory (tests); nil without an updater persists nothing.
+	finalsStore *finalsStore
+	// stopping: a graceful stop began; xray stays down.
+	stopping atomic.Bool
 
 	// skipNext: the last attempt with the pending renewed identity failed
 	// for a reason that may be transient; the next attempt uses the
@@ -85,12 +91,17 @@ type Agent struct {
 	renewRetryAt  time.Time
 
 	// Seams (tests).
-	dial            func(ctx context.Context, id *nodeIdentity) (*dialed, error)
-	enrollRPC       func(ctx context.Context, req *pb.EnrollRequest) (*pb.IssuedCertificate, error)
-	now             func() time.Time
-	backoffBase     time.Duration
-	leaseEvery      time.Duration
-	trafficEvery    time.Duration
+	dial         func(ctx context.Context, id *nodeIdentity) (*dialed, error)
+	enrollRPC    func(ctx context.Context, req *pb.EnrollRequest) (*pb.IssuedCertificate, error)
+	now          func() time.Time
+	backoffBase  time.Duration
+	leaseEvery   time.Duration
+	trafficEvery time.Duration
+	// How long a stream must stay up after carrying a final report before
+	// the report is forgotten (see finalsConfirmAfter).
+	finalsConfirm time.Duration
+	// Bound on handing final counters to the transport at graceful stop.
+	shutdownFlush   time.Duration
 	heartbeatEvery  time.Duration
 	renewCheckEvery time.Duration
 	// How long a stream may run on the current certificate while a renewed
@@ -119,6 +130,8 @@ func NewAgent(cfg *Config, agentVersion string, ids *identities) *Agent {
 		backoffBase:     time.Second,
 		leaseEvery:      5 * time.Second,
 		trafficEvery:    10 * time.Second,
+		finalsConfirm:   finalsConfirmAfter,
+		shutdownFlush:   5 * time.Second,
 		heartbeatEvery:  15 * time.Second,
 		renewCheckEvery: 30 * time.Second,
 		nextRetryAfter:  2 * time.Minute,
@@ -159,6 +172,16 @@ func (a *Agent) setDirty(d bool) {
 // capped exponential backoff. The lease is enforced independently of any
 // stream.
 func (a *Agent) Run(ctx context.Context) error {
+	err := a.run(ctx)
+	if ctx.Err() != nil {
+		// Graceful stop (SIGTERM): whatever the stream could not carry is
+		// persisted for the next process (G3).
+		a.stopped()
+	}
+	return err
+}
+
+func (a *Agent) run(ctx context.Context) error {
 	if err := a.ensureEnrolled(ctx); err != nil {
 		return err
 	}
@@ -216,6 +239,82 @@ func (a *Agent) dialPanel(ctx context.Context, id *nodeIdentity) (*dialed, error
 	return &dialed{stream: stream, conn: conn, close: func() { _ = conn.Close() }}, nil
 }
 
+// finalStore is where the final-counter queue is persisted (nil: nowhere).
+func (a *Agent) finalStore() *finalsStore {
+	switch {
+	case a.finalsStore != nil:
+		return a.finalsStore
+	case a.upd != nil:
+		return &finalsStore{dir: a.upd.dir}
+	}
+	return nil
+}
+
+// persistFinalsLocked writes the unconfirmed final reports to the state
+// directory (the next process resends them; accounting is cumulative and
+// idempotent, so duplicates are harmless). Caller holds applyMu.
+func (a *Agent) persistFinalsLocked(why string) {
+	st := a.finalStore()
+	if st == nil {
+		return
+	}
+	reports := a.finals.all()
+	if len(reports) == 0 {
+		st.drop()
+		return
+	}
+	if err := st.save(reports); err != nil {
+		// The reports also went out on the live stream (best effort) and
+		// the panel's caps bound what can be lost.
+		slog.Error("cannot persist final traffic counters", "why", why, "error", err)
+		return
+	}
+	a.finalsPersisted.Store(true)
+}
+
+// stopped: the process is stopping on a signal. Under the apply lock, xray
+// is torn down (if still running: its counters become a final report) and
+// every unconfirmed final report is persisted.
+func (a *Agent) stopped() {
+	a.applyMu.Lock()
+	defer a.applyMu.Unlock()
+	if a.core.Running() {
+		a.finals.add(a.core.Teardown())
+	}
+	a.persistFinalsLocked("shutdown")
+}
+
+// gracefulStop runs on the live stream when the process is asked to stop:
+// xray is torn down, its final counters are queued and sent, and the writer
+// is given up to shutdownFlush to hand them to the transport. Caller holds
+// no locks.
+func (a *Agent) gracefulStop(gen uint64, send func(*pb.AgentUp) error, flush func(time.Duration)) {
+	a.stopping.Store(true) // from here on panel messages are not applied
+	a.applyMu.Lock()
+	if a.core.Running() {
+		a.finals.add(a.core.Teardown())
+	}
+	// Nothing runs any more: claim nothing, so a late reader cannot treat
+	// the stale versions as current.
+	a.setVersions(0, 0)
+	a.setDirty(false)
+	a.finals.flush(gen, send)
+	a.applyMu.Unlock()
+	flush(a.shutdownFlush)
+}
+
+// keepalive: a silently dead connection is noticed after Time + Timeout.
+const (
+	keepaliveTime    = 30 * time.Second
+	keepaliveTimeout = 10 * time.Second
+	// finalsConfirmAfter: a final report counts as delivered only after the
+	// stream that carried it stayed up this long. It must exceed the time
+	// a half-dead connection needs to be detected (keepalive Time + Timeout)
+	// plus margin: a write into a dead socket "succeeds" locally, so an
+	// earlier confirmation would drop a report the panel never got (G1).
+	finalsConfirmAfter = keepaliveTime + keepaliveTimeout + 20*time.Second
+)
+
 // clientConn is a TLS connection to the panel, verified against the CA
 // from the bootstrap file, presenting id's certificate (nil: none — only
 // AgentEnrollment.Enroll accepts that).
@@ -225,8 +324,8 @@ func (a *Agent) clientConn(id *nodeIdentity) (*grpc.ClientConn, error) {
 		a.cfg.PanelAddr,
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                30 * time.Second,
-			Timeout:             10 * time.Second,
+			Time:                keepaliveTime,
+			Timeout:             keepaliveTimeout,
 			PermitWithoutStream: true,
 		}),
 	)
@@ -237,8 +336,21 @@ func (a *Agent) clientConn(id *nodeIdentity) (*grpc.ClientConn, error) {
 // in the middle of a Rebuild: at most one handleDown runs at any time, and
 // a dead stream's reader can never race the next stream's (F3).
 func (a *Agent) session(parent context.Context) (err error) {
-	ctx, cancel := context.WithCancel(parent)
+	// The stream outlives a stop request (parent): on SIGTERM the final
+	// counters still go out on it (gracefulStop) before it is closed. Until
+	// the stream is up a stop request just aborts the attempt.
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	defer cancel()
+	var streamUp atomic.Bool
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-parent.Done():
+			if !streamUp.Load() {
+				cancel()
+			}
+		}
+	}()
 
 	id, viaNext := a.pickIdentity()
 	if id == nil {
@@ -353,15 +465,26 @@ func (a *Agent) session(parent context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-
-	wg.Add(3)
+	streamUp.Store(true)
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		select {
+		case <-ctx.Done():
+		case <-parent.Done():
+			a.gracefulStop(gen, send, flush)
+			cancel()
+		}
+	}()
 	go func() { defer wg.Done(); heartbeatLoop(ctx, a.heartbeatEvery, send, a.lease.remaining, a.stats) }()
 	go func() {
 		defer wg.Done()
 		trafficLoop(ctx, a.trafficEvery, a.core, send, func() {
-			a.finals.confirm(gen, a.trafficEvery)
+			a.finals.confirm(gen, a.finalsConfirm)
 			if a.finals.len() == 0 && a.finalsPersisted.Swap(false) {
-				a.upd.dropFinals()
+				if st := a.finalStore(); st != nil {
+					st.drop()
+				}
 			}
 		})
 	}()
@@ -455,7 +578,7 @@ var errStreamGone = errors.New("stream closed before the message was handled")
 func (a *Agent) handleDown(ctx context.Context, gen uint64, send func(*pb.AgentUp) error, in *pb.PanelDown) error {
 	a.applyMu.Lock()
 	defer a.applyMu.Unlock()
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || a.stopping.Load() {
 		return errStreamGone
 	}
 
@@ -671,7 +794,8 @@ func (a *Agent) tlsConfig(id *nodeIdentity) *tls.Config {
 // finalQueue holds final counter reports of instances (or removed users)
 // that must reach the panel. Accounting is idempotent (cumulative values per
 // session), so a report is resent on every new stream until one stream has
-// carried it and then stayed up for a full traffic interval.
+// carried it and then stayed up for finalsConfirmAfter (longer than the
+// keepalive death time, so a stream that was already dead cannot confirm).
 type finalQueue struct {
 	mu    sync.Mutex
 	items []*finalItem
