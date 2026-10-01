@@ -3,6 +3,8 @@ package release
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -199,5 +201,32 @@ func TestKeysAndPrivateKeyFormat(t *testing.T) {
 	}
 	if _, err := ParsePrivateKey(FormatPublicKey(pub.Key)); err == nil {
 		t.Fatal("public key parsed as private")
+	}
+}
+
+// The shared vector (akari-panel proto/testdata/update_vector.json, vendored
+// as proto/update_vector.json): what the panel verifies, the agent verifies.
+func TestSharedVector(t *testing.T) {
+	raw, err := os.ReadFile("../proto/update_vector.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		PublicKey string  `json:"public_key"`
+		Manifest  string  `json:"manifest"`
+		Sig       SigFile `json:"sig"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := ParseKeys(v.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseManifest([]byte(v.Manifest)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify([]byte(v.Manifest), v.Sig.Signatures, keys); err != nil {
+		t.Fatal(err)
 	}
 }
