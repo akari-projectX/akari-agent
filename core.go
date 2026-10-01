@@ -336,7 +336,11 @@ func (m *CoreManager) applyOpLocked(op *pb.UserOp) (lost bool, err error) {
 }
 
 func (m *CoreManager) store(tag string) (userManager, error) {
-	handler, err := m.manager().GetHandler(context.Background(), tag)
+	im, err := m.manager()
+	if err != nil {
+		return nil, err
+	}
+	handler, err := im.GetHandler(context.Background(), tag)
 	if err != nil {
 		return nil, fmt.Errorf("inbound %q: %w", tag, err)
 	}
@@ -373,8 +377,12 @@ func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, 
 	return nil
 }
 
-func (m *CoreManager) manager() inbound.Manager {
-	return m.instance.GetFeature(inbound.ManagerType()).(inbound.Manager)
+func (m *CoreManager) manager() (inbound.Manager, error) {
+	im, ok := m.instance.GetFeature(inbound.ManagerType()).(inbound.Manager)
+	if !ok {
+		return nil, fmt.Errorf("xray core has no inbound manager")
+	}
+	return im, nil
 }
 
 // buildUser constructs an xray user whose "email" field carries the panel

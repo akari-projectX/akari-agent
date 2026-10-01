@@ -174,6 +174,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	for {
 		start := time.Now()
 		err := a.session(ctx)
+		// Measured before the backoff sleep: a stream that stayed up resets
+		// the backoff (G4 - timing after the sleep could count the wait).
+		lived := time.Since(start)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -183,15 +186,21 @@ func (a *Agent) Run(ctx context.Context) error {
 			return nil
 		case <-time.After(backoff):
 		}
-		if time.Since(start) > time.Minute {
-			backoff = a.backoffBase
-		} else {
-			backoff *= 2
-			if backoff > 30*a.backoffBase {
-				backoff = 30 * a.backoffBase
-			}
-		}
+		backoff = nextBackoff(backoff, a.backoffBase, lived)
 	}
+}
+
+// stableStream: a stream that lived this long resets the reconnect backoff.
+const stableStream = time.Minute
+
+// nextBackoff is the delay after the one just waited: base again when the
+// stream that just ended had been up for stableStream, else doubled, capped
+// at 30 x base.
+func nextBackoff(cur, base, lived time.Duration) time.Duration {
+	if lived > stableStream {
+		return base
+	}
+	return min(cur*2, 30*base)
 }
 
 func (a *Agent) dialPanel(ctx context.Context, id *nodeIdentity) (*dialed, error) {
