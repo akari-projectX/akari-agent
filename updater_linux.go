@@ -271,13 +271,14 @@ func (p *applier) apply(d *agentDir, st *rootState, req *applyRequest) error {
 	if why := p.watch(d, m.Version, base); why != "" {
 		return p.rollback(d, st, m.Version, req.RolloutID, why)
 	}
-	slog.Info("agent update passed its self-check", "version", m.Version)
 	st.Trial = nil
 	if err := p.save(st); err != nil {
 		return err
 	}
 	_ = d.remove(confirmedName)
-	return d.writeResult(applyResult{State: resConfirmed, Version: m.Version, RolloutID: req.RolloutID})
+	err = d.writeResult(applyResult{State: resConfirmed, Version: m.Version, RolloutID: req.RolloutID})
+	slog.Info("agent update passed its self-check", "version", m.Version)
+	return err
 }
 
 // verify judges the request with this binary's own keys and policy. The
