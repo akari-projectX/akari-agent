@@ -54,8 +54,12 @@ Limited users' connections do not use XTLS Vision's kernel splice (it would
 bypass any limiter); Vision itself keeps working. Unlimited users take
 exactly the old path. A limit that appears where there was none closes the
 user's live connections (clients reconnect throttled); other changes apply
-in place. Tests: `ratelimit_test.go` (real VLESS through xray: throughput
-equals the limit), `TestRT_VisionSpeedLimit` (canary, Vision over TLS).
+in place. Only the outbound side of a dispatch is wrapped (xray's mux keeps
+the inbound-side link and asserts its type). Tests: `ratelimit_test.go`
+(real VLESS through xray: throughput
+equals the limit), canaries `TestRT_VisionSpeedLimit` (Vision over TLS),
+`TestRT_MuxSpeedLimit`, `TestRT_UDPSpeedLimit` and the limit phase of
+`TestRT_ProtocolMatrix` (every protocol incl. SS2022 and Hysteria2).
 
 ## Self-update (protocol 3)
 

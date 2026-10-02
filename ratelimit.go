@@ -27,6 +27,14 @@ import (
 // (session.Inbound.CanSpliceCopy = 3, the value xray itself uses for "never
 // splice"); Vision keeps working, just through user space.
 //
+// Only the OUTBOUND side of a dispatch is wrapped: its reader (uplink) and
+// writer (downlink). The inbound side (the link Dispatch returns, which
+// xray's mux server keeps and asserts to be a *pipe.Reader for XUDP) is
+// never wrapped; on the DispatchLink path the outbound-side reader is
+// wrapped by xray's own WrapLink in a TimeoutWrapperReader anyway. Pacing
+// never errors on large batches: reservations are in virtual time (no
+// "n > burst" failure) and each pass is at most limitChunk.
+//
 // A limit that appears where there was none closes the user's live
 // dispatches (see gateDispatcher.SetLimit): unwrapped connections (possibly
 // spliced) could not be throttled. Changing or removing an existing limit
