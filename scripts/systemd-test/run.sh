@@ -139,6 +139,12 @@ alog | grep '"msg":"the installed systemd units are not the ones' | grep -q '"ak
   || fail "stale units not reported"
 
 stage() { # N: what the agent does (staged file, then the request: the trigger), as the agent's on-disk owner
+  # The steps run seconds apart, so the agent has just been (re)started
+  # several times: with the default start limit (5 starts in 10 s) the broken
+  # build's restarts would hit "start request repeated too quickly" before
+  # NRestarts reaches -update-max-boots. A production agent has run for a
+  # while when an update arrives; start each case from a fresh counter.
+  x "systemctl reset-failed akari-agent.service"
   x "own=\$(stat -c %u:%g $U)
      install -o \${own%:*} -g \${own#*:} -m 0600 /w/v$1 $U/staged
      install -o \${own%:*} -g \${own#*:} -m 0600 /w/req$1.json $U/.req && mv $U/.req $U/apply-request.json"
