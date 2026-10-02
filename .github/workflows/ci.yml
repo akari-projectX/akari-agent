@@ -27,6 +27,8 @@ jobs:
           go-version-file: go.mod
       - run: make fmt-check
       - run: make vet # includes the `canary` build tag
+      # R19: the licence bundle embedded in the binary must match go.mod.
+      - run: make check-third-party
       - run: make test # canary (no -race) + go test -race ./...
       - run: make build
 
@@ -68,6 +70,9 @@ jobs:
     # must be what `buf generate` produces from it. The Makefile expects the
     # sibling layout ../akari-panel, so both repos are checked out under the
     # workspace directory.
+    # Merge order for contract changes is panel first (CLAUDE.md "契约变更的
+    # 合并顺序"): an agent PR that syncs a proto change still on a panel PR
+    # fails here until that panel PR is merged; then re-run this job.
     name: check-proto (vs akari-panel main)
     runs-on: ubuntu-latest
     timeout-minutes: 10

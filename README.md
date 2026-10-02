@@ -32,6 +32,29 @@ Responsibilities:
   of 3, primary URL with a fallback
 - converge to the panel's desired state after any disconnect
 
+## Licence
+
+- **Source code**: akari-agent's own code is MIT licensed (`LICENSE`).
+- **Binaries**: every agent binary statically links xray-core (MPL-2.0) and,
+  through xray-core's Shadowsocks support, `github.com/sagernet/sing` and
+  `sing-shadowsocks`, which are **GPL-3.0-or-later**. A released (or
+  self-built) agent binary is therefore a combined work distributed under
+  **GPL-3.0-or-later** (`LICENSES/GPL-3.0.txt`). The corresponding source is
+  this public repository at the tag/commit shown by `akari-agent -version`;
+  `make dist` reproduces the release binaries byte for byte. Our own files
+  stay MIT; nothing is relicensed. (Decision R19: the binary's status is
+  stated here and in the release notes; we do not carry an xray patch that
+  drops Shadowsocks to avoid the GPL modules.)
+- **Third-party licences**: `THIRD_PARTY_LICENSES.txt` lists every module
+  linked into the binary with its licence and carries the licence/notice
+  texts verbatim. It is generated (`make third-party`, `cmd/thirdparty`:
+  `go list -deps` for linux/amd64+arm64, licence files from the module cache,
+  fail-closed allow-list), CI fails when it is stale (`make
+  check-third-party`), every release ships it as an asset, and the binary
+  embeds it: `akari-agent -licenses` prints it (nodes installed through the
+  panel receive only the binary). `THIRD-PARTY-NOTICES.md` is the
+  maintainers' assessment behind it.
+
 ## Build
 
 ```bash
@@ -41,6 +64,8 @@ make proto            # regenerate pb/ from proto/agent.proto
 make sync-proto       # pull the contract from the sibling akari-panel checkout
 make check-proto      # fail if the vendored contract drifted from akari-panel
 make vet fmt-check
+make third-party      # regenerate THIRD_PARTY_LICENSES.txt (after go.mod changes)
+./agent -licenses     # licensing of this binary + all third-party licence texts
 ```
 
 Releases (tag `v*`) are built, SBOM'd and cosign-signed by `.github/workflows/release.yml`;

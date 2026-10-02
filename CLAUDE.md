@@ -1,7 +1,7 @@
 # akari-agent
 
 Go 1.27 单包（`package main`，模块名 `akari/agent`），内嵌 xray-core `v1.260327.0`（= release v26.3.27；Xray 用 CalVer，更新 tag 多为 prerelease，勿盲升）。
-公开仓库，MIT；xray-core 为 MPL-2.0（修改其源码须开源），声明见 `THIRD-PARTY-NOTICES.md`。
+公开仓库。**许可（R19）**：自有源码 MIT；**二进制**静态链接 `sagernet/sing*`（GPL-3.0-or-later，经 xray-core 的 Shadowsocks）→ 按 **GPL-3.0-or-later 组合作品**分发（README「Licence」、发布说明、`LICENSES/GPL-3.0.txt`）；xray-core 为 MPL-2.0（修改其源码须开源）。`THIRD_PARTY_LICENSES.txt` 是生成物（`make third-party`，CI `check-third-party` 校验最新；内嵌进二进制 `-licenses`；`make dist`/发布附带），`THIRD-PARTY-NOTICES.md` 是人工评估。**改 go.mod 后必须 `make third-party` 并提交**。
 
 ## 文件
 
@@ -25,6 +25,8 @@ Go 1.27 单包（`package main`，模块名 `akari/agent`），内嵌 xray-core 
 | `update.go` | M6 自更新（磁盘侧）：`<state>/update/`（state.json 0600：current/previous 槽位、trial（试用期，boots 计数）、rolled_back 版本表、待发 report；`finals.json` 跨重启的最终计数；`bin/` 暂存二进制 0700）。`launch()` 在 main 最早执行：**全新启动**（非 `AKARI_AGENT_LAUNCHED=1`）的已安装二进制 = 启动器，current 比自己新则 boots+1（试用中）、超过 `-update-max-boots` 即回滚（标记 rolled_back、report ROLLED_BACK、current:=previous），再按 manifest 校验大小/SHA-256 后 `syscall.Exec`；已安装版本 ≥ 暂存版本则丢弃暂存（手工升级优先）；被 exec 的进程从不再 exec（防循环）。签名只在接受 offer 时验（启动器可能早于密钥轮换），暂存文件只做完整性校验 |
 | `update_agent.go` | M6 自更新（会话侧）：`UpdateOffer` → 用**编译进来的**公钥验签 + `release.Policy`（平台、单调版本/签名 rollback、已回滚版本、min_panel_protocol）→ 失败回 `REJECTED`；接受后单任务后台经同一 mTLS 连接 `FetchArtifact` 下载（断点续传，6 次退避），校验大小+SHA-256 → 暂存 → 持 `applyMu` 且流仍活：拆 xray、持有版本 (0,0)、最终计数入队并落盘、发 `RESTARTING` 并 `flushStream` → `commit`（trial boots=1）→ exec（失败则 undo 并重发 Hello）。试用期：Snapshot/Delta ok Ack 发出后 `confirmTrialLocked`（发 `CONFIRMED`）；`trialLoop` 超时（`-update-self-check`）则拆 xray、落盘计数、exec previous/installed（exec 失败退出，交给 systemd）。待发 report 在每条新流 Hello 后发送。租约是进程内状态，不跨 exec（新进程在首个 LeaseGrant 前不跑 xray，因为 (0,0) 只能等 Snapshot，而面板总是先发 LeaseGrant） |
 | `release/` | 可导入包：manifest（schema 1，严格解码）、Ed25519 签名（上下文前缀 `akari-agent-manifest-v1\n`，key id = SHA-256(pub)[:8]）、`ParseKeys`、`Policy`、semver 比较；面板 `updates.rs` 实现同一规则，向量 `proto/update_vector.json` |
+| `cmd/thirdparty` | R19 许可清单生成器（仅标准库）：`go list -deps`（linux amd64+arm64，即 dist 平台）得链接模块 → 模块缓存里的 LICENSE/COPYING/NOTICE/PATENTS 原文 → 按特征短语分类（copyleft 先判；纯 GPL 全文不判 or-later，须人工）→ 白名单（MIT/ISC/BSD-2/3/Apache-2.0/MPL-2.0/GPL-3.0-or-later/LGPL-3.0 链接例外），未识别或不在白名单 = 失败；输出确定性（排序、相同文本去重、无日期） |
+| `THIRD_PARTY_LICENSES.txt` / `LICENSES/GPL-3.0.txt` | 生成的许可清单（`go:embed` 进 `main.go`，`-licenses` 原样打印）/ GPL-3.0 原文（gnu.org，sha256 3972dc97…）；有 GPL 模块链接时自动写入组合作品声明 |
 | `cmd/akari-sign` | 离线签名工具：keygen/pubkey/sign/countersign/verify（`-key` 或 `-key-env`） |
 | `release-keys.txt` / `releasekeys*.go` | 生产固定公钥集（go:embed；生产密钥 `key-f2ad18a8bb718a1a`，自 v0.2.0 起固定；私钥仅存负责人机器 `~/secrets/akari-release-signing.key`(0600) + 仓库 secret `AKARI_RELEASE_SIGNING_KEY`；轮换 = 新公钥并列固定 + `akari-sign countersign` 双签，全网升级后删旧钥）；`akari_testkeys` 构建标签额外加入**公开的**测试公钥（`testdata/TEST-ONLY-release.*`，仅 smoke），`make dist` 的 `check-release-keys` 拒绝含测试公钥的二进制 |
 | `proto/agent.proto` | **vendor 副本**，禁止手改，只能 `make sync-proto`（worktree 中 `make sync-proto PANEL_DIR=../<面板 worktree>`） |
@@ -55,11 +57,24 @@ make bench        # 开销基准（bench_test.go；-run '^$' 只跑基准）
 make build-testkeys VERSION=v900.0.0 OUT=/tmp/a   # 仅测试：额外信任测试公钥（smoke 用）
 make sign-manifest VERSION=vX.Y.Z KEY=<file>|KEY_ENV=<var>   # dist/*.manifest.{json,sig}
 ./agent -release-keys   # 列出固定公钥
+make third-party        # 重新生成 THIRD_PARTY_LICENSES.txt（改 go.mod 后）
+make check-third-party  # CI：清单是否最新
+./agent -licenses       # 本二进制的许可声明 + 全部第三方许可原文
 ```
+
+## 契约变更的合并顺序（面板先行）
+
+`proto/agent.proto` 的正本在面板。改契约（新字段/消息/能力）时：
+
+1. 面板 PR 改 `proto/agent.proto` + 面板代码；面板 CI 的 smoke 跑 agent main：依赖新 agent 能力的段落按 `Hello.protocol_version`/`capabilities` 判定后**大声 SKIP**（`SKIP: agent lacks …`），面板侧断言照常执行。
+2. agent PR：`make sync-proto PANEL_DIR=../<面板 worktree>` + 实现；此时 agent CI 的 `check-proto (vs akari-panel main)` **预期失败**（面板 main 还没有新契约）。
+3. 联调：在面板仓库手动触发 ci（`workflow_dispatch`，`agent_ref=<agent 分支>`），strict 模式下任何 SKIP 都是失败 → 新功能全量验证。
+4. **先合面板 PR**，再重跑 agent PR 的 CI（check-proto 变绿）后合并 agent。之后面板 main 的 smoke（push/nightly）自动对新 agent 跑满该段。
+5. 新能力：bump `agentProtocol`（行为语义变化）或在 `agentCapabilities` 加一项（可选特性）；面板 smoke 用它判定，且 smoke 会核对 agent 源码声明的协议号/能力与面板 API 所见一致（不一致 = 失败，SKIP 不能掩盖回归）。
 
 ## 发布
 
-tag `v*` 触发 `.github/workflows/release.yml`：fmt-check/vet/test → `make dist`（含 `check-release-keys`）→ 自更新 manifest 签名（仅当仓库 secret `AKARI_RELEASE_SIGNING_KEY` 存在，否则 warning 跳过；签后用 `release-keys.txt` 复验）→ CycloneDX SBOM → SHA256SUMS → cosign 无密钥签名（GitHub OIDC，`*.sigstore.json`）→ GitHub Release。第三方 action 固定 commit SHA。验证方法见 `akari-panel/docs/DEPLOY.md`。systemd 单元在 `akari-panel/deploy/systemd/akari-agent.service`。
+tag `v*` 触发 `.github/workflows/release.yml`：fmt-check/vet/check-third-party/test → `make dist`（含 `check-release-keys`，附 `THIRD_PARTY_LICENSES.txt`；校验 `-licenses` 与其一致）→ 自更新 manifest 签名（仅当仓库 secret `AKARI_RELEASE_SIGNING_KEY` 存在，否则 warning 跳过；签后用 `release-keys.txt` 复验）→ CycloneDX SBOM → SHA256SUMS → cosign 无密钥签名（GitHub OIDC，`*.sigstore.json`）→ GitHub Release（发布说明开头是 R19 许可声明，`THIRD_PARTY_LICENSES.txt` 作为资产并入 SHA256SUMS 与 cosign 签名）。第三方 action 固定 commit SHA。验证方法见 `akari-panel/docs/DEPLOY.md`。systemd 单元在 `akari-panel/deploy/systemd/akari-agent.service`。
 
 ## 须知
 
