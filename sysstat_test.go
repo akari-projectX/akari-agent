@@ -218,3 +218,23 @@ func TestSamplerMissingProc(t *testing.T) {
 		t.Fatalf("%v %+v %+v", cpu, mem, m)
 	}
 }
+
+// Online users = distinct emails with at least one live dispatch, over all
+// inbounds.
+func TestGateLiveStats(t *testing.T) {
+	g := &gateDispatcher{live: map[gateKey]map[*liveConn]struct{}{
+		{tag: "a", email: "u1"}: {&liveConn{}: {}, &liveConn{}: {}},
+		{tag: "b", email: "u1"}: {&liveConn{}: {}},
+		{tag: "a", email: "u2"}: {&liveConn{}: {}},
+	}}
+	if c, u := g.LiveStats(); c != 4 || u != 2 {
+		t.Fatalf("conns %d users %d", c, u)
+	}
+	if c, u := (&gateDispatcher{live: map[gateKey]map[*liveConn]struct{}{}}).LiveStats(); c != 0 || u != 0 {
+		t.Fatalf("%d %d", c, u)
+	}
+	var m CoreManager
+	if c, u := m.LiveStats(); c != 0 || u != 0 {
+		t.Fatalf("no instance: %d %d", c, u)
+	}
+}
