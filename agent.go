@@ -25,8 +25,9 @@ import (
 // (AgentChannel.Renew); 3 = signed self-update (UpdateOffer/FetchArtifact);
 // 4 = per-user speed limits (UserOp.speed_limit_bytes_per_sec, ratelimit.go);
 // 5 = Shadowsocks 2022 removals apply in place as tombstones (W9: the panel
-// sends them as deltas; WouldShrinkUnsafe).
-const agentProtocol = 5
+// sends them as deltas; WouldShrinkUnsafe); 6 = automatic node certificate
+// over ACME (ConfigSnapshot.acme, Heartbeat.cert; acme.go).
+const agentProtocol = 6
 
 // agentCapabilities: optional features independent of agentProtocol
 // (Hello.capabilities, W11): "metrics" = Heartbeat.metrics, "latency" =
@@ -74,6 +75,10 @@ type Agent struct {
 	// curFlush waits until everything queued on the current stream was
 	// handed to the transport (bounded by its timeout).
 	curFlush func(timeout time.Duration)
+
+	// certs: automatic node certificate (protocol 6); nil = disabled
+	// (tests). Its loop runs for the whole process.
+	certs *certManager
 
 	// Self-update (M6): nil when unavailable. trial is set when this
 	// process runs a binary on probation.
@@ -206,6 +211,10 @@ func (a *Agent) run(ctx context.Context) error {
 	go a.leaseLoop(ctx)
 	go a.renewLoop(ctx)
 	go a.prober.loop(ctx, a.deliverLatency)
+	if a.certs != nil {
+		a.certs.onIssued = func(string) { a.onCertIssued() }
+		go a.certs.run(ctx)
+	}
 	if a.trial != nil {
 		go a.trialLoop(ctx)
 	}
@@ -499,7 +508,7 @@ func (a *Agent) session(parent context.Context) (err error) {
 	}()
 	go func() {
 		defer wg.Done()
-		heartbeatLoop(ctx, a.heartbeatEvery, send, a.lease.remaining, a.stats, a.sampler)
+		heartbeatLoop(ctx, a.heartbeatEvery, send, a.lease.remaining, a.stats, a.sampler, a.certStatus)
 	}()
 	go func() {
 		defer wg.Done()
@@ -645,6 +654,7 @@ func (a *Agent) applySnapshotLocked(ctx context.Context, gen uint64, send func(*
 		"config_version", snap.ConfigVersion,
 		"user_version", snap.UserVersion,
 		"users", len(snap.Users))
+	a.configureCert(snap)
 	final, err := a.core.Rebuild(snap.InboundsJson, snap.Users)
 	// The old instance's last counters (old session) are owed to the
 	// panel whatever happens next: queue them (resent on reconnect).
@@ -802,6 +812,57 @@ func (a *Agent) checkLease() {
 			a.finals.flush(gen, send)
 		}
 	}
+}
+
+// configureCert hands the Snapshot's ACME config to the certificate
+// manager and points the next Rebuild at its files. Without ACME (or on a
+// local error) TLS inbounds read the node certificate files as before.
+// Caller holds applyMu.
+func (a *Agent) configureCert(snap *pb.ConfigSnapshot) {
+	if a.certs == nil {
+		a.core.SetNodeCert(nil)
+		return
+	}
+	f, ok, err := a.certs.Configure(snap.GetAcme(), snap.GetInboundsJson())
+	if err != nil {
+		slog.Error("automatic certificate unavailable; TLS inbounds read the node certificate files", "error", err)
+	}
+	if err != nil || !ok {
+		a.core.SetNodeCert(nil)
+		return
+	}
+	a.core.SetNodeCert(&f)
+}
+
+// onCertIssued: the first CA certificate replaced the placeholder. The TLS
+// inbounds that serve it are swapped at once (other inbounds untouched);
+// if that fails, the agent claims nothing (0,0) so the panel resends the
+// Snapshot and the rebuild picks the certificate up.
+func (a *Agent) onCertIssued() {
+	a.applyMu.Lock()
+	defer a.applyMu.Unlock()
+	if a.stopping.Load() || !a.core.ServesPlaceholder() {
+		return
+	}
+	err := a.core.ReloadInbounds()
+	if err == nil {
+		slog.Info("TLS inbounds now serve the CA-issued node certificate")
+		return
+	}
+	slog.Error("could not swap the TLS inbounds onto the new certificate; asking the panel for a snapshot", "error", err)
+	a.setVersions(0, 0)
+	a.setDirty(true)
+	if _, send := a.current(); send != nil {
+		_ = send(a.helloLocked())
+	}
+}
+
+// certStatus: Heartbeat.cert (nil without ACME).
+func (a *Agent) certStatus() *pb.CertStatus {
+	if a.certs == nil {
+		return nil
+	}
+	return a.certs.Status()
 }
 
 // deliverLatency sends a fresh latency result on the current stream, if

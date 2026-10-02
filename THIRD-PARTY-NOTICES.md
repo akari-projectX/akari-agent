@@ -4,7 +4,7 @@ This repository's own code is MIT (see `LICENSE`). It vendors/copies the
 contract file `proto/agent.proto` (canonical copy lives in the
 `akari-panel` repository of the same organisation) and the released binary
 statically links the Go modules below. The list is generated from
-`go version -m` of the built agent (40 modules, 2026-10-02, xray-core
+`go version -m` of the built agent (41 modules, 2026-10-02 W10, xray-core
 `v1.260327.0`); re-check it whenever `go.mod` changes (`go version -m agent`).
 License texts are in each module (module cache / upstream repository); the
 full dependency graph is `go.mod` / `go.sum`.
@@ -16,6 +16,7 @@ full dependency graph is `go.mod` / `go.sum`.
 | [xray-core](https://github.com/XTLS/Xray-core) `v1.260327.0` | MPL-2.0 | embedded core; unmodified |
 | [xtls/reality](https://github.com/XTLS/REALITY) | MPL-2.0 | via xray-core |
 | [grpc-go](https://github.com/grpc/grpc-go), `genproto/googleapis/rpc` | Apache-2.0 | |
+| [mholt/acmez](https://github.com/mholt/acmez) `v3` | Apache-2.0 | ACME client for the automatic node certificate (W10, `acme.go`); its only dependencies are `golang.org/x/{crypto,net}`. Test-only (not linked): [pebble](https://github.com/letsencrypt/pebble) and `challtestsrv` (MPL-2.0), [go-jose](https://github.com/go-jose/go-jose) (Apache-2.0) |
 | [protobuf-go](https://github.com/protocolbuffers/protobuf-go) | BSD-3-Clause | generated code in `pb/` |
 | [BurntSushi/toml](https://github.com/BurntSushi/toml), [pelletier/go-toml](https://github.com/pelletier/go-toml), [ghodss/yaml](https://github.com/ghodss/yaml) | MIT | config parsing |
 | [google/uuid](https://github.com/google/uuid), [gorilla/websocket](https://github.com/gorilla/websocket), [miekg/dns](https://github.com/miekg/dns), [refraction-networking/utls](https://github.com/refraction-networking/utls), [cloudflare/circl](https://github.com/cloudflare/circl), [go4.org/netipx](https://github.com/go4org/netipx) | BSD-3-Clause (or BSD-style) | |

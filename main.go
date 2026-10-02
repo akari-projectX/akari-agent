@@ -41,6 +41,9 @@ func main() {
 		"after a self-update: starts the new binary gets to pass its self-check before the launcher rolls it back")
 	heartbeat := flag.Duration("heartbeat-interval", 15*time.Second,
 		"how often the agent reports its machine status (heartbeat), 1s..5m")
+	acmeRoots := flag.String("acme-roots", "", "PEM file of extra CA roots trusted for the ACME directory (tests; default: system roots)")
+	acmeHTTPPort := flag.Int("acme-http-port", 80, "TCP port the HTTP-01 challenge is answered on (the CA always connects to 80; tests only)")
+	acmeTLSPort := flag.Int("acme-tls-port", 443, "TCP port the TLS-ALPN-01 challenge is answered on (the CA always connects to 443; tests only)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(versionString())
@@ -91,6 +94,17 @@ func main() {
 
 	a := NewAgent(cfg, agentVersion, ids)
 	a.heartbeatEvery = min(max(*heartbeat, time.Second), 5*time.Minute)
+	a.certs = newCertManager(dir)
+	a.certs.ua = "akari-agent/" + agentVersion
+	a.certs.httpPort, a.certs.tlsPort = *acmeHTTPPort, *acmeTLSPort
+	if *acmeRoots != "" {
+		roots, err := loadRoots(*acmeRoots)
+		if err != nil {
+			slog.Error("failed to load -acme-roots", "error", err)
+			os.Exit(1)
+		}
+		a.certs.roots = roots
+	}
 	a.upd = upd
 	a.trial = newTrialState(trial)
 	a.finalsStore = &finalsStore{dir: dir}

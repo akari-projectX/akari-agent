@@ -49,6 +49,47 @@ install as a hardened systemd service with `akari-panel/deploy/systemd/akari-age
 Sibling checkout convention: akari-panel and akari-agent live side by side
 (`../akari-panel` / `../akari-agent`), same as the panel's smoke test expects.
 
+## Automatic node certificate (protocol 6)
+
+When the node has a TLS domain in the panel (节点域名) and an inbound reads the
+node certificate files, the panel sends `ConfigSnapshot.acme` and the agent
+obtains and renews the certificate itself over ACME (Let's Encrypt by default;
+library: [acmez](https://github.com/mholt/acmez), Apache-2.0) — no certbot.
+`acme.go` has the details:
+
+- **Store**: `<state dir>/tls/<domain>/{fullchain,privkey}.pem` (0600, dir 0700)
+  and the ACME account key `<state dir>/tls/accounts/<hash>.key.pem`. The state
+  dir is systemd's `StateDirectory` (the agent runs as a dynamic user under
+  `ProtectSystem=strict`, so `/etc` is not writable for it). TLS inbounds that
+  name `/run/credentials/akari-agent.service/tls_{fullchain,privkey}.pem` are
+  pointed at these files before xray is built; the inbounds JSON (and the state
+  hash) stay exactly what the panel sent.
+- **Challenges**: HTTP-01 on TCP 80 when no inbound uses 80 and it is free;
+  else TLS-ALPN-01 on TCP 443 when no inbound uses 443 and it is free; else the
+  order fails as "port busy" (free TCP 80). After a connection/DNS failure the
+  next order tries the other challenge. DNS-01 is not supported.
+- **Before the first certificate** the files hold a self-signed placeholder, so
+  xray always builds and other inbounds are never held up; the first CA
+  certificate swaps only the TLS inbounds' handlers (other inbounds and their
+  connections are untouched; on failure the agent claims (0,0) and the panel
+  resends the Snapshot).
+- **Renewal** with a third of the validity left (minus up to 1/30 jitter),
+  ARI `replaces` set; the files are replaced atomically and xray re-reads
+  certificate files every hour by itself (`oneTimeLoading` must stay unset):
+  no rebuild, no dropped connection. Failures back off 5 min → 6 h (≥ 1 h after
+  a rate-limit answer); restart the agent to retry at once.
+- **Status** goes to the panel on every heartbeat (`Heartbeat.cert`: state,
+  expiry, next attempt, classified error), shown on the node page.
+- Manual certificates still work: without a TLS domain nothing changes.
+
+Tests: `acme_test.go` (in-process pebble CA + DNS: HTTP-01, TLS-ALPN-01, port
+busy, DNS/connection errors, backoff, renewal, restart, Snapshot glue) and the
+canary `TestACME_TLSInboundsGetAndHotReloadTheCertificate` (real xray clients
+over VLESS-WS-TLS, Trojan-TLS and Hysteria 2 trusting only the test CA; the
+swap keeps another inbound's connection; the renewal keeps every connection).
+No test talks to a real CA. Flags for tests/smoke only: `-acme-roots`,
+`-acme-http-port`, `-acme-tls-port`.
+
 ## Per-user speed limits (protocol 4)
 
 The panel sends each user's plan speed limit with the user

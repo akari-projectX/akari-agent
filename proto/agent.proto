@@ -108,6 +108,10 @@ message Hello {
   //       Rotations there stay Snapshots; what the agent cannot apply in
   //       place (re-add with a new key, tombstone bound) it answers with
   //       BASE_MISMATCH. Older agents get a Snapshot for any removal there.
+  //   6 = obtains and renews the node's TLS certificate itself over ACME
+  //       (ConfigSnapshot.acme) and reports it (Heartbeat.cert). Older
+  //       agents ignore both: they keep reading the node certificate files
+  //       the admin installs by hand (the panel flags such nodes).
   uint32 protocol_version = 5;
   // State hash of what the agent actually runs (see "State hash" below),
   // for config_version + the applied user set. Empty for protocol 0.
@@ -153,8 +157,64 @@ message Heartbeat {
   // Seconds left on the fail-closed lease (see LeaseGrant); unset while no
   // lease is armed (no grant received since the agent started).
   optional uint64 lease_remaining_seconds = 6;
+  // ACME certificate state (protocol >= 6); unset while the panel asks for
+  // no automatic certificate (ConfigSnapshot.acme unset).
+  CertStatus cert = 10;
   // Machine status (W11, capability "metrics"); unset from older agents.
   NodeMetrics metrics = 20;
+}
+
+// The automatic certificate as the agent sees it (protocol >= 6). Sent on
+// every heartbeat while ConfigSnapshot.acme is set.
+message CertStatus {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    // No certificate from the CA yet (first order running or backing off);
+    // TLS inbounds serve a self-signed placeholder meanwhile.
+    PENDING = 1;
+    // A CA-issued certificate for `domain` is served.
+    VALID = 2;
+    // The last order failed; a still valid older certificate (if any) is
+    // served until it expires (not_after).
+    FAILED = 3;
+  }
+  // Classified cause of last_error, so the panel can say what to fix.
+  enum ErrorKind {
+    ERROR_NONE = 0;
+    ERROR_OTHER = 1;
+    // The CA could not resolve the domain (NXDOMAIN, no A/AAAA record).
+    ERROR_DNS = 2;
+    // The CA could not connect to the node (wrong IP, firewall, port 80
+    // blocked) or got the wrong answer (the domain points elsewhere).
+    ERROR_CONNECTION = 3;
+    // CA rate limit (Let's Encrypt: failed validations, certificates per
+    // domain, ...). The agent backs off at least an hour.
+    ERROR_RATE_LIMITED = 4;
+    // Neither challenge port is usable on the node: TCP 80 is busy and
+    // 443 is busy or used by an inbound (see challenge).
+    ERROR_PORT_BUSY = 5;
+    // A CAA record forbids the CA.
+    ERROR_CAA = 6;
+    // The CA refuses the name (policy, blocklist, invalid name).
+    ERROR_REJECTED = 7;
+    // The agent could not reach the ACME directory.
+    ERROR_CA_UNREACHABLE = 8;
+  }
+  string domain = 1;
+  State state = 2;
+  // Validity of the served CA-issued certificate (unix seconds); 0 = none.
+  int64 not_after = 3;
+  // When the agent next orders (renewal, or the retry after a failure);
+  // unix seconds, 0 = unknown.
+  int64 next_attempt = 4;
+  // Last failure (empty after a success), English, <= 512 bytes.
+  string last_error = 5;
+  ErrorKind error_kind = 6;
+  int64 last_error_at = 7; // unix seconds
+  // Challenge used by the last order: "http-01" | "tls-alpn-01" | "".
+  string challenge = 8;
+  // Consecutive failed orders (reset by a success).
+  uint32 failures = 9;
 }
 
 // Machine status sampled at each heartbeat (W11). Linux /proc and statfs;
@@ -334,6 +394,28 @@ message ConfigSnapshot {
   string inbounds_json = 2; // xray "inbounds" array JSON
   uint64 user_version = 3;
   repeated UserOp users = 4; // complete desired user set
+  // Automatic certificate for the node's TLS domain (protocol >= 6). Not
+  // part of the state hash: a change of the domain bumps config_version, so
+  // it always arrives with a Snapshot. Unset = no automatic certificate
+  // (inbounds read the files the admin installs, as before).
+  AcmeConfig acme = 10;
+}
+
+// ACME (RFC 8555) certificate the agent obtains and renews itself (protocol
+// >= 6). Every TLS certificate entry in inbounds_json whose certificateFile
+// and keyFile are the node certificate files
+//   /run/credentials/akari-agent.service/tls_fullchain.pem
+//   /run/credentials/akari-agent.service/tls_privkey.pem
+// is served this certificate instead (the agent rewrites the paths to its
+// own store before building xray; inbounds_json stays hashed verbatim).
+// Challenges: HTTP-01 on TCP 80 when that port is free, else TLS-ALPN-01 on
+// TCP 443 when no inbound uses it and it is free; DNS-01 is not supported.
+// Renewal starts with a third of the validity left (with jitter) and is
+// picked up by xray without a rebuild; failures back off exponentially.
+message AcmeConfig {
+  string domain = 1;        // lowercase DNS name (no wildcard, no IP)
+  string directory_url = 2; // ACME directory; "" = Let's Encrypt production
+  string email = 3;         // optional account contact
 }
 
 // Incremental user-set change (protocol >= 1). Applies only on top of
