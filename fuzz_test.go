@@ -319,7 +319,7 @@ func FuzzProcParsers(f *testing.F) {
 			t.Fatalf("MemTotal %d kB became %d bytes (wrapped)", n, m.total)
 		}
 		if n, kb, ok := kbField(b, "VmRSS:", true); ok && kb {
-			if rss := parseStatusRSS(b); rss < n {
+			if rss, _ := parseStatusRSS(b); rss < n {
 				t.Fatalf("VmRSS %d kB became %d bytes (wrapped)", n, rss)
 			}
 		}
@@ -329,7 +329,7 @@ func FuzzProcParsers(f *testing.F) {
 				t.Fatalf("interface %q not in the input", name)
 			}
 		}
-		_, _ = parseSockstat(b)
+		_, _, _ = parseSockstat(b)
 		if p := cpuPercent(cpuTimes{}, cpuTimes{idle: 1, total: 2}); p < 0 || p > 100 {
 			t.Fatalf("cpu %% %v", p)
 		}

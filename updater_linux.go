@@ -23,9 +23,22 @@ package main
 //     reopened after the check.
 // Results go back as apply-result.json (created O_EXCL|O_NOFOLLOW under a
 // temporary name, chowned to the agent, renamed into place).
+//
+// Units (W23): the systemd units of the NEW release are installed with its
+// binary. They come only from the verified copy (`<copy> -print-units`,
+// run before anything is replaced), never from the agent's directory, and
+// only the known names (unitNames) that already exist in the unit
+// directory are replaced: written atomically (root, 0644), the previous
+// ones kept in <updater state>/units.prev/ and put back on a rollback;
+// `systemctl daemon-reload` before the restart. An updater unit from
+// before W23 has the unit directory read-only (ProtectSystem=strict): the
+// update then goes ahead without the units (EROFS, logged), and the agent
+// reports the stale units ("stale-units") until the install command is run
+// once.
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +61,10 @@ import (
 const (
 	updaterStateFile = "updater.json"
 	updaterLockFile  = "lock"
+	// unitsPrevDir: the units replaced by the update on probation.
+	unitsPrevDir = "units.prev"
+	// printUnitsTimeout bounds `<new binary> -print-units`.
+	printUnitsTimeout = 30 * time.Second
 	// updaterGrace: the updater waits this much longer than the agent's
 	// own self-check before it rolls back by itself.
 	updaterGrace = time.Minute
@@ -65,6 +82,9 @@ type rootTrial struct {
 	Previous  string    `json:"previous"`
 	RolloutID string    `json:"rollout_id"`
 	Started   time.Time `json:"started"`
+	// Units: units.prev/ holds the units this update replaced (W23); a
+	// rollback puts them back.
+	Units bool `json:"units,omitempty"`
 }
 
 // applier is one run of the updater.
@@ -86,6 +106,11 @@ type applier struct {
 	restarts func() (int, error)
 	now      func() time.Time
 	sleep    func(time.Duration)
+	// W23: where the units live, how a verified binary's units are read,
+	// and how systemd is told about new unit files.
+	unitDir     string
+	unitsOf     func(binary string) (map[string][]byte, error)
+	reloadUnits func() error
 }
 
 func newApplier(stateDir, rootDir, target, service string, keys []release.PublicKey) *applier {
@@ -107,13 +132,62 @@ func newApplier(stateDir, rootDir, target, service string, keys []release.Public
 			}
 			return strconv.Atoi(strings.TrimSpace(string(out)))
 		},
-		now:   time.Now,
-		sleep: time.Sleep,
+		now:         time.Now,
+		sleep:       time.Sleep,
+		unitDir:     defaultUnitDir,
+		unitsOf:     execPrintUnits,
+		reloadUnits: daemonReload,
 	}
 }
 
+// execPrintUnits runs a verified binary with -print-units (bounded time
+// and output, empty environment) and parses what it prints.
+func execPrintUnits(binary string) (map[string][]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), printUnitsTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, "-print-units")
+	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
+	cmd.Dir = "/"
+	var out limitedBuffer
+	out.limit = 4 * maxUnitSize * len(unitNames)
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%s -print-units: %w", filepath.Base(binary), err)
+	}
+	if out.over {
+		return nil, errors.New("-print-units: output too large")
+	}
+	return parseUnits(out.Bytes())
+}
+
+// limitedBuffer keeps at most limit bytes (and notes when more came).
+type limitedBuffer struct {
+	bytes.Buffer
+	limit int
+	over  bool
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if room := b.limit - b.Len(); len(p) > room {
+		b.over = true
+		if room > 0 {
+			b.Buffer.Write(p[:room])
+		}
+		return len(p), nil
+	}
+	return b.Buffer.Write(p)
+}
+
+func daemonReload() error {
+	out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("systemctl daemon-reload: %w: %s", err, bytes.TrimSpace(out))
+	}
+	return nil
+}
+
 // runApplyUpdate is main's -apply-update mode.
-func runApplyUpdate(stateDir, rootDir, target, service string, keys []release.PublicKey, selfCheck time.Duration, maxBoots int) error {
+func runApplyUpdate(stateDir, rootDir, target, service, unitDir string, keys []release.PublicKey, selfCheck time.Duration, maxBoots int) error {
 	if rootDir == "" {
 		d := os.Getenv("STATE_DIRECTORY")
 		if d == "" {
@@ -132,6 +206,9 @@ func runApplyUpdate(stateDir, rootDir, target, service string, keys []release.Pu
 		target = self
 	}
 	p := newApplier(stateDir, rootDir, target, service, keys)
+	if unitDir != "" {
+		p.unitDir = unitDir
+	}
 	p.selfCheck = max(selfCheck, 10*time.Second)
 	p.maxBoots = max(maxBoots, 1)
 	return p.run()
@@ -180,6 +257,11 @@ func (p *applier) run() error {
 		// The installed binary is not the one on probation (a reinstall,
 		// or a rollback finished by an earlier run): nothing to watch.
 		slog.Warn("dropping a stale probation record", "trial", t.Version, "installed", p.version)
+		if t.Units && t.Previous == p.version {
+			// Interrupted between the units and the binary: the previous
+			// binary still runs, so do its units.
+			p.restoreUnits(&st)
+		}
 		st.Trial = nil
 		if err := p.save(&st); err != nil {
 			return err
@@ -243,13 +325,27 @@ func (p *applier) apply(d *agentDir, st *rootState, req *applyRequest) error {
 	if err != nil {
 		return reject(err)
 	}
+	// W23: the units the new release carries, from the verified copy.
+	units, err := p.unitsOf(tmp)
+	if err != nil {
+		_ = os.Remove(tmp)
+		return reject(fmt.Errorf("the release's systemd units: %w", err))
+	}
 	st.Trial = &rootTrial{Version: m.Version, Previous: p.version, RolloutID: req.RolloutID, Started: p.now().UTC()}
 	if err := p.save(st); err != nil {
 		_ = os.Remove(tmp)
 		return reject(fmt.Errorf("record the probation: %w", err))
 	}
+	if err := p.installUnits(st, units); err != nil {
+		_ = os.Remove(tmp)
+		p.restoreUnits(st)
+		st.Trial = nil
+		_ = p.save(st)
+		return reject(fmt.Errorf("install the units: %w", err))
+	}
 	if err := p.install(tmp); err != nil {
 		_ = os.Remove(tmp)
+		p.restoreUnits(st)
 		st.Trial = nil
 		_ = p.save(st)
 		return reject(fmt.Errorf("install: %w", err))
@@ -398,6 +494,7 @@ func (p *applier) watch(d *agentDir, version string, base int) string {
 // accepted again) and restarts the agent, which reports ROLLED_BACK.
 func (p *applier) rollback(d *agentDir, st *rootState, version, rollout, why string) error {
 	slog.Error("rolling back agent update", "version", version, "reason", why)
+	p.restoreUnits(st)
 	st.Trial = nil
 	if err := os.Rename(p.target+".prev", p.target); err != nil {
 		_ = p.save(st)
@@ -420,6 +517,146 @@ func (p *applier) rollback(d *agentDir, st *rootState, version, rollout, why str
 		return err
 	}
 	return errors.Join(serr, werr)
+}
+
+// installUnits replaces the known units that exist in the unit directory
+// with the new release's (identical ones are left alone), keeping the
+// replaced ones in units.prev/ (recorded in the trial before anything is
+// written), then reloads systemd. A read-only unit directory (an updater
+// unit from before W23) is not an error: the update goes ahead without the
+// units.
+func (p *applier) installUnits(st *rootState, units map[string][]byte) error {
+	prevDir := filepath.Join(p.rootDir, unitsPrevDir)
+	if err := os.RemoveAll(prevDir); err != nil {
+		return err
+	}
+	if err := os.Mkdir(prevDir, 0o700); err != nil {
+		return err
+	}
+	var change []string
+	for _, n := range unitNames {
+		cur, err := readUnit(filepath.Join(p.unitDir, n))
+		if errors.Is(err, os.ErrNotExist) {
+			continue // never create a unit the node does not have
+		}
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(cur, units[n]) {
+			continue
+		}
+		if err := writeSecret(filepath.Join(prevDir, n), cur); err != nil {
+			return err
+		}
+		change = append(change, n)
+	}
+	if len(change) == 0 {
+		return nil
+	}
+	st.Trial.Units = true
+	if err := p.save(st); err != nil {
+		return err
+	}
+	for i, n := range change {
+		err := writeUnitFile(p.unitDir, n, units[n])
+		if i == 0 && errors.Is(err, unix.EROFS) {
+			slog.Warn("systemd units NOT refreshed: this node's updater unit predates unit refresh "+
+				"(its unit directory is read-only); run the panel's install command (重装命令) once",
+				"dir", p.unitDir)
+			st.Trial.Units = false
+			return p.save(st)
+		}
+		if err != nil {
+			return fmt.Errorf("%s: %w", n, err)
+		}
+	}
+	syncDir(p.unitDir)
+	if err := p.reloadUnits(); err != nil {
+		return err
+	}
+	slog.Info("installed the new release's systemd units", "units", change)
+	return nil
+}
+
+// restoreUnits puts back the units the update on probation replaced (best
+// effort: a failure is logged, the binary rollback goes on).
+func (p *applier) restoreUnits(st *rootState) {
+	if st.Trial == nil || !st.Trial.Units {
+		return
+	}
+	prevDir := filepath.Join(p.rootDir, unitsPrevDir)
+	var restored []string
+	for _, n := range unitNames {
+		b, err := readUnit(filepath.Join(prevDir, n))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err == nil {
+			err = writeUnitFile(p.unitDir, n, b)
+		}
+		if err != nil {
+			slog.Error("cannot restore the previous systemd unit", "unit", n, "error", err)
+			continue
+		}
+		restored = append(restored, n)
+	}
+	st.Trial.Units = false
+	if len(restored) == 0 {
+		return
+	}
+	syncDir(p.unitDir)
+	if err := p.reloadUnits(); err != nil {
+		slog.Error("systemd reload after restoring the units", "error", err)
+	}
+	slog.Info("restored the previous systemd units", "units", restored)
+}
+
+// readUnit reads a unit file (no symlink followed, regular, bounded).
+func readUnit(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() || fi.Size() > maxUnitSize {
+		return nil, fmt.Errorf("%s: not a regular file of at most %d bytes", path, maxUnitSize)
+	}
+	return io.ReadAll(io.LimitReader(f, maxUnitSize))
+}
+
+// writeUnitFile is writeUnit (tests simulate a read-only unit directory).
+var writeUnitFile = writeUnit
+
+// writeUnit atomically replaces dir/name: a new root-owned 0644 file
+// (O_EXCL, no symlink followed), synced, renamed over the old one.
+func writeUnit(dir, name string, b []byte) error {
+	tmp := filepath.Join(dir, "."+name+".akari-new")
+	_ = os.Remove(tmp)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(b)
+	if err == nil {
+		err = f.Chmod(0o644) // explicit: the unit's UMask=0077 would make it 0600
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, filepath.Join(dir, name))
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+	return err
 }
 
 func fileDigest(path string, limit int64) (string, int64, error) {

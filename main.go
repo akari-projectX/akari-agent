@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -45,6 +46,11 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	showLicenses := flag.Bool("licenses", false, "print the licensing of this binary and the third-party licence texts, then exit")
 	showKeys := flag.Bool("release-keys", false, "print the pinned self-update release keys and exit")
+	showUnit := flag.String("print-unit", "", "print the systemd unit NAME this release carries and exit "+
+		"(akari-agent.service, akari-agent-update.service, akari-agent-update.path)")
+	showUnits := flag.Bool("print-units", false, "print the systemd units this release carries as JSON and exit (the updater reads them)")
+	unitDir := flag.String("unit-dir", defaultUnitDir, "where the systemd units are installed (the updater replaces them on an update; "+
+		"the agent reports when they differ from its own)")
 	selfCheck := flag.Duration("update-self-check", defaultSelfCheck,
 		"after a self-update: how long the new binary has to connect and apply the panel's state before it is rolled back")
 	maxBoots := flag.Int("update-max-boots", defaultMaxBoots,
@@ -71,6 +77,20 @@ func main() {
 		fmt.Print(thirdPartyLicenses)
 		return
 	}
+	if *showUnit != "" {
+		if err := printUnit(os.Stdout, *showUnit); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		return
+	}
+	if *showUnits {
+		if err := printUnits(os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	keys, keyErr := pinnedReleaseKeys()
 	if *showKeys {
 		if keyErr != nil {
@@ -95,7 +115,7 @@ func main() {
 			slog.Error("updater", "error", keyErr)
 			os.Exit(1)
 		}
-		if err := runApplyUpdate(*applyUpdate, *updaterState, *updateTarget, *updateService, keys, *selfCheck, *maxBoots); err != nil {
+		if err := runApplyUpdate(*applyUpdate, *updaterState, *updateTarget, *updateService, *unitDir, keys, *selfCheck, *maxBoots); err != nil {
 			slog.Error("updater failed", "error", err)
 			os.Exit(1)
 		}
@@ -141,6 +161,13 @@ func main() {
 	}
 	a.upd = upd
 	a.trial = newTrialState(trial)
+	// W23: units installed by an older installer/updater (or edited).
+	if stale := staleUnits(*unitDir); len(stale) > 0 {
+		a.capabilities = append(slices.Clone(agentCapabilities), capStaleUnits)
+		slog.Warn("the installed systemd units are not the ones this release carries; run the panel's install "+
+			"command (重装命令) once (local changes belong in a drop-in)", "units", stale, "dir", *unitDir)
+	}
+	logMetricsAvailability()
 	a.finalsStore = &finalsStore{dir: dir}
 	// Final counters a previous process persisted when it stopped (SIGTERM
 	// or a self-update restart); they go out first on the next stream.

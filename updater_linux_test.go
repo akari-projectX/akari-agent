@@ -28,6 +28,29 @@ type updaterEnv struct {
 	restarts atomic.Int32 // restart() calls
 	// onRestart plays the new agent (after the install) or the old one.
 	onRestart func(n int32)
+	// W23: the node's unit directory, the units the staged release
+	// carries, and systemd reloads.
+	unitDir  string
+	newUnits map[string][]byte
+	unitsErr error
+	reloads  atomic.Int32
+}
+
+// oldUnits: what the node runs before the update (W23).
+func oldUnits() map[string][]byte {
+	out := map[string][]byte{}
+	for _, n := range unitNames {
+		out[n] = []byte("# old " + n + "\n[Unit]\n")
+	}
+	return out
+}
+
+func (e *updaterEnv) unit(name string) string {
+	b, err := os.ReadFile(filepath.Join(e.unitDir, name))
+	if err != nil {
+		return "<" + err.Error() + ">"
+	}
+	return string(b)
 }
 
 func newUpdaterEnv(t *testing.T) *updaterEnv {
@@ -60,6 +83,25 @@ func newUpdaterEnv(t *testing.T) *updaterEnv {
 		return nil
 	}
 	p.restarts = func() (int, error) { return int(e.nRestart.Load()), nil }
+	e.unitDir = filepath.Join(root, "etc/systemd/system")
+	if err := os.MkdirAll(e.unitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for n, b := range oldUnits() {
+		if err := os.WriteFile(filepath.Join(e.unitDir, n), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.newUnits = embeddedUnits()
+	p.unitDir = e.unitDir
+	p.unitsOf = func(bin string) (map[string][]byte, error) {
+		// Read from the verified root-only copy, never the staged file.
+		if filepath.Dir(bin) != filepath.Dir(p.target) {
+			t.Errorf("units read from %s", bin)
+		}
+		return e.newUnits, e.unitsErr
+	}
+	p.reloadUnits = func() error { e.reloads.Add(1); return nil }
 	e.p = p
 	return e
 }
@@ -159,6 +201,199 @@ func TestApplyInstallsVerifiedCopyAndConfirms(t *testing.T) {
 	if e.restarts.Load() != 1 {
 		t.Fatalf("restarts %d", e.restarts.Load())
 	}
+	// W23: the new release's units are installed (root 0644), systemd
+	// reloaded once; the replaced ones are kept.
+	for _, n := range unitNames {
+		if e.unit(n) != string(e.newUnits[n]) {
+			t.Fatalf("%s not refreshed: %q", n, e.unit(n))
+		}
+		if fi, _ := os.Stat(filepath.Join(e.unitDir, n)); fi.Mode().Perm() != 0o644 {
+			t.Fatalf("%s mode %v", n, fi.Mode().Perm())
+		}
+		if prev, _ := os.ReadFile(filepath.Join(e.p.rootDir, unitsPrevDir, n)); string(prev) != string(oldUnits()[n]) {
+			t.Fatalf("%s: previous unit not kept: %q", n, prev)
+		}
+	}
+	if e.reloads.Load() != 1 {
+		t.Fatalf("reloads %d", e.reloads.Load())
+	}
+	if left, _ := filepath.Glob(filepath.Join(e.unitDir, ".*")); len(left) != 0 {
+		t.Fatalf("temp files in the unit dir: %v", left)
+	}
+}
+
+// W23: what the updater does with the units of the release it installs.
+func TestApplyUnits(t *testing.T) {
+	t.Run("identical units: nothing written, no reload", func(t *testing.T) {
+		e := newUpdaterEnv(t)
+		e.newUnits = oldUnits()
+		e.stage("v1.1.0", []byte("new agent v1.1.0"), nil)
+		e.onRestart = func(int32) { e.confirm("v1.1.0") }
+		if err := e.p.run(); err != nil {
+			t.Fatal(err)
+		}
+		if e.reloads.Load() != 0 || e.result().State != resConfirmed {
+			t.Fatalf("reloads %d result %+v", e.reloads.Load(), e.result())
+		}
+	})
+	t.Run("only units the node has are replaced", func(t *testing.T) {
+		e := newUpdaterEnv(t)
+		if err := os.Remove(filepath.Join(e.unitDir, "akari-agent-update.path")); err != nil {
+			t.Fatal(err)
+		}
+		e.stage("v1.1.0", []byte("new agent v1.1.0"), nil)
+		e.onRestart = func(int32) { e.confirm("v1.1.0") }
+		if err := e.p.run(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(e.unitDir, "akari-agent-update.path")); !os.IsNotExist(err) {
+			t.Fatal("a unit the node did not have was created")
+		}
+		if e.unit("akari-agent.service") != string(e.newUnits["akari-agent.service"]) {
+			t.Fatal("agent unit not refreshed")
+		}
+	})
+	t.Run("a release without readable units is refused", func(t *testing.T) {
+		e := newUpdaterEnv(t)
+		e.unitsErr = errors.New("units: akari-agent.service missing")
+		e.stage("v1.1.0", []byte("new agent v1.1.0"), nil)
+		if err := e.p.run(); err != nil {
+			t.Fatal(err)
+		}
+		if r := e.result(); r.State != resRejected || !strings.Contains(r.Error, "systemd units") {
+			t.Fatalf("result %+v", r)
+		}
+		if e.installed() != "installed v1.0.0" || e.unit("akari-agent.service") != string(oldUnits()["akari-agent.service"]) {
+			t.Fatal("node changed")
+		}
+		if left, _ := filepath.Glob(filepath.Join(filepath.Dir(e.p.target), ".*")); len(left) != 0 {
+			t.Fatalf("temp files next to the target: %v", left)
+		}
+	})
+	t.Run("pre-W23 updater unit (read-only unit dir): update without the units", func(t *testing.T) {
+		e := newUpdaterEnv(t)
+		writeUnitFile = func(string, string, []byte) error { return &os.PathError{Op: "open", Err: syscall.EROFS} }
+		t.Cleanup(func() { writeUnitFile = writeUnit })
+		e.stage("v1.1.0", []byte("new agent v1.1.0"), nil)
+		e.onRestart = func(int32) { e.confirm("v1.1.0") }
+		if err := e.p.run(); err != nil {
+			t.Fatal(err)
+		}
+		if e.installed() != "new agent v1.1.0" || e.result().State != resConfirmed {
+			t.Fatalf("installed %q result %+v", e.installed(), e.result())
+		}
+		if e.unit("akari-agent.service") != string(oldUnits()["akari-agent.service"]) || e.reloads.Load() != 0 {
+			t.Fatal("units touched")
+		}
+	})
+	t.Run("a unit write failure refuses the update and restores", func(t *testing.T) {
+		e := newUpdaterEnv(t)
+		n := 0
+		writeUnitFile = func(dir, name string, b []byte) error {
+			if n++; n == 2 {
+				return errors.New("disk full")
+			}
+			return writeUnit(dir, name, b)
+		}
+		t.Cleanup(func() { writeUnitFile = writeUnit })
+		e.stage("v1.1.0", []byte("new agent v1.1.0"), nil)
+		if err := e.p.run(); err != nil {
+			t.Fatal(err)
+		}
+		if r := e.result(); r.State != resRejected || !strings.Contains(r.Error, "disk full") {
+			t.Fatalf("result %+v", r)
+		}
+		for _, u := range unitNames {
+			if e.unit(u) != string(oldUnits()[u]) {
+				t.Fatalf("%s not restored: %q", u, e.unit(u))
+			}
+		}
+		if e.installed() != "installed v1.0.0" || e.rootState().Trial != nil {
+			t.Fatalf("installed %q trial %+v", e.installed(), e.rootState().Trial)
+		}
+	})
+	t.Run("rollback in a later run (agent request) restores the units", func(t *testing.T) {
+		e := newUpdaterEnv(t)
+		e.stage("v1.1.0", []byte("new agent v1.1.0"), nil)
+		e.p.selfCheck, e.p.grace = 0, 0 // this run gives up at once ...
+		e.onRestart = func(n int32) {
+			if n == 1 {
+				// ... no: simulate the updater dying after the restart.
+				panic(errStop)
+			}
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != errStop {
+					panic(r)
+				}
+			}()
+			_ = e.p.run()
+		}()
+		if e.unit("akari-agent.service") != string(e.newUnits["akari-agent.service"]) || !e.rootState().Trial.Units {
+			t.Fatalf("units not installed / not recorded: %+v", e.rootState().Trial)
+		}
+		// The next run is a fresh process of the NEW binary.
+		e.onRestart = nil
+		e.p.version = "v1.1.0"
+		e.writeRequest(applyRequest{Schema: requestSchema, Kind: kindRollback, RolloutID: "r1", Version: "v1.1.0", Reason: "no ack"})
+		if err := e.p.run(); err != nil {
+			t.Fatal(err)
+		}
+		if e.installed() != "installed v1.0.0" || e.result().State != resRolledBack {
+			t.Fatalf("installed %q result %+v", e.installed(), e.result())
+		}
+		for _, u := range unitNames {
+			if e.unit(u) != string(oldUnits()[u]) {
+				t.Fatalf("%s not restored: %q", u, e.unit(u))
+			}
+		}
+		if e.reloads.Load() != 2 {
+			t.Fatalf("reloads %d (install + restore)", e.reloads.Load())
+		}
+	})
+}
+
+var errStop = errors.New("stop")
+
+// W23: an updater that died after installing the units but before the
+// binary leaves the previous binary with the new units: the next run puts
+// the previous units back.
+func TestApplyInterruptedBeforeTheBinary(t *testing.T) {
+	e := newUpdaterEnv(t)
+	e.stage("v1.1.0", []byte("new agent v1.1.0"), nil)
+	n := 0
+	writeUnitFile = func(dir, name string, b []byte) error {
+		err := writeUnit(dir, name, b)
+		if n++; n == len(unitNames) {
+			panic(errStop) // the last unit written, then the process dies
+		}
+		return err
+	}
+	t.Cleanup(func() { writeUnitFile = writeUnit })
+	func() {
+		defer func() {
+			if r := recover(); r != errStop {
+				panic(r)
+			}
+		}()
+		_ = e.p.run()
+	}()
+	writeUnitFile = writeUnit
+	if e.installed() != "installed v1.0.0" || e.unit("akari-agent.service") != string(e.newUnits["akari-agent.service"]) {
+		t.Fatalf("setup: installed %q", e.installed())
+	}
+	if err := e.p.run(); err != nil { // the next trigger (still the old binary)
+		t.Fatal(err)
+	}
+	for _, u := range unitNames {
+		if e.unit(u) != string(oldUnits()[u]) {
+			t.Fatalf("%s not restored: %q", u, e.unit(u))
+		}
+	}
+	if e.rootState().Trial != nil {
+		t.Fatal("probation kept")
+	}
 }
 
 func TestApplyRollsBack(t *testing.T) {
@@ -204,6 +439,15 @@ func TestApplyRollsBack(t *testing.T) {
 			}
 			if e.restarts.Load() != 2 {
 				t.Fatalf("restarts %d (install + rollback)", e.restarts.Load())
+			}
+			// W23: the previous units are back, systemd reloaded twice.
+			for _, u := range unitNames {
+				if e.unit(u) != string(oldUnits()[u]) {
+					t.Fatalf("%s not restored: %q", u, e.unit(u))
+				}
+			}
+			if e.reloads.Load() != 2 {
+				t.Fatalf("reloads %d", e.reloads.Load())
 			}
 			// Never again, whatever the agent's own records say.
 			e.stage("v1.1.0", []byte("broken v1.1.0"), nil)

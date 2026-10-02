@@ -1,7 +1,7 @@
 FUZZ_MAIN = FuzzBuildConfig FuzzRewriteCertPaths FuzzBuildUser FuzzInboundTCPPorts FuzzACMEConfig FuzzProcParsers FuzzStateHash FuzzLoadConfig FuzzApplyRequest
 FUZZ_RELEASE = FuzzParseManifest FuzzCompareVersions FuzzVerify FuzzParseKeys
 
-.PHONY: fuzz cover third-party check-third-party bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb vet fmt-check test test-canary vulncheck ci
+.PHONY: fuzz cover third-party check-third-party bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb sync-units check-units vet fmt-check test test-canary vulncheck ci
 
 # Canonical contract lives in akari-panel/proto/agent.proto. This repo vendors
 # a copy: `make sync-proto` pulls the sibling checkout's version and
@@ -88,6 +88,19 @@ sync-proto:
 check-proto:
 	diff -q $(PANEL_DIR)/proto/agent.proto proto/agent.proto
 
+# W23: the systemd units are canonical HERE (systemd/, compiled into the
+# binary: -print-unit / -print-units). akari-panel keeps a byte-identical
+# copy (deploy/systemd/: its installer's fallback for releases that predate
+# -print-unit): `make sync-units` writes it, `make check-units` (CI, proto
+# job) fails on drift. Unit changes are agent-first: update the panel copy
+# in a panel PR merged before this one (like the proto, panel first).
+UNIT_FILES = akari-agent.service akari-agent-update.service akari-agent-update.path
+sync-units:
+	for u in $(UNIT_FILES); do cp systemd/$$u $(PANEL_DIR)/deploy/systemd/$$u || exit 1; done
+
+check-units:
+	@for u in $(UNIT_FILES); do cmp systemd/$$u $(PANEL_DIR)/deploy/systemd/$$u || { echo "$$u differs from $(PANEL_DIR)/deploy/systemd/$$u: make sync-units"; exit 1; }; done; echo "units: panel copy current"
+
 # Generated code (pb/) must be what buf produces from the vendored proto.
 # Needs protoc-gen-go v1.36.12 and protoc-gen-go-grpc v1.6.2 on PATH.
 check-pb: proto
@@ -143,13 +156,15 @@ cover:
 	go test -tags canary -count=1 -coverprofile=cover.out .
 	scripts/cover-gate.sh cover.out $(COVER_MIN)
 
-# W18: the self-update path under real systemd 257 (docker, privileged):
-# the shipped units from the panel checkout, the agent's StateDirectory
-# noexec+idmapped as on a VPS, install/confirm, crash-loop rollback and a
-# hostile request against the privileged updater. CI job `systemd-update`.
-PANEL_DIR ?= ../akari-panel
+# W18/W23: the self-update path under real systemd 257 (docker,
+# privileged): the units this repo ships (systemd/), the agent's
+# StateDirectory noexec+idmapped as on a VPS; machine metrics readable under
+# the shipped unit (not under the pre-W23 one); a pre-W23 updater unit
+# (no unit refresh, one reinstall), unit refresh with each update,
+# crash-loop rollback restoring binary and units, a hostile request.
+# CI job `systemd-update`. WORK: scratch dir (default: mktemp).
 systemd-test:
-	scripts/systemd-test/run.sh $(PANEL_DIR)
+	scripts/systemd-test/run.sh
 
 # M2-6 overhead benchmarks at 10k users per node (bench_test.go; results in
 # akari-panel/docs/PERF.md).

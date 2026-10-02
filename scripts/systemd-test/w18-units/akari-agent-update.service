@@ -1,0 +1,63 @@
+# The akari node agent's privileged updater (M6 self-update, W18). Started
+# only by akari-agent-update.path; installed by the panel's one-line
+# installer (see akari-agent-update.path for installing by hand).
+#
+# Why a separate root unit: the agent runs as a throw-away user and its
+# StateDirectory is mounted noexec by systemd (DynamicUser, idmapped mount
+# since systemd 256/257). That stays so (W^X): nothing the agent can write
+# is ever executed. This unit runs the INSTALLED, trusted binary in
+# -apply-update mode. It treats the agent's directory as untrusted: no
+# symlinks followed, regular single-link files owned by the agent only; it
+# copies the staged binary into a root-only file next to /usr/local/bin/
+# akari-agent, verifies that copy against the release keys compiled into
+# ITSELF (signature, platform, no downgrade, versions this node rolled back
+# from), keeps the running binary as akari-agent.prev, renames the new one
+# into place, restarts akari-agent.service and watches the new binary's
+# self-check (crash loop or no confirmation in time = put .prev back and
+# restart). The verdict goes back to the agent, which reports it to the
+# panel (rollout / node view) exactly as before.
+#
+# Its own record (rolled-back versions, the binary on probation) is in
+# /var/lib/akari-agent-update (root, 0700).
+[Unit]
+Description=Akari node agent updater (verifies and installs a staged self-update)
+Documentation=https://github.com/akari-projectX/akari-agent
+
+[Service]
+Type=oneshot
+# -update-self-check / -update-max-boots (defaults 5m / 3): when you change
+# them on akari-agent.service, pass the same values here.
+ExecStart=/usr/local/bin/akari-agent -apply-update /var/lib/private/akari-agent
+StateDirectory=akari-agent-update
+StateDirectoryMode=0700
+# Watching the self-check (default 5 min + 1 min) happens inside the start.
+TimeoutStartSec=30min
+
+# --- sandbox --------------------------------------------------------------
+# Root, but only what installing a file and talking to systemd needs: read
+# the agent's 0700 directory (DAC), hand it the verdict (CHOWN), replace
+# the binary in /usr/local/bin. No network at all.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/usr/local/bin -/var/lib/private/akari-agent
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077

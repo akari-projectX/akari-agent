@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -236,10 +237,15 @@ func TestProberCoalescedRequestSurvivesReschedule(t *testing.T) {
 func TestAgentLatencyCapabilityAndConfig(t *testing.T) {
 	a := NewAgent(&Config{}, "test", nil)
 	h := a.helloLocked().GetHello()
-	if len(h.Capabilities) != 3 || h.Capabilities[0] != "metrics" || h.Capabilities[1] != "latency" ||
-		h.Capabilities[2] != "updater" {
+	if !slices.Equal(h.Capabilities, []string{"metrics", "latency", "updater", "metrics-presence"}) {
 		t.Fatalf("capabilities %v", h.Capabilities)
 	}
+	// W23: stale units add the status flag.
+	a.capabilities = append(slices.Clone(agentCapabilities), capStaleUnits)
+	if h := a.helloLocked().GetHello(); !slices.Contains(h.Capabilities, "stale-units") {
+		t.Fatalf("capabilities %v", h.Capabilities)
+	}
+	a.capabilities = nil
 	out, send := collect()
 	msg := &pb.PanelDown{Msg: &pb.PanelDown_LatencyProbe{LatencyProbe: &pb.LatencyProbeConfig{
 		IntervalSeconds: 7200, Urls: []string{"https://probe.example/204"}, RunToken: 3}}}
