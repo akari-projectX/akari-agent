@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -95,6 +96,12 @@ func parseLoadavg(b []byte) (l1, l5, l15 float64, ok bool) {
 	if l15, err = strconv.ParseFloat(f[2], 64); err != nil {
 		return 0, 0, 0, false
 	}
+	// ParseFloat also takes "NaN", "Inf" and signs: never a load average.
+	for _, v := range []float64{l1, l5, l15} {
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+			return 0, 0, 0, false
+		}
+	}
 	return l1, l5, l15, true
 }
 
@@ -122,7 +129,7 @@ func parseMeminfo(b []byte) memInfo {
 			continue
 		}
 		if len(f) > 1 && f[1] == "kB" {
-			v *= 1024
+			v = kib(v)
 		}
 		kv[name] = v
 	}
@@ -130,7 +137,7 @@ func parseMeminfo(b []byte) memInfo {
 	m.total = kv["MemTotal"]
 	avail, ok := kv["MemAvailable"]
 	if !ok {
-		avail = kv["MemFree"] + kv["Buffers"] + kv["Cached"]
+		avail = satAdd(satAdd(kv["MemFree"], kv["Buffers"]), kv["Cached"])
 	}
 	if avail <= m.total {
 		m.used = m.total - avail
@@ -140,6 +147,21 @@ func parseMeminfo(b []byte) memInfo {
 		m.swapUsed = m.swapTotal - free
 	}
 	return m
+}
+
+// kib: kB (KiB) to bytes, saturating instead of wrapping.
+func kib(v uint64) uint64 {
+	if v > math.MaxUint64/1024 {
+		return math.MaxUint64
+	}
+	return v * 1024
+}
+
+func satAdd(a, b uint64) uint64 {
+	if a > math.MaxUint64-b {
+		return math.MaxUint64
+	}
+	return a + b
 }
 
 // parseDefaultRoute4: the interface of the default route in
@@ -280,7 +302,7 @@ func parseStatusRSS(b []byte) uint64 {
 			return 0
 		}
 		if len(f) > 1 && f[1] == "kB" {
-			v *= 1024
+			v = kib(v)
 		}
 		return v
 	}

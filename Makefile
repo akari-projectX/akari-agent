@@ -1,4 +1,7 @@
-.PHONY: third-party check-third-party bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb vet fmt-check test test-canary vulncheck ci
+FUZZ_MAIN = FuzzBuildConfig FuzzRewriteCertPaths FuzzBuildUser FuzzInboundTCPPorts FuzzACMEConfig FuzzProcParsers FuzzStateHash FuzzLoadConfig
+FUZZ_RELEASE = FuzzParseManifest FuzzCompareVersions FuzzVerify FuzzParseKeys
+
+.PHONY: fuzz cover third-party check-third-party bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb vet fmt-check test test-canary vulncheck ci
 
 # Canonical contract lives in akari-panel/proto/agent.proto. This repo vendors
 # a copy: `make sync-proto` pulls the sibling checkout's version and
@@ -121,6 +124,24 @@ test: test-canary
 # Bump xray-core only when these are green.
 test-canary:
 	go test -tags canary -count=1 -run 'TestRT_' .
+
+# Native Go fuzzing (fuzz_test.go, release/fuzz_test.go): each target in
+# turn for FUZZTIME (seeds alone already run in `make test`). CI: nightly
+# 5m/target, PRs 15s/target (.github/workflows/fuzz.yml). New crashers land
+# in testdata/fuzz/<Target>/ — commit them with the fix (regression seeds).
+FUZZTIME ?= 30s
+FUZZPAR ?= 2
+fuzz:
+	@for t in $(FUZZ_MAIN); do echo "== $$t"; go test -run '^$$' -fuzz "^$$t$$" -fuzztime $(FUZZTIME) -parallel $(FUZZPAR) . || exit 1; done
+	@for t in $(FUZZ_RELEASE); do echo "== release/$$t"; go test -run '^$$' -fuzz "^$$t$$" -fuzztime $(FUZZTIME) -parallel $(FUZZPAR) ./release || exit 1; done
+
+# Coverage gate of the revocation/limit core (gate.go, ratelimit.go,
+# core.go >= COVER_MIN% statements; CI job `coverage`). Includes the canary
+# tests (real xray clients), no -race.
+COVER_MIN ?= 85
+cover:
+	go test -tags canary -count=1 -coverprofile=cover.out .
+	scripts/cover-gate.sh cover.out $(COVER_MIN)
 
 # M2-6 overhead benchmarks at 10k users per node (bench_test.go; results in
 # akari-panel/docs/PERF.md).

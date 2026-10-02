@@ -230,3 +230,21 @@ func TestSharedVector(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// W13 fuzz regression: numeric pre-release identifiers beyond uint64 are
+// still numeric (semver; the panel's updates.rs agrees).
+func TestCompareVersionsHugeNumericIdentifiers(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want int
+	}{
+		{"v1.0.0-rc.99999999999999999999", "v1.0.0-rc.100000000000000000000", -1},
+		{"v1.0.0-99999999999999999999", "v1.0.0--x", -1},
+		{"v1.0.0-18446744073709551616", "v1.0.0-18446744073709551615", 1},
+		{"v1.0.0-1", "v1.0.0-18446744073709551616", -1},
+	} {
+		if got, err := CompareVersions(c.a, c.b); err != nil || got != c.want {
+			t.Errorf("CompareVersions(%q, %q) = %d, %v; want %d", c.a, c.b, got, err, c.want)
+		}
+	}
+}

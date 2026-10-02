@@ -39,6 +39,10 @@ Go 1.27 单包（`package main`，模块名 `akari/agent`），内嵌 xray-core 
 | `rt_matrix_test.go` | W8 协议矩阵金丝雀（canary 标签）：17 种 协议×传输×安全 组合各用 xray 真实客户端握手、中继、断言用户计数、撤权后旧连接断开且新连接被拒（全部经 delta，SS2022 为墓碑）；W9：移除→同凭据重加（先带限速、再不限速）后**同一个客户端**能再连上（限速 ±5%/不限速），再次移除再被切断 |
 | `ss_tombstone_test.go` | W9 SS2022 墓碑（`-race`）：真实 SS2022 握手（sing-shadowsocks 客户端）在固定头之后拖住（服务端已解析出用户下标），期间 delta 移除部分用户 → 被删用户的握手被拒、其余用户以本人身份完成、已建立连接存活、每用户计数精确（无错记）、不重建；同凭据重加复活墓碑；并发版：随机拖延的握手 vs 反复移除/重加。换回 xray `RemoveUser` 时该测试以 index out of range panic 失败 |
 | `protocols_test.go` | SS2022 受管入站/拒绝项、`WouldShrinkUnsafe`（含墓碑生命周期、state hash 不含墓碑、Snapshot 压缩）、`TestTombstoneBound`、账号校验、gRPC 无 :authority 请求不致崩溃（R26 回归） |
+| `fuzz_test.go` / `release/fuzz_test.go` | W13 原生 Go fuzz（种子随 `make test` 当普通测试跑；`make fuzz FUZZTIME=…` 逐个探索，CI `fuzz.yml`：PR 每目标 15s、夜间 5m，语料存 Actions 缓存；新崩溃输入落在 `testdata/fuzz/<Target>/`，修复时一并提交作回归种子）：`FuzzBuildConfig`（面板下发的 inbounds → `buildConfig`；不变量：xray 视为带 `clients` 的 SS 入站绝不留作单用户服务端）、`FuzzRewriteCertPaths`（只改两条证书路径，数字精度/其他成员不变）、`FuzzBuildUser`、`FuzzInboundTCPPorts`、`FuzzACMEConfig`（域名可安全作目录名）、`FuzzProcParsers`、`FuzzStateHash`（编码无歧义、与顺序无关）、`FuzzLoadConfig`；release：`FuzzParseManifest`、`FuzzCompareVersions`（与独立 semver 参考实现差分）、`FuzzVerify`、`FuzzParseKeys` |
+| `fuzz_regress_test.go` | W13 fuzz 发现的回归测试（SS2022 键匹配、证书路径重写无损、/proc 解析拒绝/饱和；release 包的超长数字预发布标识在 `release_test.go`） |
+| `gate_unit_test.go` | gate 记账（轮换只断该 key 的活连接、Close、拒绝不触达内层 dispatcher）与限速边界（饱和、包装器错误透传）的单元测试 |
+| `scripts/cover-gate.sh` | `make cover`：`go test -tags canary -coverprofile` 后按文件统计 gate.go/ratelimit.go/core.go 语句覆盖率，低于 `COVER_MIN`（85）失败；CI job `coverage` |
 | `bench_test.go` | M2-6 开销基准（每节点 10k 用户 × 2 inbound）：Rebuild、实例堆、单用户 delta、流量快照、state hash、gate admit/release、心跳连接数；`make bench`，结果记录在 `akari-panel/docs/PERF.md` |
 | `pb/` | buf 生成物（已提交，`buf generate proto`） |
 
@@ -53,6 +57,8 @@ make test         # test-canary + go test -race ./...
 make test-canary  # rt_canary_test.go（build tag canary，不带 -race：xray 的 Vision 客户端在 -race 下触发 checkptr）
 make sync-proto   # 从 ../akari-panel 拷贝契约并 buf generate（worktree：PANEL_DIR=../<面板 worktree>）
 make check-proto  # 契约漂移校验（同上 PANEL_DIR）
+make fuzz FUZZTIME=10m   # 每个 fuzz 目标依次探索（默认 30s）
+make cover        # 核心文件覆盖率门（gate/ratelimit/core ≥ 85%）
 make bench        # 开销基准（bench_test.go；-run '^$' 只跑基准）
 make build-testkeys VERSION=v900.0.0 OUT=/tmp/a   # 仅测试：额外信任测试公钥（smoke 用）
 make sign-manifest VERSION=vX.Y.Z KEY=<file>|KEY_ENV=<var>   # dist/*.manifest.{json,sig}
@@ -101,3 +107,4 @@ tag `v*` 触发 `.github/workflows/release.yml`：fmt-check/vet/check-third-part
 - **身份（M1c）**：私钥只在节点生成、永不出节点、不进日志；token 也不进日志（只存其 SHA-256 作“已用”标记）。连接时先用待确认的 next 身份（失败为暂时性则下次用当前身份，交替），收到面板第一条消息即提升为 `identity.pem`。面板在新证书首次出现前一直接受旧证书，所以接收后、持久化前崩溃都无害。当前证书过期时每次连接都打错误日志（需 `akari node enroll-token` 发新 token 重新注册）。
 - **GO-2026-6443（更正，R26）**：`refuseGRPCTransport` 已删除，gRPC 传输恢复。grpc-go 钉在上游修复提交 `v1.85.0-dev.0.20260825072537-93e31b48545e`（v1.85.0 发布后改用 tag）；`VULN_ALLOW` 为空且空列表 fail closed。该公告实为 xDS 服务端路径，xray 普通 gRPC 服务端不受影响（`TestGRPCMissingAuthorityDoesNotPanic` 在旧版本上同样通过）。
 - 应用失败（Snapshot 的 `Rebuild` 或 Delta 返回错误）时**不**更新持有版本：Hello 继续报旧版本，Ack 携带**尝试的**版本、`ok=false`、reason `APPLY_FAILED`，面板据此记录 `last_error` 并按退避重试。
+- **W13 fuzz 发现（已修）**：①`multiUserShadowsocks` 曾用"精确键优先"的 map 查找取 tag/settings，而 xray 按 Go struct 语义（大小写不敏感、**最后一个**同名成员胜出）读取：`{"tag":"a","TAG":"b",...}` 的 SS2022 入站在 xray 里叫 "b"，却按 "a" 判定 → "b" 留作**单用户**服务端（共享 PSK、无用户身份、gate 无法撤权）。现用与 xray 相同的 struct 解码（`inboundJSON`）。②`rewriteCertPaths` 经 `map[string]any` 重编码把 > 2^53 的整数改成 float64 近似值；现 `UseNumber`，且路径上的对象若有大小写折叠后同名的键则拒绝（重编码会改变 xray 取哪一个）。③`release.cmpIdent` 把超出 uint64 的数字预发布标识当字母串比较（与 semver 和面板 `updates.rs` 不一致：面板认为更新的版本 agent 可能视为降级）；现按长度+字典序比较数字标识。④`parseLoadavg` 接受 NaN/Inf/负数，kB 换算与 MemFree+Buffers+Cached 求和可回绕；现拒绝/饱和。
