@@ -433,11 +433,12 @@ func nextCert(b []byte) (*x509.Certificate, []byte, error) {
 	}
 }
 
-func tlsInbound(port int) string {
+func tlsInbound(t *testing.T) string {
+	port, other := freePort(t), freePort(t)
 	return fmt.Sprintf(`[{"tag":"t","listen":"127.0.0.1","port":%d,"protocol":"trojan","settings":{"clients":[]},`+
 		`"streamSettings":{"network":"tcp","security":"tls","tlsSettings":{"serverName":%q,"certificates":[{"certificateFile":%q,"keyFile":%q}]}}},`+
 		`{"tag":"v","listen":"127.0.0.1","port":%d,"protocol":"vless","settings":{"clients":[],"decryption":"none"},"streamSettings":{"network":"tcp"}}]`,
-		port, testDomain, nodeCertCredFile, nodeKeyCredFile, port+1)
+		port, testDomain, nodeCertCredFile, nodeKeyCredFile, other)
 }
 
 // A Snapshot with acme builds even before any certificate exists (the
@@ -449,7 +450,7 @@ func TestSnapshotWithACMEUsesTheStore(t *testing.T) {
 	defer a.core.Teardown()
 	a.certs = newCertManager(t.TempDir())
 	ctx := context.Background()
-	inb := tlsInbound(freePort(t))
+	inb := tlsInbound(t)
 
 	out, send := collect()
 	msg := snapshotMsg(2, 1, inb)
@@ -489,7 +490,7 @@ func TestCertSwapFailureAsksForSnapshot(t *testing.T) {
 	defer a.core.Teardown()
 	a.certs = newCertManager(t.TempDir())
 	out, send := collect()
-	msg := snapshotMsg(4, 2, tlsInbound(freePort(t)))
+	msg := snapshotMsg(4, 2, tlsInbound(t))
 	msg.GetSnapshot().Acme = &pb.AcmeConfig{Domain: testDomain}
 	if err := a.handleDown(context.Background(), 0, send, msg); err != nil {
 		t.Fatal(err)
