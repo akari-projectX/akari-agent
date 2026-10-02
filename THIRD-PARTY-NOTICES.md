@@ -1,11 +1,17 @@
 # Third-party notices (akari-agent)
 
+> The authoritative, generated list of linked modules with their licence
+> texts is `THIRD_PARTY_LICENSES.txt` (`make third-party`, CI-checked,
+> embedded in the binary as `akari-agent -licenses`, shipped with every
+> release). This file is the maintainers' assessment of it.
+
 This repository's own code is MIT (see `LICENSE`). It vendors/copies the
 contract file `proto/agent.proto` (canonical copy lives in the
 `akari-panel` repository of the same organisation) and the released binary
 statically links the Go modules below. The list is generated from
-`go version -m` of the built agent (38 modules, 2026-10-02 W10+W11, xray-core
-`v1.260327.0`); re-check it whenever `go.mod` changes (`go version -m agent`).
+`go list -deps` of the agent (38 modules, 2026-10-02 W10+W11, xray-core
+`v1.260327.0`); `make check-third-party` (CI) fails when go.mod changes the
+linked set, so this table is re-checked on every such change.
 License texts are in each module (module cache / upstream repository); the
 full dependency graph is `go.mod` / `go.sum`.
 
@@ -50,9 +56,10 @@ Consequences, as far as can be said without legal advice:
   Shadowsocks proxy from xray's `infra/conf` imports; not done (the MPL-2.0
   note below then also applies to that fork).
 
-Open decision (not settled by this file): either state the GPL-3.0-or-later
-status of released binaries in README/release notes (cheapest, recommended),
-or carry the xray patch. The panel and the client are unaffected by this
+Decision (R19, 2026-10-02): released binaries are GPL-3.0-or-later combined
+works; this is stated in the README ("Licence"), in every release's notes
+and in `THIRD_PARTY_LICENSES.txt` (which the binary embeds). No xray patch
+is carried. The panel and the client are unaffected by this
 (they do not link these modules); the client's own GPL-3.0 position for mihomo
 is separate (see `akari-client/CLAUDE.md`).
 

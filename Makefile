@@ -1,4 +1,4 @@
-.PHONY: bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb vet fmt-check test test-canary vulncheck ci
+.PHONY: third-party check-third-party bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb vet fmt-check test test-canary vulncheck ci
 
 # Canonical contract lives in akari-panel/proto/agent.proto. This repo vendors
 # a copy: `make sync-proto` pulls the sibling checkout's version and
@@ -54,7 +54,22 @@ dist:
 	  GOOS=linux GOARCH=$$a $(GOBUILD) -o dist/akari-agent-linux-$$a . || exit 1; \
 	done
 	$(MAKE) check-release-keys
-	cd dist && sha256sum akari-agent-linux-* > SHA256SUMS
+	cp THIRD_PARTY_LICENSES.txt dist/
+	cd dist && sha256sum akari-agent-linux-* THIRD_PARTY_LICENSES.txt > SHA256SUMS
+
+# R19: THIRD_PARTY_LICENSES.txt = licensing of the binary (a GPL-3.0-or-later
+# combined work: sagernet/sing* linked via xray-core) + every linked module's
+# licence/notice texts (cmd/thirdparty: `go list -deps` for the dist
+# platforms, licence texts from the module cache, fail-closed allow-list).
+# Embedded in the binary (`agent -licenses`), shipped in dist/ and releases.
+# Regenerate after every go.mod change; CI fails when it is stale.
+third-party:
+	go run ./cmd/thirdparty -o THIRD_PARTY_LICENSES.txt
+
+check-third-party:
+	@tmp=$$(mktemp) && go run ./cmd/thirdparty -o $$tmp && \
+	if diff -u THIRD_PARTY_LICENSES.txt $$tmp >/dev/null; then rm -f $$tmp; echo "third-party licences: current"; \
+	else diff -u THIRD_PARTY_LICENSES.txt $$tmp | head -40; rm -f $$tmp; echo "THIRD_PARTY_LICENSES.txt is stale: run make third-party"; exit 1; fi
 
 proto:
 	buf generate proto
@@ -89,7 +104,7 @@ vulncheck:
 	echo "only allow-listed vulnerabilities: $(VULN_ALLOW)"
 
 # What CI runs (minus check-proto/check-pb, which need ../akari-panel).
-ci: fmt-check vet test build vulncheck
+ci: fmt-check vet check-third-party test build vulncheck
 
 vet:
 	go vet ./...

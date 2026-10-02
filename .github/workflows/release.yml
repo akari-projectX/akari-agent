@@ -37,7 +37,7 @@ jobs:
         with:
           go-version-file: go.mod
       # Same gate as CI, on the exact commit that is released.
-      - run: make fmt-check vet test
+      - run: make fmt-check vet check-third-party test
       # A reachable vulnerability blocks the release (allow-list in the Makefile).
       - run: make vulncheck
       - name: build
@@ -45,6 +45,8 @@ jobs:
           make dist VERSION="$GITHUB_REF_NAME" COMMIT="$(git rev-parse --short=12 "$GITHUB_SHA")"
           dist/akari-agent-linux-amd64 -version
           [ "$(dist/akari-agent-linux-amd64 -version | cut -d' ' -f2)" = "$GITHUB_REF_NAME" ]
+          # R19: the binary carries its licensing (GPL-3.0-or-later combined work).
+          dist/akari-agent-linux-amd64 -licenses | cmp - dist/THIRD_PARTY_LICENSES.txt
       # M6 self-update: Ed25519-signed manifests (what agents verify, with
       # the keys pinned in release-keys.txt). The private key lives only in
       # the AKARI_RELEASE_SIGNING_KEY secret (akari-sign keygen; see README
@@ -79,7 +81,7 @@ jobs:
       - name: checksums and signatures
         working-directory: dist
         run: |
-          files="akari-agent-linux-amd64 akari-agent-linux-arm64 akari-agent-${GITHUB_REF_NAME}.cdx.json"
+          files="akari-agent-linux-amd64 akari-agent-linux-arm64 akari-agent-${GITHUB_REF_NAME}.cdx.json THIRD_PARTY_LICENSES.txt"
           files="$files $(ls akari-agent-linux-*.manifest.json akari-agent-linux-*.manifest.sig 2>/dev/null | tr '\n' ' ')"
           # shellcheck disable=SC2086
           sha256sum $files > SHA256SUMS
@@ -95,6 +97,18 @@ jobs:
         run: |
           prerelease=""
           case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          # R19: the licensing statement leads the notes (the generated
+          # changelog follows it).
+          cat >"$RUNNER_TEMP/notes.md" <<'EOF'
+          ## Licensing
+
+          akari-agent's own source code is MIT licensed. The release **binaries** statically link
+          `github.com/sagernet/sing` and `sing-shadowsocks` (GPL-3.0-or-later, through xray-core's
+          Shadowsocks support), so each binary is a combined work distributed under
+          **GPL-3.0-or-later**. Corresponding source is this tag (`make dist` reproduces the binary).
+          Every linked module and its licence text: `THIRD_PARTY_LICENSES.txt` (also printed by
+          `akari-agent -licenses`).
+          EOF
           gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes $prerelease \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --notes-file "$RUNNER_TEMP/notes.md" $prerelease \
             --title "$GITHUB_REF_NAME"
