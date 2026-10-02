@@ -100,12 +100,13 @@ type applier struct {
 	grace     time.Duration
 	maxBoots  int
 	poll      time.Duration
-	// restart restarts the agent service; restarts reads its automatic
-	// restart counter (systemd NRestarts).
-	restart  func() error
-	restarts func() (int, error)
-	now      func() time.Time
-	sleep    func(time.Duration)
+	// restart restarts the agent service (clearing a failed state first, so
+	// a start limit the crash loop tripped cannot refuse it); unit reads
+	// the service's state (systemd NRestarts, ActiveState, Result).
+	restart func() error
+	unit    func() (unitState, error)
+	now     func() time.Time
+	sleep   func(time.Duration)
 	// W23: where the units live, how a verified binary's units are read,
 	// and how systemd is told about new unit files.
 	unitDir     string
@@ -119,18 +120,23 @@ func newApplier(stateDir, rootDir, target, service string, keys []release.Public
 		goos: runtime.GOOS, goarch: runtime.GOARCH,
 		selfCheck: defaultSelfCheck, grace: updaterGrace, maxBoots: defaultMaxBoots, poll: time.Second,
 		restart: func() error {
+			// A unit that tripped its start limit (state failed) refuses
+			// every start until reset: clear it before each restart.
+			if out, err := exec.Command("systemctl", "reset-failed", service).CombinedOutput(); err != nil {
+				slog.Warn("systemctl reset-failed", "error", err, "output", string(bytes.TrimSpace(out)))
+			}
 			out, err := exec.Command("systemctl", "restart", service).CombinedOutput()
 			if err != nil {
 				return fmt.Errorf("systemctl restart %s: %w: %s", service, err, bytes.TrimSpace(out))
 			}
 			return nil
 		},
-		restarts: func() (int, error) {
-			out, err := exec.Command("systemctl", "show", "-p", "NRestarts", "--value", service).Output()
+		unit: func() (unitState, error) {
+			out, err := exec.Command("systemctl", "show", "-p", "ActiveState,SubState,Result,NRestarts", service).Output()
 			if err != nil {
-				return 0, err
+				return unitState{}, err
 			}
-			return strconv.Atoi(strings.TrimSpace(string(out)))
+			return parseUnitState(string(out))
 		},
 		now:         time.Now,
 		sleep:       time.Sleep,
@@ -138,6 +144,45 @@ func newApplier(stateDir, rootDir, target, service string, keys []release.Public
 		unitsOf:     execPrintUnits,
 		reloadUnits: daemonReload,
 	}
+}
+
+// unitState is what the updater reads of the agent service.
+type unitState struct {
+	Restarts int    // NRestarts: automatic restarts
+	Active   string // ActiveState
+	Sub      string // SubState
+	Result   string // Result
+}
+
+// gaveUp reports systemd refusing further starts: the crash loop tripped
+// StartLimitBurst, the unit is failed and NRestarts no longer grows.
+func (u unitState) gaveUp() bool {
+	return u.Active == "failed" || u.Result == "start-limit-hit"
+}
+
+// parseUnitState parses `systemctl show -p ...` output (Key=Value lines).
+func parseUnitState(out string) (unitState, error) {
+	var u unitState
+	var err error
+	for _, line := range strings.Split(out, "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "NRestarts":
+			if u.Restarts, err = strconv.Atoi(v); err != nil {
+				return u, err
+			}
+		case "ActiveState":
+			u.Active = v
+		case "SubState":
+			u.Sub = v
+		case "Result":
+			u.Result = v
+		}
+	}
+	return u, nil
 }
 
 // execPrintUnits runs a verified binary with -print-units (bounded time
@@ -359,8 +404,11 @@ func (p *applier) apply(d *agentDir, st *rootState, req *applyRequest) error {
 	if err := p.restart(); err != nil {
 		return p.rollback(d, st, m.Version, req.RolloutID, err.Error())
 	}
-	base, err := p.restarts()
-	if err != nil {
+	base := -1
+	st0, err := p.unit()
+	if err == nil {
+		base = st0.Restarts
+	} else {
 		slog.Warn("cannot read the agent's restart counter; relying on the self-check timeout", "error", err)
 		base = -1
 	}
@@ -478,9 +526,12 @@ func (p *applier) watch(d *agentDir, version string, base int) string {
 		if r := d.takeRollback(version); r != nil {
 			return "self-check failed: " + r.Reason
 		}
-		if base >= 0 {
-			if n, err := p.restarts(); err == nil && n-base >= p.maxBoots {
-				return fmt.Sprintf("the new agent stopped %d times without passing its self-check", n-base)
+		if u, err := p.unit(); err == nil {
+			if u.gaveUp() {
+				return fmt.Sprintf("the new agent crash-looped into systemd's start limit (state %s/%s, result %s) without passing its self-check", u.Active, u.Sub, u.Result)
+			}
+			if base >= 0 && u.Restarts-base >= p.maxBoots {
+				return fmt.Sprintf("the new agent stopped %d times without passing its self-check", u.Restarts-base)
 			}
 		}
 		if p.now().After(deadline) {

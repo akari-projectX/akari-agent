@@ -82,7 +82,7 @@ func newUpdaterEnv(t *testing.T) *updaterEnv {
 		}
 		return nil
 	}
-	p.restarts = func() (int, error) { return int(e.nRestart.Load()), nil }
+	p.unit = func() (unitState, error) { return unitState{Restarts: int(e.nRestart.Load()), Active: "active"}, nil }
 	e.unitDir = filepath.Join(root, "etc/systemd/system")
 	if err := os.MkdirAll(e.unitDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -404,7 +404,19 @@ func TestApplyRollsBack(t *testing.T) {
 		{"crash loop", "stopped 3 times", func(e *updaterEnv) func(int32) {
 			return func(n int32) {
 				if n == 1 { // the new binary dies on every start: systemd restarts it
-					e.p.restarts = func() (int, error) { return int(e.nRestart.Add(1)), nil }
+					e.p.unit = func() (unitState, error) {
+						return unitState{Restarts: int(e.nRestart.Add(1)), Active: "activating", Sub: "auto-restart"}, nil
+					}
+				}
+			}
+		}},
+		// StartLimitBurst tripped: the unit is failed, NRestarts frozen.
+		{"start limit", "start limit", func(e *updaterEnv) func(int32) {
+			return func(n int32) {
+				if n == 1 {
+					e.p.unit = func() (unitState, error) {
+						return unitState{Restarts: 4, Active: "failed", Sub: "failed", Result: "start-limit-hit"}, nil
+					}
 				}
 			}
 		}},
@@ -702,4 +714,15 @@ func TestApplyProbationBookkeeping(t *testing.T) {
 			t.Fatal("missing agent state dir is not an error")
 		}
 	})
+}
+
+func TestParseUnitState(t *testing.T) {
+	u, err := parseUnitState("Result=start-limit-hit\nNRestarts=4\nActiveState=failed\nSubState=failed\n")
+	if err != nil || u != (unitState{Restarts: 4, Active: "failed", Sub: "failed", Result: "start-limit-hit"}) || !u.gaveUp() {
+		t.Fatalf("%+v %v", u, err)
+	}
+	u, _ = parseUnitState("Result=success\nNRestarts=2\nActiveState=activating\nSubState=auto-restart\n")
+	if u.gaveUp() {
+		t.Fatalf("a restarting unit is not given up: %+v", u)
+	}
 }

@@ -61,7 +61,12 @@ json.dump(d, open(sys.argv[1], "w"))' "$W/units2.json"
   cat "$W/units2.json"; printf '\nEOF\nexit 0\nfi\necho "broken agent build" >&2\nexit 3\n'; } >"$W/v2"
 chmod 0755 "$W/v2"
 cp "$W/v1" "$W/v4" # a valid, newer release for the hostile-request case
-for v in 1 2 3 4; do
+# v5: broken, with the canonical units v900.0.3 already has (case 6).
+"$W/v3" -print-units >"$W/units5.json"
+{ printf '#!/bin/sh\nif [ "$1" = -print-units ]; then cat <<'"'"'EOF'"'"'\n'
+  cat "$W/units5.json"; printf '\nEOF\nexit 0\nfi\necho "broken agent build v5" >&2\nexit 3\n'; } >"$W/v5"
+chmod 0755 "$W/v5"
+for v in 1 2 3 4 5; do
   "$W/akari-sign" sign -key testdata/TEST-ONLY-release.key -binary "$W/v$v" -version "v900.0.$v" -os linux -arch "$ARCH" >/dev/null
   python3 - "$W/v$v" "v900.0.$v" >"$W/req$v.json" <<'PY'
 import base64, json, sys
@@ -233,4 +238,29 @@ result | grep -q 'symbolic links' || fail "rejected for another reason: $(result
 x '/usr/local/bin/akari-agent -version' | grep -q 'akari-agent v900.0.3 ' || fail "binary changed"
 units_are 3 || fail "units changed"
 x 'systemctl is-failed -q akari-agent-update.path' && fail "trigger unit failed"
+echo "== 6. broken v900.0.5 trips systemd's start limit: fast rollback, healthy restored agent"
+# Start limit 2 starts/60 s (a drop-in, as an operator would): the crash loop
+# ends in "failed / start-limit-hit" with NRestarts frozen below
+# -update-max-boots (3), the case the restart counter alone cannot see.
+x "install -d $SD/akari-agent.service.d
+   printf '[Unit]\nStartLimitIntervalSec=60\nStartLimitBurst=2\n[Service]\nRestartSec=1\n' >$SD/akari-agent.service.d/zz-limit.conf
+   systemctl daemon-reload"
+x "rm -f $U/apply-result.json"
+t0=$SECONDS
+stage 5
+rolled5() { x 'cat /var/lib/akari-agent-update/updater.json 2>/dev/null' | grep -q '"rolled_back":\[[^]]*"v900.0.5"'; }
+for _ in $(seq 1 100); do rolled5 && break; sleep 0.3; done
+rolled5 || fail "v900.0.5 not rolled back"
+dt=$((SECONDS - t0))
+[ "$dt" -lt 30 ] || fail "rollback took ${dt}s (the self-check timeout is minutes: the start limit was not detected)"
+ulog | grep -q 'start limit' || fail "rollback reason is not the start limit: $(ulog | tail -3)"
+x 'journalctl -u akari-agent -o cat --no-pager' | grep -q 'start-limit-hit\|start request repeated too quickly' \
+  || fail "the start limit never tripped (test does not exercise the case)"
+x '/usr/local/bin/akari-agent -version' | grep -q 'akari-agent v900.0.3 ' || fail "not rolled back to v900.0.3"
+for _ in $(seq 1 20); do [ "$(x 'systemctl is-active akari-agent')" = active ] && break; sleep 0.5; done
+[ "$(x 'systemctl is-active akari-agent')" = active ] || fail "restored agent not running: $(x 'systemctl show -p ActiveState,Result akari-agent')"
+sleep 4
+[ "$(x 'systemctl is-active akari-agent')" = active ] || fail "restored agent did not stay up"
+wait_alog '"agent_version":"v900.0.3"'
+units_are 3 || fail "units changed"
 echo "systemd self-update test: ok"
