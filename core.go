@@ -103,6 +103,17 @@ type CoreManager struct {
 	// applied is what is really installed: user -> inbound tag -> cred.
 	// It feeds the state hash, so it only records successful adds.
 	applied map[string]map[string]appliedCred
+	// issued: inbound tag -> user -> the last credential installed for
+	// the user on that tag in this instance, live or not (W9). A re-add of
+	// the identical credential reuses its *MemoryUser, so sessions a
+	// client kept across the removal (a Hysteria 2 QUIC connection, a mux
+	// connection: authenticated once, their streams carry that pointer)
+	// are admitted again. On shrink-unsafe (Shadowsocks 2022) tags every
+	// issued credential is still in xray's user table: the ones not live
+	// are tombstones (see shrinkUnsafe). Reset with the instance.
+	issued map[string]map[string]appliedCred
+	// tombs: shrink-unsafe tag -> number of tombstones on it.
+	tombs map[string]int
 	// counted: every email with counters in this instance, including users
 	// removed since (xray keeps their counters; the tail is still billed).
 	counted map[string]struct{}
@@ -120,6 +131,8 @@ func NewCoreManager() *CoreManager {
 
 func (m *CoreManager) resetUsersLocked() {
 	m.applied = make(map[string]map[string]appliedCred)
+	m.issued = make(map[string]map[string]appliedCred)
+	m.tombs = make(map[string]int)
 	m.counted = make(map[string]struct{})
 	m.mono = make(map[string]*monoCounter)
 }
@@ -247,32 +260,86 @@ func (m *CoreManager) WouldDropCredential(ops []*pb.UserOp) bool {
 	return false
 }
 
-// WouldShrinkUnsafe reports whether ops would remove or change a live
-// credential on an inbound users must not leave while it runs
-// (shrinkUnsafe: Shadowsocks 2022 multi-user). Such deltas are refused
-// whatever the remove mode; the Snapshot that follows rebuilds.
+// WouldShrinkUnsafe reports whether ops cannot be applied in place on an
+// inbound whose users must not leave its user table while it runs
+// (shrinkUnsafe: Shadowsocks 2022 multi-user). There a removal only
+// tombstones the credential (gate-revoked, kept in xray's table) and a
+// re-add of the SAME credential revives it, but the table holds one entry
+// per user (xray refuses a duplicate email), so a different credential for
+// a user the table already holds (rotation; re-add with a new key) cannot
+// be installed. Neither can a removal that would push a tag's tombstones
+// past maxTombstones. Such deltas are refused whatever the remove mode; the
+// Snapshot that follows rebuilds (and compacts).
 func (m *CoreManager) WouldShrinkUnsafe(ops []*pb.UserOp) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// The ops in order, over a scratch view of the shrink-unsafe tags.
+	type entry struct {
+		cred   appliedCred
+		issued bool
+		live   bool
+	}
+	view := map[gateKey]entry{}
+	tombs := map[string]int{}
+	size := map[string]int{}
+	for _, tag := range m.tags {
+		if shrinkUnsafe(m.kinds[tag]) {
+			tombs[tag] = m.tombs[tag]
+			size[tag] = len(m.issued[tag])
+		}
+	}
 	for _, op := range ops {
+		uid := op.GetUserId()
 		want := map[string]*pb.InboundUser{}
 		if op.GetOp() == pb.UserOp_ADD {
 			for _, iu := range op.GetInboundUsers() {
 				want[iu.GetInboundTag()] = iu
 			}
 		}
-		for tag, c := range m.applied[op.GetUserId()] {
-			if !shrinkUnsafe(m.kinds[tag]) {
-				continue
+		for tag := range tombs {
+			key := gateKey{tag: tag, email: uid}
+			e, seen := view[key]
+			if !seen {
+				e.cred, e.issued = m.issued[tag][uid]
+				_, e.live = m.applied[uid][tag]
 			}
-			w, ok := want[tag]
-			if !ok || w.GetProtocol() != c.protocol || w.GetAccountJson() != c.account {
-				return true
+			w, wanted := want[tag]
+			same := wanted && e.issued && w.GetProtocol() == e.cred.protocol && w.GetAccountJson() == e.cred.account
+			switch {
+			case wanted && e.issued && !same:
+				return true // rotation, or re-add with another credential
+			case wanted && e.issued && !e.live:
+				tombs[tag]-- // revive the tombstone
+				e.live = true
+			case wanted && !e.issued:
+				size[tag]++ // appended
+				e.cred = appliedCred{protocol: w.GetProtocol(), account: w.GetAccountJson()}
+				e.issued, e.live = true, true
+			case !wanted && e.live:
+				tombs[tag]++
+				e.live = false
 			}
+			view[key] = e
+		}
+	}
+	for tag, n := range tombs {
+		if n > m.tombs[tag] && n > maxTombstones(size[tag]-n) {
+			return true
 		}
 	}
 	return false
 }
+
+// tombstoneFloor: tombstones a shrink-unsafe tag may always hold. A test
+// seam (var), constant in production.
+var tombstoneFloor = 1024
+
+// maxTombstones bounds a tag's tombstones by its live users: at most
+// max(tombstoneFloor, live). Each costs a MemoryUser and a sing-shadowsocks
+// key entry (~1 KB) and inflates the O(table) rebuild xray does on every
+// AddUser; the handshake lookup is a hash map, so it costs no CPU there.
+// Past the bound a removal is refused and the panel's Snapshot compacts.
+func maxTombstones(live int) int { return max(tombstoneFloor, live) }
 
 // ApplyUserOps applies UserDelta ops to the running instance, continuing
 // past failures (every op is idempotent; `applied` records what really took
@@ -333,9 +400,15 @@ func (m *CoreManager) applyOpLocked(op *pb.UserOp) (lost bool, err error) {
 				continue
 			}
 			lost = true
+			if shrinkUnsafe(m.kinds[tag]) {
+				m.tombs[tag]++ // stays in xray's table, refused by the gate
+			}
 		}
 		m.gate.Revoke(gateKey{tag: tag, email: uid})
 		delete(cur, tag)
+		if shrinkUnsafe(m.kinds[tag]) {
+			continue // never RemoveUser here: it moves other users' indices
+		}
 		if store, e := m.store(tag); e == nil {
 			_ = store.RemoveUser(context.Background(), uid) // not-found is fine
 		}
@@ -388,29 +461,63 @@ func (m *CoreManager) store(tag string) (userManager, error) {
 }
 
 func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, cur map[string]appliedCred) error {
-	user, err := buildUser(iu.GetProtocol(), iu.GetAccountJson(), uid, m.kinds[tag])
-	if err != nil {
-		return fmt.Errorf("inbound %q: %w", tag, err)
+	key := gateKey{tag: tag, email: uid}
+	unsafe := shrinkUnsafe(m.kinds[tag])
+	prev, had := m.issued[tag][uid]
+	same := had && prev.protocol == iu.GetProtocol() && prev.account == iu.GetAccountJson()
+	if unsafe && had {
+		if !same {
+			// One table entry per user: a new credential needs a new
+			// instance (WouldShrinkUnsafe refuses such deltas first).
+			return fmt.Errorf("inbound %q: user %s already has another shadowsocks credential in this instance; needs a snapshot", tag, uid)
+		}
+		// Revive the tombstone: it never left xray's table.
+		m.gate.Allow(key, prev.user)
+		m.tombs[tag]--
+		cur[tag] = prev
+		m.counted[uid] = struct{}{}
+		return nil
 	}
-	memoryUser, err := user.ToMemoryUser()
-	if err != nil {
-		return fmt.Errorf("materialize user: %w", err)
+	var memoryUser *protocol.MemoryUser
+	if same {
+		memoryUser = prev.user
+	} else {
+		user, err := buildUser(iu.GetProtocol(), iu.GetAccountJson(), uid, m.kinds[tag])
+		if err != nil {
+			return fmt.Errorf("inbound %q: %w", tag, err)
+		}
+		if memoryUser, err = user.ToMemoryUser(); err != nil {
+			return fmt.Errorf("materialize user: %w", err)
+		}
 	}
 	store, err := m.store(tag)
 	if err != nil {
 		return err
 	}
-	key := gateKey{tag: tag, email: uid}
 	// Admit the new identity before the validator can authenticate it.
 	m.gate.Allow(key, memoryUser)
-	_ = store.RemoveUser(context.Background(), uid)
+	if !unsafe {
+		_ = store.RemoveUser(context.Background(), uid)
+	}
 	if err := store.AddUser(context.Background(), memoryUser); err != nil {
 		m.gate.Revoke(key)
 		return fmt.Errorf("add user to inbound %q: %w", tag, err)
 	}
-	cur[tag] = appliedCred{protocol: iu.GetProtocol(), account: iu.GetAccountJson(), user: memoryUser}
+	c := appliedCred{protocol: iu.GetProtocol(), account: iu.GetAccountJson(), user: memoryUser}
+	cur[tag] = c
+	if m.issued[tag] == nil {
+		m.issued[tag] = make(map[string]appliedCred)
+	}
+	m.issued[tag][uid] = c
 	m.counted[uid] = struct{}{}
 	return nil
+}
+
+// Tombstones returns the number of tombstones on tag (tests, bench).
+func (m *CoreManager) Tombstones(tag string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.tombs[tag]
 }
 
 func (m *CoreManager) manager() (inbound.Manager, error) {

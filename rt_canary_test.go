@@ -280,4 +280,27 @@ func TestRT_MuxSubStreamRevocation(t *testing.T) {
 		}
 	}
 	t.Log("RT-MUX: established and new sub-streams refused after revoke")
+
+	// W9: re-adding the same credential admits the user again through the
+	// same mux client (xray's mux client replaces a failed connection; a
+	// kept one would carry its handshake's *MemoryUser, which the re-add
+	// reuses).
+	if _, err := m.ApplyUserOps([]*pb.UserOp{op}); err != nil {
+		t.Fatal(err)
+	}
+	var c4 net.Conn
+	for i := 0; i < 30; i++ {
+		if c4, err = dial(); err == nil {
+			if err = echoOnce(c4, "readd"); err == nil {
+				break
+			}
+			c4.Close()
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("RT-MUX: re-added user cannot open a sub-stream: %v", err)
+	}
+	defer c4.Close()
+	t.Log("RT-MUX: re-added user relays again")
 }

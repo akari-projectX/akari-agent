@@ -23,8 +23,10 @@ import (
 // agentProtocol is the control-protocol revision this agent speaks
 // (Hello.protocol_version; see agent.proto). 2 = renews its certificate
 // (AgentChannel.Renew); 3 = signed self-update (UpdateOffer/FetchArtifact);
-// 4 = per-user speed limits (UserOp.speed_limit_bytes_per_sec, ratelimit.go).
-const agentProtocol = 4
+// 4 = per-user speed limits (UserOp.speed_limit_bytes_per_sec, ratelimit.go);
+// 5 = Shadowsocks 2022 removals apply in place as tombstones (W9: the panel
+// sends them as deltas; WouldShrinkUnsafe).
+const agentProtocol = 5
 
 // Agent is the node-side supervisor: one persistent mTLS gRPC stream to the
 // panel, an embedded xray-core, and periodic heartbeat/traffic reporting.
@@ -683,7 +685,7 @@ func (a *Agent) applyDeltaLocked(ctx context.Context, gen uint64, send func(*pb.
 		slog.Warn("rejecting user delta", "error", why)
 		return a.sendAckLocked(send, target[0], target[1], pb.Ack_REASON_BASE_MISMATCH, why)
 	case a.core.WouldShrinkUnsafe(d.Ops):
-		why := fmt.Errorf("removals/rotations on shadowsocks inbounds need a snapshot")
+		why := fmt.Errorf("shadowsocks credential change (rotation, re-add with a new key, or tombstone bound) needs a snapshot")
 		slog.Warn("rejecting user delta", "error", why)
 		return a.sendAckLocked(send, target[0], target[1], pb.Ack_REASON_BASE_MISMATCH, why)
 	}
