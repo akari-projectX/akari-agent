@@ -7,6 +7,7 @@ import (
 
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/common"
+	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/session"
@@ -271,5 +272,51 @@ func (g *gateDispatcher) DispatchLink(ctx context.Context, dest net.Destination,
 		return errRevoked
 	}
 	defer g.release(key, c)
-	return g.inner.DispatchLink(ctx, dest, limitLink(ctx, link, lim))
+	return g.inner.DispatchLink(ctx, dest, limitLink(ctx, cutLink(ctx, link), lim))
 }
+
+// cutLink makes revocation take effect synchronously on the inbound's own
+// link. kill() only cancels the relay's context; the outbound's copy loops
+// notice that (and close the target connection) a moment later, and in that
+// window bytes already on their way would still be relayed — and echoed
+// back. Once ctx is done, nothing more crosses the link in either
+// direction.
+func cutLink(ctx context.Context, link *transport.Link) *transport.Link {
+	return &transport.Link{
+		Reader: &cutReader{Reader: link.Reader, ctx: ctx},
+		Writer: &cutWriter{Writer: link.Writer, ctx: ctx},
+	}
+}
+
+type cutReader struct {
+	buf.Reader
+	ctx context.Context
+}
+
+func (r *cutReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
+	mb, err := r.Reader.ReadMultiBuffer()
+	if cerr := r.ctx.Err(); cerr != nil {
+		buf.ReleaseMulti(mb)
+		return nil, cerr
+	}
+	return mb, err
+}
+
+func (r *cutReader) Interrupt() { common.Interrupt(r.Reader) }
+
+type cutWriter struct {
+	buf.Writer
+	ctx context.Context
+}
+
+func (w *cutWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
+	if err := w.ctx.Err(); err != nil {
+		buf.ReleaseMulti(mb)
+		return err
+	}
+	return w.Writer.WriteMultiBuffer(mb)
+}
+
+func (w *cutWriter) Close() error { return common.Close(w.Writer) }
+
+func (w *cutWriter) Interrupt() { common.Interrupt(w.Writer) }

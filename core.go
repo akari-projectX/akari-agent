@@ -618,7 +618,27 @@ func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, 
 	}
 	m.issued[tag][uid] = c
 	m.counted[uid] = struct{}{}
+	m.registerCountersLocked(uid)
 	return nil
+}
+
+// registerCountersLocked creates the user's xray traffic counters up front.
+// xray registers them lazily per connection with a check-then-register
+// (stats.GetOrRegisterCounter) that is not atomic: of two first connections
+// of a user racing, the loser gets a nil counter and relays uncounted —
+// bytes never billed. Registered here, under mu and before the user can
+// connect, every connection finds the counter and the race cannot occur.
+func (m *CoreManager) registerCountersLocked(uid string) {
+	if m.instance == nil {
+		return
+	}
+	sm, ok := m.instance.GetFeature(stats.ManagerType()).(stats.Manager)
+	if !ok {
+		return
+	}
+	for _, dir := range []string{"uplink", "downlink"} {
+		_, _ = stats.GetOrRegisterCounter(sm, "user>>>"+uid+">>>traffic>>>"+dir)
+	}
 }
 
 // Tombstones returns the number of tombstones on tag (tests, bench).
