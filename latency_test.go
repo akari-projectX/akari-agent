@@ -198,6 +198,39 @@ func TestProberLoopTokens(t *testing.T) {
 	}
 }
 
+// A settings change (new interval) while a "test now" is coalesced must
+// not push the requested run out to the new interval (W12 smoke finding:
+// 系统设置 change + 立即测速 within minProbeGap of the last run).
+func TestProberCoalescedRequestSurvivesReschedule(t *testing.T) {
+	p := newProber()
+	p.measure = func(context.Context, string, time.Duration) (time.Duration, error) {
+		return 5 * time.Millisecond, nil
+	}
+	got := make(chan *pb.LatencyReport, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.configure(&pb.LatencyProbeConfig{RunToken: 1, Attempts: 1, IntervalSeconds: 3600})
+	// The last run was just under minProbeGap ago (no startup run pending:
+	// the loop's first deadline is far away).
+	p.jitter = func() float64 { return 0.5 }
+	p.mu.Lock()
+	p.lastRun = time.Now().Add(-minProbeGap + 400*time.Millisecond)
+	p.mu.Unlock()
+	go p.loop(ctx, func(r *pb.LatencyReport) { got <- r })
+	time.Sleep(50 * time.Millisecond)
+	p.configure(&pb.LatencyProbeConfig{RunToken: 2, Attempts: 1, IntervalSeconds: 3600})
+	time.Sleep(50 * time.Millisecond) // the loop coalesced the request
+	p.configure(&pb.LatencyProbeConfig{RunToken: 2, Attempts: 1, IntervalSeconds: 1200})
+	select {
+	case r := <-got:
+		if r.RunToken != 2 {
+			t.Fatalf("token %d", r.RunToken)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the coalesced request was lost by the reschedule")
+	}
+}
+
 // The Hello advertises the W11 capabilities; a LatencyProbeConfig is taken
 // by handleDown without an Ack or any state change.
 func TestAgentLatencyCapabilityAndConfig(t *testing.T) {
