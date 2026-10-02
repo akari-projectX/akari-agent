@@ -501,6 +501,11 @@ type Hello struct {
 	//       offered an update.
 	//   4 = enforces UserOp.speed_limit_bytes_per_sec. Older agents run
 	//       the same users unthrottled (the panel flags such nodes).
+	//   5 = removes Shadowsocks 2022 users in place (tombstones), so the
+	//       panel sends removals on a Shadowsocks node as a UserDelta.
+	//       Rotations there stay Snapshots; what the agent cannot apply in
+	//       place (re-add with a new key, tombstone bound) it answers with
+	//       BASE_MISMATCH. Older agents get a Snapshot for any removal there.
 	ProtocolVersion uint32 `protobuf:"varint,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	// State hash of what the agent actually runs (see "State hash" below),
 	// for config_version + the applied user set. Empty for protocol 0.

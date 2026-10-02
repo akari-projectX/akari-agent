@@ -97,8 +97,10 @@ func TestShadowsocksInboundsRefused(t *testing.T) {
 	}
 }
 
-// Removing/rotating a Shadowsocks credential in place is refused (the
-// delta becomes a Snapshot); additions and other inbounds are not.
+// W9: removing a Shadowsocks credential is an in-place tombstone and
+// re-adding the same one revives it; a different credential for a user the
+// table still holds (rotation, re-add with a new key) is refused (the delta
+// becomes a Snapshot). Additions and other inbounds are never refused.
 func TestWouldShrinkUnsafe(t *testing.T) {
 	m := NewCoreManager()
 	defer m.Teardown()
@@ -115,21 +117,100 @@ func TestWouldShrinkUnsafe(t *testing.T) {
 	}
 	rotateVless := &pb.UserOp{Op: pb.UserOp_ADD, UserId: userA, InboundUsers: []*pb.InboundUser{
 		both.InboundUsers[0], {InboundTag: "v", Protocol: "vless", AccountJson: fmt.Sprintf(`{"flow":"","id":%q}`, idB)}}}
+	removeA := &pb.UserOp{Op: pb.UserOp_REMOVE, UserId: userA}
 	for name, tc := range map[string]struct {
 		ops  []*pb.UserOp
 		want bool
 	}{
-		"same":            {[]*pb.UserOp{both}, false},
-		"add other user":  {[]*pb.UserOp{ssOp(userB, "ss", b64key(16, 4))}, false},
-		"rotate vless":    {[]*pb.UserOp{rotateVless}, false},
-		"remove":          {[]*pb.UserOp{{Op: pb.UserOp_REMOVE, UserId: userA}}, true},
-		"drop ss tag":     {[]*pb.UserOp{vlessUser(userA, "v", idA)}, true},
-		"rotate ss key":   {[]*pb.UserOp{ssOp(userA, "ss", b64key(16, 5))}, true},
-		"remove absentee": {[]*pb.UserOp{{Op: pb.UserOp_REMOVE, UserId: userB}}, false},
+		"same":                   {[]*pb.UserOp{both}, false},
+		"add other user":         {[]*pb.UserOp{ssOp(userB, "ss", b64key(16, 4))}, false},
+		"rotate vless":           {[]*pb.UserOp{rotateVless}, false},
+		"remove":                 {[]*pb.UserOp{removeA}, false},
+		"drop ss tag":            {[]*pb.UserOp{vlessUser(userA, "v", idA)}, false},
+		"rotate ss key":          {[]*pb.UserOp{ssOp(userA, "ss", b64key(16, 5))}, true},
+		"remove absentee":        {[]*pb.UserOp{{Op: pb.UserOp_REMOVE, UserId: userB}}, false},
+		"remove, re-add same":    {[]*pb.UserOp{removeA, both}, false},
+		"remove, re-add new key": {[]*pb.UserOp{removeA, ssOp(userA, "ss", b64key(16, 6))}, true},
 	} {
 		if got := m.WouldShrinkUnsafe(tc.ops); got != tc.want {
 			t.Errorf("%s: WouldShrinkUnsafe = %v, want %v", name, got, tc.want)
 		}
+	}
+
+	// Removed: a tombstone, not in the state hash, still refused for a
+	// new key; the same key revives it (the very same *MemoryUser).
+	live := m.applied[userA]["ss"].user
+	if _, err := m.ApplyUserOps([]*pb.UserOp{removeA}); err != nil {
+		t.Fatal(err)
+	}
+	if m.Tombstones("ss") != 1 || m.UserCount() != 0 {
+		t.Fatalf("tombstones %d users %d after removal", m.Tombstones("ss"), m.UserCount())
+	}
+	if h, want := m.StateHash(1), stateHash(1, inb, nil); h != want {
+		t.Fatalf("tombstone counted in the state hash")
+	}
+	if !m.WouldShrinkUnsafe([]*pb.UserOp{ssOp(userA, "ss", b64key(16, 6))}) {
+		t.Fatal("re-add with a new key over a tombstone not refused")
+	}
+	if m.WouldShrinkUnsafe([]*pb.UserOp{both}) {
+		t.Fatal("re-add of the same key refused")
+	}
+	if _, err := m.ApplyUserOps([]*pb.UserOp{both}); err != nil {
+		t.Fatal(err)
+	}
+	if m.Tombstones("ss") != 0 || m.applied[userA]["ss"].user != live {
+		t.Fatalf("re-add did not revive the tombstone (tombstones %d)", m.Tombstones("ss"))
+	}
+	if m.applied[userA]["v"].user == nil {
+		t.Fatal("vless credential not re-added")
+	}
+	// A Snapshot compacts.
+	if _, err := m.ApplyUserOps([]*pb.UserOp{removeA}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Rebuild(inb, nil); err != nil {
+		t.Fatal(err)
+	}
+	if m.Tombstones("ss") != 0 || m.WouldShrinkUnsafe([]*pb.UserOp{ssOp(userA, "ss", b64key(16, 6))}) {
+		t.Fatal("snapshot did not compact the tombstones")
+	}
+}
+
+// W9: tombstones are bounded by max(tombstoneFloor, live users); a removal
+// past the bound is refused (the panel's Snapshot compacts).
+func TestTombstoneBound(t *testing.T) {
+	defer func(f int) { tombstoneFloor = f }(tombstoneFloor)
+	tombstoneFloor = 2
+	m := NewCoreManager()
+	defer m.Teardown()
+	inb := "[" + ssInbound("ss", freePort(t), "2022-blake3-aes-128-gcm", b64key(16, 1), true) + "]"
+	var ops []*pb.UserOp
+	uid := func(i int) string { return fmt.Sprintf("user-%02d", i) }
+	for i := 0; i < 5; i++ {
+		ops = append(ops, ssOp(uid(i), "ss", b64key(16, byte(10+i))))
+	}
+	if _, err := m.Rebuild(inb, ops); err != nil {
+		t.Fatal(err)
+	}
+	rm := func(i int) *pb.UserOp { return &pb.UserOp{Op: pb.UserOp_REMOVE, UserId: uid(i)} }
+	// 5 live: removing 2 leaves 3 live, 2 tombstones (<= max(2,3)).
+	if m.WouldShrinkUnsafe([]*pb.UserOp{rm(0), rm(1)}) {
+		t.Fatal("removal within the bound refused")
+	}
+	// Removing 3 leaves 2 live, 3 tombstones (> max(2,2)).
+	if !m.WouldShrinkUnsafe([]*pb.UserOp{rm(0), rm(1), rm(2)}) {
+		t.Fatal("removal past the bound accepted")
+	}
+	if _, err := m.ApplyUserOps([]*pb.UserOp{rm(0), rm(1)}); err != nil {
+		t.Fatal(err)
+	}
+	if !m.WouldShrinkUnsafe([]*pb.UserOp{rm(2)}) {
+		t.Fatal("removal past the bound accepted")
+	}
+	// Reviving shrinks the count; a delta that does not add tombstones is
+	// never refused for the bound.
+	if m.WouldShrinkUnsafe([]*pb.UserOp{ops[0], rm(2)}) || m.WouldShrinkUnsafe([]*pb.UserOp{ops[0]}) {
+		t.Fatal("revival refused")
 	}
 }
 

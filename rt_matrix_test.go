@@ -5,7 +5,10 @@
 // code path the agent runs: gate dispatcher, dynamic users), relays data,
 // and then loses it on revocation — the established connection is cut and
 // a new one is refused. W7: re-added with a speed limit, a new connection is
-// paced to it (every protocol, including SS2022 and Hysteria2 over QUIC). Run WITHOUT -race (Vision): `make test-canary`.
+// paced to it (every protocol, including SS2022 and Hysteria2 over QUIC). W9: removed
+// and re-added (same credential, with and without a limit), the same client
+// connects again, and is cut again by the next removal. Run WITHOUT -race
+// (Vision): `make test-canary`.
 
 package main
 
@@ -85,9 +88,6 @@ type matrixCase struct {
 	outbound func(port int) map[string]any
 	// innerTLS: the proxied payload is TLS 1.3 (exercises Vision splice).
 	innerTLS bool
-	// rebuild: revoke via Snapshot (Shadowsocks: users never leave a live
-	// instance, see shrinkUnsafe), not via a delta.
-	rebuild bool
 }
 
 func runMatrixCase(t *testing.T, e *matrixEnv, tc matrixCase) {
@@ -201,23 +201,68 @@ func runMatrixCase(t *testing.T, e *matrixEnv, tc matrixCase) {
 	}
 	c = lc // the revocation below runs on the throttled connection
 	defer lc.Close()
-	if tc.rebuild {
-		if _, err := m.Rebuild(inb, nil); err != nil {
+	remove := func(c net.Conn, phase string) {
+		t.Helper()
+		if _, err := m.ApplyUserOps([]*pb.UserOp{{Op: pb.UserOp_REMOVE, UserId: userA}}); err != nil {
 			t.Fatal(err)
 		}
-	} else if _, err := m.ApplyUserOps([]*pb.UserOp{{Op: pb.UserOp_REMOVE, UserId: userA}}); err != nil {
-		t.Fatal(err)
-	}
-	if echoOnce(c, "after") == nil {
-		t.Fatalf("RT-%s: revoked connection still relays", tc.name)
-	}
-	if c2, err := dial(); err == nil {
-		defer c2.Close()
-		if echoOnce(c2, "new") == nil {
-			t.Fatalf("RT-%s: revoked credential opened a new connection", tc.name)
+		if echoOnce(c, "after") == nil {
+			t.Fatalf("RT-%s: revoked connection still relays (%s)", tc.name, phase)
+		}
+		if c2, err := dial(); err == nil {
+			defer c2.Close()
+			if echoOnce(c2, "new") == nil {
+				t.Fatalf("RT-%s: revoked credential opened a new connection (%s)", tc.name, phase)
+			}
 		}
 	}
+	// Revocation is a delta for every protocol, Shadowsocks 2022 included
+	// (W9: the credential stays in xray's table as a gate-refused
+	// tombstone, see shrinkUnsafe).
+	remove(c, "first removal")
 	t.Logf("RT-%s: handshake ok, cut and refused after revoke", tc.name)
+
+	// W9: remove -> re-add (a plan expires, then is renewed) must connect
+	// again through the SAME client, which may keep sessions across the
+	// removal: Hysteria 2 authenticates once per QUIC connection, so its
+	// streams carry the *MemoryUser of that handshake; a re-add that
+	// installed a fresh pointer locked such a client out until the node
+	// was rebuilt. Re-added with the limit, then without.
+	for _, limit := range []uint64{rate, 0} {
+		readd := &pb.UserOp{Op: pb.UserOp_ADD, UserId: userA, InboundUsers: op.InboundUsers, SpeedLimitBytesPerSec: limit}
+		if _, err := m.ApplyUserOps([]*pb.UserOp{readd}); err != nil {
+			t.Fatalf("RT-%s: re-add: %v", tc.name, err)
+		}
+		var rc net.Conn
+		for i := 0; i < 30; i++ {
+			if rc, err = dial(); err == nil {
+				if err = echoOnce(rc, "readd"); err == nil {
+					break
+				}
+				rc.Close()
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if err != nil {
+			t.Fatalf("RT-%s: re-added user (limit %d) cannot connect through the same client: %v", tc.name, limit, err)
+		}
+		took, err := echoBulk(rc, n)
+		if err != nil {
+			rc.Close()
+			t.Fatalf("RT-%s: re-added transfer (limit %d): %v", tc.name, limit, err)
+		}
+		if limit > 0 && (took < want*95/100 || took > want*13/10+300*time.Millisecond) {
+			rc.Close()
+			t.Fatalf("RT-%s: re-added transfer not paced to the limit: %v, want ~%v", tc.name, took, want)
+		}
+		if limit == 0 && took > want/2 {
+			rc.Close()
+			t.Fatalf("RT-%s: re-added without a limit, still paced: %v", tc.name, took)
+		}
+		t.Logf("RT-%s-READD: limit %d, %d bytes echoed in %v", tc.name, limit, n, took)
+		remove(rc, fmt.Sprintf("removal after re-add with limit %d", limit))
+		rc.Close()
+	}
 }
 
 // echoBulk sends n bytes (concurrently) and reads them back; the time
@@ -259,7 +304,7 @@ func TestRT_ProtocolMatrix(t *testing.T) {
 	ssUser256 := base64.StdEncoding.EncodeToString([]byte("fedcba9876543210fedcba9876543210"))
 	ssCase := func(name, method, psk, user string) matrixCase {
 		return matrixCase{
-			name: name, protocol: "shadowsocks", rebuild: true,
+			name: name, protocol: "shadowsocks",
 			inbound: func(int) string {
 				return fmt.Sprintf(`"protocol":"shadowsocks","settings":{"method":%q,"password":%q,"clients":[],"network":"tcp,udp"}`, method, psk)
 			},
