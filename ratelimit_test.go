@@ -145,6 +145,59 @@ func TestLimitedReaderWriterPassData(t *testing.T) {
 	}
 }
 
+// Big batches (pipes hand over hundreds of KiB) are passed on in chunks,
+// so pacing never holds a whole batch; data, order and the trailing error
+// are preserved.
+func TestLimitedWrappersChunk(t *testing.T) {
+	big := make([]byte, 100<<10)
+	for i := range big {
+		big[i] = byte(i)
+	}
+	lim := newUserLimit(1 << 40)
+	r := &limitedReader{Reader: &sliceReader{mbs: []buf.MultiBuffer{buf.MergeBytes(nil, big)}}, ctx: context.Background(), b: &lim.up}
+	var got []byte
+	for {
+		mb, err := r.ReadMultiBuffer()
+		if mb.Len() > limitChunk {
+			t.Fatalf("chunk of %d", mb.Len())
+		}
+		for _, x := range mb {
+			got = append(got, x.Bytes()...)
+		}
+		buf.ReleaseMulti(mb)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if string(got) != string(big) {
+		t.Fatalf("reader changed the data (%d bytes)", len(got))
+	}
+	cw := &chunkWriter{}
+	w := &limitedWriter{Writer: cw, ctx: context.Background(), b: &lim.down}
+	if err := w.WriteMultiBuffer(buf.MergeBytes(nil, big)); err != nil {
+		t.Fatal(err)
+	}
+	if cw.max > limitChunk || cw.total != len(big) || cw.writes < 4 {
+		t.Fatalf("writer chunks: max %d total %d writes %d", cw.max, cw.total, cw.writes)
+	}
+}
+
+type chunkWriter struct{ max, total, writes int }
+
+func (c *chunkWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
+	n := int(mb.Len())
+	c.writes++
+	c.total += n
+	if n > c.max {
+		c.max = n
+	}
+	buf.ReleaseMulti(mb)
+	return nil
+}
+
 // SetLimit: a new limit closes the user's live (unthrottled) dispatches on
 // every inbound and nobody else's; changing or removing it keeps them.
 func TestSetLimitTransitions(t *testing.T) {
