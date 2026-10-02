@@ -125,6 +125,16 @@ message Hello {
   //       updater unit (akari-agent-update.path/.service, W18): its state
   //       directory is noexec, so agents without it fail every update on
   //       systemd >= 256 (the panel tells the admin to reinstall once).
+  //   "metrics-presence" = (W23) an unset numeric Heartbeat/NodeMetrics
+  //       value means "could not be read", not 0 (see NodeMetrics).
+  //   "stale-units" = (W23) a status flag rather than a feature: the
+  //       node's installed systemd units (akari-agent.service,
+  //       akari-agent-update.service, akari-agent-update.path) differ from
+  //       the ones this agent release carries. Releases from W23 on carry
+  //       their units and the updater installs them with the binary; a node
+  //       whose units were installed by an older installer or updater (or
+  //       edited by hand instead of with a drop-in) keeps the old ones until
+  //       the panel's install command is run once (the panel says so).
   // The panel only sends LatencyProbeConfig to agents that list "latency".
   repeated string capabilities = 20;
 }
@@ -150,9 +160,13 @@ message Hello {
 // implementation proto/testdata/gen_vectors.py (both repos test against it).
 
 message Heartbeat {
-  double cpu_percent = 1;
-  uint64 mem_used_bytes = 2;
-  uint64 mem_total_bytes = 3;
+  // W23: explicit presence (wire-identical to the former implicit fields).
+  // Agents with the "metrics-presence" capability leave a value UNSET when
+  // they could not read it (e.g. /proc/stat hidden by the sandbox) and set
+  // it, zero included, when they did; for older agents unset means 0.
+  optional double cpu_percent = 1;
+  optional uint64 mem_used_bytes = 2;
+  optional uint64 mem_total_bytes = 3;
   // Proxied connections currently open through xray (the gate's tracked
   // dispatches; 0 when no instance runs).
   uint64 connections = 4;
@@ -221,34 +235,41 @@ message CertStatus {
   uint32 failures = 9;
 }
 
-// Machine status sampled at each heartbeat (W11). Linux /proc and statfs;
-// a value the agent could not read is 0 (totals 0 = unknown). Rates are
-// averages since the previous heartbeat (0 on the first one).
+// Machine status sampled at each heartbeat (W11). Linux /proc and statfs.
+// W23: the numeric fields have explicit presence (wire-identical to the
+// former implicit fields): an agent with the "metrics-presence" capability
+// leaves a value UNSET when it could not read its source (the file is
+// missing, hidden by the sandbox or unparsable; rates also on the first
+// heartbeat and after a counter reset or an interface change) and sets it,
+// zero included, when it did. For agents without that capability unset
+// means 0 (W11 semantics: unreadable values were sent as 0). Rates are
+// averages since the previous heartbeat.
 message NodeMetrics {
-  double load1 = 1;
-  double load5 = 2;
-  double load15 = 3;
-  uint32 cpu_count = 4;
-  uint64 swap_used_bytes = 5;
-  uint64 swap_total_bytes = 6;
+  optional double load1 = 1;
+  optional double load5 = 2;
+  optional double load15 = 3;
+  optional uint32 cpu_count = 4;
+  optional uint64 swap_used_bytes = 5;
+  optional uint64 swap_total_bytes = 6;
   // Filesystem holding "/".
-  uint64 disk_used_bytes = 7;
-  uint64 disk_total_bytes = 8;
+  optional uint64 disk_used_bytes = 7;
+  optional uint64 disk_total_bytes = 8;
   // Interface of the default IPv4 route (else IPv6, else the busiest
   // non-loopback one); "" = none found.
   string net_interface = 9;
-  uint64 net_rx_bytes_per_sec = 10;
-  uint64 net_tx_bytes_per_sec = 11;
+  optional uint64 net_rx_bytes_per_sec = 10;
+  optional uint64 net_tx_bytes_per_sec = 11;
   // Interface counters since boot (wrap/reset = the kernel's).
-  uint64 net_rx_bytes_total = 12;
-  uint64 net_tx_bytes_total = 13;
+  optional uint64 net_rx_bytes_total = 12;
+  optional uint64 net_tx_bytes_total = 13;
   // Sockets in use (/proc/net/sockstat + sockstat6).
-  uint32 tcp_sockets = 14;
-  uint32 udp_sockets = 15;
-  // Distinct users with at least one live dispatch in the gate.
+  optional uint32 tcp_sockets = 14;
+  optional uint32 udp_sockets = 15;
+  // Distinct users with at least one live dispatch in the gate (always
+  // known: the agent's own count).
   uint32 online_users = 16;
   // Resident set size of the agent process (xray runs inside it).
-  uint64 process_rss_bytes = 17;
+  optional uint64 process_rss_bytes = 17;
   string xray_version = 18;
 }
 

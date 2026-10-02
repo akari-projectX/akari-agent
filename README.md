@@ -69,7 +69,9 @@ make third-party      # regenerate THIRD_PARTY_LICENSES.txt (after go.mod change
 ```
 
 Releases (tag `v*`) are built, SBOM'd and cosign-signed by `.github/workflows/release.yml`;
-install as a hardened systemd service with `akari-panel/deploy/systemd/akari-agent.service`.
+install as a hardened systemd service with the units in `systemd/` (compiled into the binary:
+`./agent -print-unit akari-agent.service`; the panel's installer installs the units of the
+release it installs, and every self-update installs the new release's units).
 
 Sibling checkout convention: akari-panel and akari-agent live side by side
 (`../akari-panel` / `../akari-agent`), same as the panel's smoke test expects.
@@ -144,15 +146,20 @@ not rolled back from that version before. The binary comes over the existing mTL
 (`AgentChannel.FetchArtifact`) and is checked for size and SHA-256. The agent never executes
 it: its state directory is mounted `noexec` by systemd (DynamicUser), and stays so. It stages the
 file and an apply request in `<state dir>/update/`; the **privileged updater**
-(`akari-agent-update.path` + `akari-agent-update.service`, shipped in `akari-panel/deploy/systemd/`
-and installed by the panel's one-line installer) runs the *installed* binary as
+(`akari-agent-update.path` + `akari-agent-update.service`, in `systemd/` and installed by the
+panel's one-line installer) runs the *installed* binary as
 `akari-agent -apply-update <state dir>`, which treats that directory as untrusted, copies the
 file into a root-only location, re-verifies the copy with its own pinned keys and version policy,
-installs it as `/usr/local/bin/akari-agent` (keeping `akari-agent.prev`) and restarts the agent.
+installs it as `/usr/local/bin/akari-agent` (keeping `akari-agent.prev`) together with the
+systemd units the new release carries (read from the verified copy with `-print-units`; the
+previous units are kept and restored on a rollback) and restarts the agent.
 The new binary must connect and get an apply acknowledged within `-update-self-check`
 (default 5m); if it does not, or crashes `-update-max-boots` times (default 3), the updater puts
 the previous binary back. Agents up to v0.4.0 executed the staged file themselves and fail on
 systemd ≥ 256 (`permission denied`): run the panel's install command for such a node once.
+Updater units from before W23 cannot replace unit files (their sandbox keeps
+`/etc/systemd/system` read-only): the first update to a W23 release installs the binary only,
+the agent reports `stale-units`, and one run of the install command fixes it for good.
 `./agent -release-keys` lists the pinned keys.
 
 ### Release signing keys

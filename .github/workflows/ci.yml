@@ -7,14 +7,6 @@ on:
   schedule:
     - cron: "41 3 * * *" # nightly: new Go/xray advisories
   workflow_dispatch:
-    inputs:
-      panel_ref:
-        # The systemd-update job takes the units from akari-panel; a change
-        # that needs unmerged panel units is verified by dispatching this
-        # workflow with the panel branch here.
-        description: akari-panel ref for the systemd-update job (units)
-        required: false
-        default: main
 
 permissions:
   contents: read
@@ -103,6 +95,11 @@ jobs:
       - name: Vendored proto equals the panel's
         run: make check-proto
         working-directory: akari-agent
+      # W23: the units are canonical here; the panel's installer fallback
+      # copy must be byte-identical.
+      - name: The panel's copy of the units equals ours
+        run: make check-units
+        working-directory: akari-agent
       - name: pb/ is up to date with the proto
         run: |
           go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
@@ -111,29 +108,23 @@ jobs:
         working-directory: akari-agent
 
   systemd-update:
-    # W18: the self-update hand-over to the privileged updater under real
-    # systemd 257 (Debian 13 container, systemd as PID 1) with the units
-    # akari-panel ships, and the agent's StateDirectory noexec+idmapped as
-    # on a production VPS (the condition that broke v0.4.0's exec launcher).
-    # The units live in akari-panel: a change to them lands there first.
+    # W18/W23: the self-update hand-over to the privileged updater under
+    # real systemd 257 (Debian 13 container, systemd as PID 1) with the
+    # units this repository ships (systemd/, compiled into the binary), and
+    # the agent's StateDirectory noexec+idmapped as on a production VPS
+    # (the condition that broke v0.4.0's exec launcher). Also: machine
+    # metrics readable under the shipped unit (unknown, not 0, under the
+    # pre-W23 one), unit refresh with each update and its rollback, and the
+    # pre-W23 updater unit (no refresh until one reinstall).
     name: systemd self-update (updater unit, noexec state dir)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          path: akari-agent
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: akari-projectX/akari-panel
-          ref: ${{ inputs.panel_ref || 'main' }}
-          path: akari-panel
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: akari-agent/go.mod
-          cache-dependency-path: akari-agent/go.sum
-      - run: make systemd-test PANEL_DIR=../akari-panel
-        working-directory: akari-agent
+          go-version-file: go.mod
+      - run: make systemd-test
 
   coverage:
     # ROADMAP §0: statement coverage of the revocation / rate-limit / user-op

@@ -3,20 +3,27 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"akari/agent/pb"
 )
 
 // Machine status for Heartbeat (W11): plain reads of Linux /proc files and
 // statfs("/"), no cgo, no subprocesses. Every reader is a pure parser over
-// the file's bytes (fixtures in sysstat_test.go); a file that cannot be
-// read leaves its fields at 0. On other systems everything reads 0.
+// the file's bytes (fixtures in sysstat_test.go). W23: a value whose source
+// cannot be read (missing, hidden by the sandbox, unparsable) is left
+// UNSET in the heartbeat (capability "metrics-presence"), never sent as 0;
+// so are rates without a previous reading. On other systems everything
+// but the disk is unset.
 
 // procFS reads files below a /proc root (tests point it at fixtures).
 type procFS struct{ root string }
@@ -110,6 +117,8 @@ func parseLoadavg(b []byte) (l1, l5, l15 float64, ok bool) {
 // kernels fall back to free + buffers + cached).
 type memInfo struct {
 	total, used, swapTotal, swapUsed uint64
+	// W23: which values the file had.
+	hasMem, hasSwap bool
 }
 
 func parseMeminfo(b []byte) memInfo {
@@ -134,16 +143,23 @@ func parseMeminfo(b []byte) memInfo {
 		kv[name] = v
 	}
 	var m memInfo
-	m.total = kv["MemTotal"]
+	total, hasTotal := kv["MemTotal"]
 	avail, ok := kv["MemAvailable"]
 	if !ok {
+		_, hasFree := kv["MemFree"]
+		ok = hasFree
 		avail = satAdd(satAdd(kv["MemFree"], kv["Buffers"]), kv["Cached"])
 	}
+	m.hasMem = hasTotal && ok && total > 0
+	m.total = total
 	if avail <= m.total {
 		m.used = m.total - avail
 	}
-	m.swapTotal = kv["SwapTotal"]
-	if free := kv["SwapFree"]; free <= m.swapTotal {
+	swapTotal, hasST := kv["SwapTotal"]
+	free, hasSF := kv["SwapFree"]
+	m.hasSwap = hasST && hasSF
+	m.swapTotal = swapTotal
+	if free <= m.swapTotal {
 		m.swapUsed = m.swapTotal - free
 	}
 	return m
@@ -263,8 +279,9 @@ func busiestInterface(devs map[string]ifCounters) string {
 }
 
 // parseSockstat: sockets in use from /proc/net/sockstat ("TCP: inuse N",
-// "UDP: inuse N") or sockstat6 ("TCP6: inuse N", "UDP6: inuse N").
-func parseSockstat(b []byte) (tcp, udp uint32) {
+// "UDP: inuse N") or sockstat6 ("TCP6: inuse N", "UDP6: inuse N"); ok =
+// a TCP or UDP line was found.
+func parseSockstat(b []byte) (tcp, udp uint32, ok bool) {
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	for sc.Scan() {
 		f := strings.Fields(sc.Text())
@@ -278,15 +295,17 @@ func parseSockstat(b []byte) (tcp, udp uint32) {
 		switch f[0] {
 		case "TCP:", "TCP6:":
 			tcp += uint32(v)
+			ok = true
 		case "UDP:", "UDP6:":
 			udp += uint32(v)
+			ok = true
 		}
 	}
-	return tcp, udp
+	return tcp, udp, ok
 }
 
-// parseStatusRSS: VmRSS of /proc/self/status, bytes.
-func parseStatusRSS(b []byte) uint64 {
+// parseStatusRSS: VmRSS of /proc/self/status, bytes (ok = found).
+func parseStatusRSS(b []byte) (uint64, bool) {
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	for sc.Scan() {
 		rest, ok := strings.CutPrefix(sc.Text(), "VmRSS:")
@@ -295,27 +314,27 @@ func parseStatusRSS(b []byte) uint64 {
 		}
 		f := strings.Fields(rest)
 		if len(f) == 0 {
-			return 0
+			return 0, false
 		}
 		v, err := strconv.ParseUint(f[0], 10, 64)
 		if err != nil {
-			return 0
+			return 0, false
 		}
 		if len(f) > 1 && f[1] == "kB" {
 			v = kib(v)
 		}
-		return v
+		return v, true
 	}
-	return 0
+	return 0, false
 }
 
-// rate per second between two counter readings; 0 on a reset/wrap or when
-// no time passed.
-func rate(prev, cur uint64, dt time.Duration) uint64 {
+// rate per second between two counter readings; not ok on a reset/wrap or
+// when no time passed.
+func rate(prev, cur uint64, dt time.Duration) (uint64, bool) {
 	if cur < prev || dt <= 0 {
-		return 0
+		return 0, false
 	}
-	return uint64(float64(cur-prev) / dt.Seconds())
+	return uint64(float64(cur-prev) / dt.Seconds()), true
 }
 
 // sampler keeps the previous CPU and interface readings to turn counters
@@ -338,25 +357,30 @@ func newSampler() *sampler {
 
 // sample: CPU % since the previous call (since boot on the first), memory,
 // and the full NodeMetrics (minus the agent-side fields the caller fills:
-// online users, xray version).
-func (s *sampler) sample() (cpuPct float64, mem memInfo, m *pb.NodeMetrics) {
+// online users, xray version). cpuPct nil and unset NodeMetrics fields =
+// could not be read (W23).
+func (s *sampler) sample() (cpuPct *float64, mem memInfo, m *pb.NodeMetrics) {
 	m = &pb.NodeMetrics{}
 	if cur, n, ok := parseCPUStat(s.fs.read("stat")); ok {
 		prev := s.prevCPU
 		if !s.havePrev {
 			prev = cpuTimes{}
 		}
-		cpuPct = cpuPercent(prev, cur)
+		cpuPct = proto.Float64(cpuPercent(prev, cur))
 		s.prevCPU, s.havePrev = cur, true
-		m.CpuCount = uint32(n)
+		if n > 0 {
+			m.CpuCount = proto.Uint32(uint32(n))
+		}
 	}
 	if l1, l5, l15, ok := parseLoadavg(s.fs.read("loadavg")); ok {
-		m.Load1, m.Load5, m.Load15 = l1, l5, l15
+		m.Load1, m.Load5, m.Load15 = proto.Float64(l1), proto.Float64(l5), proto.Float64(l15)
 	}
 	mem = parseMeminfo(s.fs.read("meminfo"))
-	m.SwapUsedBytes, m.SwapTotalBytes = mem.swapUsed, mem.swapTotal
+	if mem.hasSwap {
+		m.SwapUsedBytes, m.SwapTotalBytes = proto.Uint64(mem.swapUsed), proto.Uint64(mem.swapTotal)
+	}
 	if used, total, ok := s.statfs("/"); ok {
-		m.DiskUsedBytes, m.DiskTotalBytes = used, total
+		m.DiskUsedBytes, m.DiskTotalBytes = proto.Uint64(used), proto.Uint64(total)
 	}
 
 	devs := parseNetDev(s.fs.read("net/dev"))
@@ -370,20 +394,68 @@ func (s *sampler) sample() (cpuPct float64, mem memInfo, m *pb.NodeMetrics) {
 	now := s.now()
 	if c, ok := devs[iface]; ok {
 		m.NetInterface = iface
-		m.NetRxBytesTotal, m.NetTxBytesTotal = c.rx, c.tx
+		m.NetRxBytesTotal, m.NetTxBytesTotal = proto.Uint64(c.rx), proto.Uint64(c.tx)
 		if iface == s.prevIface && !s.prevAt.IsZero() {
 			dt := now.Sub(s.prevAt)
-			m.NetRxBytesPerSec = rate(s.prevNet.rx, c.rx, dt)
-			m.NetTxBytesPerSec = rate(s.prevNet.tx, c.tx, dt)
+			rx, okRx := rate(s.prevNet.rx, c.rx, dt)
+			tx, okTx := rate(s.prevNet.tx, c.tx, dt)
+			if okRx && okTx {
+				m.NetRxBytesPerSec, m.NetTxBytesPerSec = proto.Uint64(rx), proto.Uint64(tx)
+			}
 		}
 		s.prevIface, s.prevNet, s.prevAt = iface, c, now
 	} else {
 		s.prevIface, s.prevAt = "", time.Time{}
 	}
 
-	tcp4, udp4 := parseSockstat(s.fs.read("net/sockstat"))
-	tcp6, udp6 := parseSockstat(s.fs.read("net/sockstat6"))
-	m.TcpSockets, m.UdpSockets = tcp4+tcp6, udp4+udp6
-	m.ProcessRssBytes = parseStatusRSS(s.fs.read("self/status"))
+	tcp4, udp4, ok4 := parseSockstat(s.fs.read("net/sockstat"))
+	tcp6, udp6, ok6 := parseSockstat(s.fs.read("net/sockstat6"))
+	if ok4 || ok6 {
+		m.TcpSockets, m.UdpSockets = proto.Uint32(tcp4+tcp6), proto.Uint32(udp4+udp6)
+	}
+	if rss, ok := parseStatusRSS(s.fs.read("self/status")); ok {
+		m.ProcessRssBytes = proto.Uint64(rss)
+	}
 	return cpuPct, mem, m
+}
+
+// unavailableMetrics names the heartbeat values that could not be read
+// (W23; logged at start, asserted by the systemd test).
+func unavailableMetrics(hb *pb.Heartbeat) []string {
+	out := []string{}
+	add := func(name string, missing bool) {
+		if missing {
+			out = append(out, name)
+		}
+	}
+	add("cpu_percent", hb.CpuPercent == nil)
+	add("memory", hb.MemTotalBytes == nil)
+	m := hb.GetMetrics()
+	if m == nil {
+		return append(out, "metrics")
+	}
+	add("cpu_count", m.CpuCount == nil)
+	add("load", m.Load1 == nil)
+	add("swap", m.SwapTotalBytes == nil)
+	add("disk", m.DiskTotalBytes == nil)
+	add("net", m.NetRxBytesTotal == nil)
+	add("sockets", m.TcpSockets == nil)
+	add("process_rss", m.ProcessRssBytes == nil)
+	return out
+}
+
+// logMetricsAvailability samples once at start and says which machine
+// metrics this process can read (a sandbox hiding /proc shows here).
+func logMetricsAvailability() {
+	hb := buildHeartbeat(newSampler(), agentStats{}, func() (time.Duration, bool) { return 0, false })
+	missing := unavailableMetrics(hb)
+	m := hb.GetMetrics()
+	args := []any{"unavailable", missing, "cpu_count", m.GetCpuCount(), "mem_total_bytes", hb.GetMemTotalBytes(),
+		"load1", m.GetLoad1(), "net_interface", m.GetNetInterface(), "tcp_sockets", m.GetTcpSockets()}
+	if len(missing) > 0 && runtime.GOOS == "linux" {
+		slog.Warn("machine metrics: some cannot be read (reported as unknown); "+
+			"an old systemd unit with ProcSubset=pid hides /proc: run the panel's install command once", args...)
+		return
+	}
+	slog.Info("machine metrics", args...)
 }

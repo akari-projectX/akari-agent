@@ -73,7 +73,7 @@ func TestProcParsersRejectNonsense(t *testing.T) {
 	if m.total != ^uint64(0) || m.used != 0 {
 		t.Fatalf("kB overflow wrapped: %+v", m)
 	}
-	if rss := parseStatusRSS([]byte("VmRSS: 18446744073709551615 kB\n")); rss != ^uint64(0) {
+	if rss, ok := parseStatusRSS([]byte("VmRSS: 18446744073709551615 kB\n")); !ok || rss != ^uint64(0) {
 		t.Fatalf("VmRSS wrapped: %d", rss)
 	}
 }

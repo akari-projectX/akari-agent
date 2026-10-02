@@ -658,6 +658,16 @@ type Hello struct {
 	//       updater unit (akari-agent-update.path/.service, W18): its state
 	//       directory is noexec, so agents without it fail every update on
 	//       systemd >= 256 (the panel tells the admin to reinstall once).
+	//   "metrics-presence" = (W23) an unset numeric Heartbeat/NodeMetrics
+	//       value means "could not be read", not 0 (see NodeMetrics).
+	//   "stale-units" = (W23) a status flag rather than a feature: the
+	//       node's installed systemd units (akari-agent.service,
+	//       akari-agent-update.service, akari-agent-update.path) differ from
+	//       the ones this agent release carries. Releases from W23 on carry
+	//       their units and the updater installs them with the binary; a node
+	//       whose units were installed by an older installer or updater (or
+	//       edited by hand instead of with a drop-in) keeps the old ones until
+	//       the panel's install command is run once (the panel says so).
 	// The panel only sends LatencyProbeConfig to agents that list "latency".
 	Capabilities  []string `protobuf:"bytes,20,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -744,10 +754,14 @@ func (x *Hello) GetCapabilities() []string {
 }
 
 type Heartbeat struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CpuPercent    float64                `protobuf:"fixed64,1,opt,name=cpu_percent,json=cpuPercent,proto3" json:"cpu_percent,omitempty"`
-	MemUsedBytes  uint64                 `protobuf:"varint,2,opt,name=mem_used_bytes,json=memUsedBytes,proto3" json:"mem_used_bytes,omitempty"`
-	MemTotalBytes uint64                 `protobuf:"varint,3,opt,name=mem_total_bytes,json=memTotalBytes,proto3" json:"mem_total_bytes,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// W23: explicit presence (wire-identical to the former implicit fields).
+	// Agents with the "metrics-presence" capability leave a value UNSET when
+	// they could not read it (e.g. /proc/stat hidden by the sandbox) and set
+	// it, zero included, when they did; for older agents unset means 0.
+	CpuPercent    *float64 `protobuf:"fixed64,1,opt,name=cpu_percent,json=cpuPercent,proto3,oneof" json:"cpu_percent,omitempty"`
+	MemUsedBytes  *uint64  `protobuf:"varint,2,opt,name=mem_used_bytes,json=memUsedBytes,proto3,oneof" json:"mem_used_bytes,omitempty"`
+	MemTotalBytes *uint64  `protobuf:"varint,3,opt,name=mem_total_bytes,json=memTotalBytes,proto3,oneof" json:"mem_total_bytes,omitempty"`
 	// Proxied connections currently open through xray (the gate's tracked
 	// dispatches; 0 when no instance runs).
 	Connections uint64 `protobuf:"varint,4,opt,name=connections,proto3" json:"connections,omitempty"`
@@ -796,22 +810,22 @@ func (*Heartbeat) Descriptor() ([]byte, []int) {
 }
 
 func (x *Heartbeat) GetCpuPercent() float64 {
-	if x != nil {
-		return x.CpuPercent
+	if x != nil && x.CpuPercent != nil {
+		return *x.CpuPercent
 	}
 	return 0
 }
 
 func (x *Heartbeat) GetMemUsedBytes() uint64 {
-	if x != nil {
-		return x.MemUsedBytes
+	if x != nil && x.MemUsedBytes != nil {
+		return *x.MemUsedBytes
 	}
 	return 0
 }
 
 func (x *Heartbeat) GetMemTotalBytes() uint64 {
-	if x != nil {
-		return x.MemTotalBytes
+	if x != nil && x.MemTotalBytes != nil {
+		return *x.MemTotalBytes
 	}
 	return 0
 }
@@ -967,36 +981,43 @@ func (x *CertStatus) GetFailures() uint32 {
 	return 0
 }
 
-// Machine status sampled at each heartbeat (W11). Linux /proc and statfs;
-// a value the agent could not read is 0 (totals 0 = unknown). Rates are
-// averages since the previous heartbeat (0 on the first one).
+// Machine status sampled at each heartbeat (W11). Linux /proc and statfs.
+// W23: the numeric fields have explicit presence (wire-identical to the
+// former implicit fields): an agent with the "metrics-presence" capability
+// leaves a value UNSET when it could not read its source (the file is
+// missing, hidden by the sandbox or unparsable; rates also on the first
+// heartbeat and after a counter reset or an interface change) and sets it,
+// zero included, when it did. For agents without that capability unset
+// means 0 (W11 semantics: unreadable values were sent as 0). Rates are
+// averages since the previous heartbeat.
 type NodeMetrics struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
-	Load1          float64                `protobuf:"fixed64,1,opt,name=load1,proto3" json:"load1,omitempty"`
-	Load5          float64                `protobuf:"fixed64,2,opt,name=load5,proto3" json:"load5,omitempty"`
-	Load15         float64                `protobuf:"fixed64,3,opt,name=load15,proto3" json:"load15,omitempty"`
-	CpuCount       uint32                 `protobuf:"varint,4,opt,name=cpu_count,json=cpuCount,proto3" json:"cpu_count,omitempty"`
-	SwapUsedBytes  uint64                 `protobuf:"varint,5,opt,name=swap_used_bytes,json=swapUsedBytes,proto3" json:"swap_used_bytes,omitempty"`
-	SwapTotalBytes uint64                 `protobuf:"varint,6,opt,name=swap_total_bytes,json=swapTotalBytes,proto3" json:"swap_total_bytes,omitempty"`
+	Load1          *float64               `protobuf:"fixed64,1,opt,name=load1,proto3,oneof" json:"load1,omitempty"`
+	Load5          *float64               `protobuf:"fixed64,2,opt,name=load5,proto3,oneof" json:"load5,omitempty"`
+	Load15         *float64               `protobuf:"fixed64,3,opt,name=load15,proto3,oneof" json:"load15,omitempty"`
+	CpuCount       *uint32                `protobuf:"varint,4,opt,name=cpu_count,json=cpuCount,proto3,oneof" json:"cpu_count,omitempty"`
+	SwapUsedBytes  *uint64                `protobuf:"varint,5,opt,name=swap_used_bytes,json=swapUsedBytes,proto3,oneof" json:"swap_used_bytes,omitempty"`
+	SwapTotalBytes *uint64                `protobuf:"varint,6,opt,name=swap_total_bytes,json=swapTotalBytes,proto3,oneof" json:"swap_total_bytes,omitempty"`
 	// Filesystem holding "/".
-	DiskUsedBytes  uint64 `protobuf:"varint,7,opt,name=disk_used_bytes,json=diskUsedBytes,proto3" json:"disk_used_bytes,omitempty"`
-	DiskTotalBytes uint64 `protobuf:"varint,8,opt,name=disk_total_bytes,json=diskTotalBytes,proto3" json:"disk_total_bytes,omitempty"`
+	DiskUsedBytes  *uint64 `protobuf:"varint,7,opt,name=disk_used_bytes,json=diskUsedBytes,proto3,oneof" json:"disk_used_bytes,omitempty"`
+	DiskTotalBytes *uint64 `protobuf:"varint,8,opt,name=disk_total_bytes,json=diskTotalBytes,proto3,oneof" json:"disk_total_bytes,omitempty"`
 	// Interface of the default IPv4 route (else IPv6, else the busiest
 	// non-loopback one); "" = none found.
-	NetInterface     string `protobuf:"bytes,9,opt,name=net_interface,json=netInterface,proto3" json:"net_interface,omitempty"`
-	NetRxBytesPerSec uint64 `protobuf:"varint,10,opt,name=net_rx_bytes_per_sec,json=netRxBytesPerSec,proto3" json:"net_rx_bytes_per_sec,omitempty"`
-	NetTxBytesPerSec uint64 `protobuf:"varint,11,opt,name=net_tx_bytes_per_sec,json=netTxBytesPerSec,proto3" json:"net_tx_bytes_per_sec,omitempty"`
+	NetInterface     string  `protobuf:"bytes,9,opt,name=net_interface,json=netInterface,proto3" json:"net_interface,omitempty"`
+	NetRxBytesPerSec *uint64 `protobuf:"varint,10,opt,name=net_rx_bytes_per_sec,json=netRxBytesPerSec,proto3,oneof" json:"net_rx_bytes_per_sec,omitempty"`
+	NetTxBytesPerSec *uint64 `protobuf:"varint,11,opt,name=net_tx_bytes_per_sec,json=netTxBytesPerSec,proto3,oneof" json:"net_tx_bytes_per_sec,omitempty"`
 	// Interface counters since boot (wrap/reset = the kernel's).
-	NetRxBytesTotal uint64 `protobuf:"varint,12,opt,name=net_rx_bytes_total,json=netRxBytesTotal,proto3" json:"net_rx_bytes_total,omitempty"`
-	NetTxBytesTotal uint64 `protobuf:"varint,13,opt,name=net_tx_bytes_total,json=netTxBytesTotal,proto3" json:"net_tx_bytes_total,omitempty"`
+	NetRxBytesTotal *uint64 `protobuf:"varint,12,opt,name=net_rx_bytes_total,json=netRxBytesTotal,proto3,oneof" json:"net_rx_bytes_total,omitempty"`
+	NetTxBytesTotal *uint64 `protobuf:"varint,13,opt,name=net_tx_bytes_total,json=netTxBytesTotal,proto3,oneof" json:"net_tx_bytes_total,omitempty"`
 	// Sockets in use (/proc/net/sockstat + sockstat6).
-	TcpSockets uint32 `protobuf:"varint,14,opt,name=tcp_sockets,json=tcpSockets,proto3" json:"tcp_sockets,omitempty"`
-	UdpSockets uint32 `protobuf:"varint,15,opt,name=udp_sockets,json=udpSockets,proto3" json:"udp_sockets,omitempty"`
-	// Distinct users with at least one live dispatch in the gate.
+	TcpSockets *uint32 `protobuf:"varint,14,opt,name=tcp_sockets,json=tcpSockets,proto3,oneof" json:"tcp_sockets,omitempty"`
+	UdpSockets *uint32 `protobuf:"varint,15,opt,name=udp_sockets,json=udpSockets,proto3,oneof" json:"udp_sockets,omitempty"`
+	// Distinct users with at least one live dispatch in the gate (always
+	// known: the agent's own count).
 	OnlineUsers uint32 `protobuf:"varint,16,opt,name=online_users,json=onlineUsers,proto3" json:"online_users,omitempty"`
 	// Resident set size of the agent process (xray runs inside it).
-	ProcessRssBytes uint64 `protobuf:"varint,17,opt,name=process_rss_bytes,json=processRssBytes,proto3" json:"process_rss_bytes,omitempty"`
-	XrayVersion     string `protobuf:"bytes,18,opt,name=xray_version,json=xrayVersion,proto3" json:"xray_version,omitempty"`
+	ProcessRssBytes *uint64 `protobuf:"varint,17,opt,name=process_rss_bytes,json=processRssBytes,proto3,oneof" json:"process_rss_bytes,omitempty"`
+	XrayVersion     string  `protobuf:"bytes,18,opt,name=xray_version,json=xrayVersion,proto3" json:"xray_version,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1032,57 +1053,57 @@ func (*NodeMetrics) Descriptor() ([]byte, []int) {
 }
 
 func (x *NodeMetrics) GetLoad1() float64 {
-	if x != nil {
-		return x.Load1
+	if x != nil && x.Load1 != nil {
+		return *x.Load1
 	}
 	return 0
 }
 
 func (x *NodeMetrics) GetLoad5() float64 {
-	if x != nil {
-		return x.Load5
+	if x != nil && x.Load5 != nil {
+		return *x.Load5
 	}
 	return 0
 }
 
 func (x *NodeMetrics) GetLoad15() float64 {
-	if x != nil {
-		return x.Load15
+	if x != nil && x.Load15 != nil {
+		return *x.Load15
 	}
 	return 0
 }
 
 func (x *NodeMetrics) GetCpuCount() uint32 {
-	if x != nil {
-		return x.CpuCount
+	if x != nil && x.CpuCount != nil {
+		return *x.CpuCount
 	}
 	return 0
 }
 
 func (x *NodeMetrics) GetSwapUsedBytes() uint64 {
-	if x != nil {
-		return x.SwapUsedBytes
+	if x != nil && x.SwapUsedBytes != nil {
+		return *x.SwapUsedBytes
 	}
 	return 0
 }
 
 func (x *NodeMetrics) GetSwapTotalBytes() uint64 {
-	if x != nil {
-		return x.SwapTotalBytes
+	if x != nil && x.SwapTotalBytes != nil {
+		return *x.SwapTotalBytes
 	}
 	return 0
 }
 
 func (x *NodeMetrics) GetDiskUsedBytes() uint64 {
-	if x != nil {
-		return x.DiskUsedBytes
+	if x != nil && x.DiskUsedBytes != nil {
+		return *x.DiskUsedBytes
 	}
 	return 0
 }
 
 func (x *NodeMetrics) GetDiskTotalBytes() uint64 {
-	if x != nil {
-		return x.DiskTotalBytes
+	if x != nil && x.DiskTotalBytes != nil {
+		return *x.DiskTotalBytes
 	}
 	return 0
 }
@@ -1095,43 +1116,43 @@ func (x *NodeMetrics) GetNetInterface() string {
 }
 
 func (x *NodeMetrics) GetNetRxBytesPerSec() uint64 {
-	if x != nil {
-		return x.NetRxBytesPerSec
+	if x != nil && x.NetRxBytesPerSec != nil {
+		return *x.NetRxBytesPerSec
 	}
 	return 0
 }
 
 func (x *NodeMetrics) GetNetTxBytesPerSec() uint64 {
-	if x != nil {
-		return x.NetTxBytesPerSec
+	if x != nil && x.NetTxBytesPerSec != nil {
+		return *x.NetTxBytesPerSec
 	}
 	return 0
 }
 
 func (x *NodeMetrics) GetNetRxBytesTotal() uint64 {
-	if x != nil {
-		return x.NetRxBytesTotal
+	if x != nil && x.NetRxBytesTotal != nil {
+		return *x.NetRxBytesTotal
 	}
 	return 0
 }
 
 func (x *NodeMetrics) GetNetTxBytesTotal() uint64 {
-	if x != nil {
-		return x.NetTxBytesTotal
+	if x != nil && x.NetTxBytesTotal != nil {
+		return *x.NetTxBytesTotal
 	}
 	return 0
 }
 
 func (x *NodeMetrics) GetTcpSockets() uint32 {
-	if x != nil {
-		return x.TcpSockets
+	if x != nil && x.TcpSockets != nil {
+		return *x.TcpSockets
 	}
 	return 0
 }
 
 func (x *NodeMetrics) GetUdpSockets() uint32 {
-	if x != nil {
-		return x.UdpSockets
+	if x != nil && x.UdpSockets != nil {
+		return *x.UdpSockets
 	}
 	return 0
 }
@@ -1144,8 +1165,8 @@ func (x *NodeMetrics) GetOnlineUsers() uint32 {
 }
 
 func (x *NodeMetrics) GetProcessRssBytes() uint64 {
-	if x != nil {
-		return x.ProcessRssBytes
+	if x != nil && x.ProcessRssBytes != nil {
+		return *x.ProcessRssBytes
 	}
 	return 0
 }
@@ -2737,18 +2758,21 @@ const file_agent_proto_rawDesc = "" +
 	"\x10protocol_version\x18\x05 \x01(\rR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +
 	"state_hash\x18\x06 \x01(\tR\tstateHash\x12\"\n" +
-	"\fcapabilities\x18\x14 \x03(\tR\fcapabilities\"\xf7\x02\n" +
-	"\tHeartbeat\x12\x1f\n" +
-	"\vcpu_percent\x18\x01 \x01(\x01R\n" +
-	"cpuPercent\x12$\n" +
-	"\x0emem_used_bytes\x18\x02 \x01(\x04R\fmemUsedBytes\x12&\n" +
-	"\x0fmem_total_bytes\x18\x03 \x01(\x04R\rmemTotalBytes\x12 \n" +
+	"\fcapabilities\x18\x14 \x03(\tR\fcapabilities\"\xbd\x03\n" +
+	"\tHeartbeat\x12$\n" +
+	"\vcpu_percent\x18\x01 \x01(\x01H\x00R\n" +
+	"cpuPercent\x88\x01\x01\x12)\n" +
+	"\x0emem_used_bytes\x18\x02 \x01(\x04H\x01R\fmemUsedBytes\x88\x01\x01\x12+\n" +
+	"\x0fmem_total_bytes\x18\x03 \x01(\x04H\x02R\rmemTotalBytes\x88\x01\x01\x12 \n" +
 	"\vconnections\x18\x04 \x01(\x04R\vconnections\x12%\n" +
 	"\x0euptime_seconds\x18\x05 \x01(\x04R\ruptimeSeconds\x12;\n" +
-	"\x17lease_remaining_seconds\x18\x06 \x01(\x04H\x00R\x15leaseRemainingSeconds\x88\x01\x01\x12(\n" +
+	"\x17lease_remaining_seconds\x18\x06 \x01(\x04H\x03R\x15leaseRemainingSeconds\x88\x01\x01\x12(\n" +
 	"\x04cert\x18\n" +
 	" \x01(\v2\x14.akari.v1.CertStatusR\x04cert\x12/\n" +
-	"\ametrics\x18\x14 \x01(\v2\x15.akari.v1.NodeMetricsR\ametricsB\x1a\n" +
+	"\ametrics\x18\x14 \x01(\v2\x15.akari.v1.NodeMetricsR\ametricsB\x0e\n" +
+	"\f_cpu_percentB\x11\n" +
+	"\x0f_mem_used_bytesB\x12\n" +
+	"\x10_mem_total_bytesB\x1a\n" +
 	"\x18_lease_remaining_seconds\"\xd4\x04\n" +
 	"\n" +
 	"CertStatus\x12\x16\n" +
@@ -2779,29 +2803,46 @@ const file_agent_proto_rawDesc = "" +
 	"\x0fERROR_PORT_BUSY\x10\x05\x12\r\n" +
 	"\tERROR_CAA\x10\x06\x12\x12\n" +
 	"\x0eERROR_REJECTED\x10\a\x12\x18\n" +
-	"\x14ERROR_CA_UNREACHABLE\x10\b\"\xa5\x05\n" +
-	"\vNodeMetrics\x12\x14\n" +
-	"\x05load1\x18\x01 \x01(\x01R\x05load1\x12\x14\n" +
-	"\x05load5\x18\x02 \x01(\x01R\x05load5\x12\x16\n" +
-	"\x06load15\x18\x03 \x01(\x01R\x06load15\x12\x1b\n" +
-	"\tcpu_count\x18\x04 \x01(\rR\bcpuCount\x12&\n" +
-	"\x0fswap_used_bytes\x18\x05 \x01(\x04R\rswapUsedBytes\x12(\n" +
-	"\x10swap_total_bytes\x18\x06 \x01(\x04R\x0eswapTotalBytes\x12&\n" +
-	"\x0fdisk_used_bytes\x18\a \x01(\x04R\rdiskUsedBytes\x12(\n" +
-	"\x10disk_total_bytes\x18\b \x01(\x04R\x0ediskTotalBytes\x12#\n" +
-	"\rnet_interface\x18\t \x01(\tR\fnetInterface\x12.\n" +
+	"\x14ERROR_CA_UNREACHABLE\x10\b\"\x85\b\n" +
+	"\vNodeMetrics\x12\x19\n" +
+	"\x05load1\x18\x01 \x01(\x01H\x00R\x05load1\x88\x01\x01\x12\x19\n" +
+	"\x05load5\x18\x02 \x01(\x01H\x01R\x05load5\x88\x01\x01\x12\x1b\n" +
+	"\x06load15\x18\x03 \x01(\x01H\x02R\x06load15\x88\x01\x01\x12 \n" +
+	"\tcpu_count\x18\x04 \x01(\rH\x03R\bcpuCount\x88\x01\x01\x12+\n" +
+	"\x0fswap_used_bytes\x18\x05 \x01(\x04H\x04R\rswapUsedBytes\x88\x01\x01\x12-\n" +
+	"\x10swap_total_bytes\x18\x06 \x01(\x04H\x05R\x0eswapTotalBytes\x88\x01\x01\x12+\n" +
+	"\x0fdisk_used_bytes\x18\a \x01(\x04H\x06R\rdiskUsedBytes\x88\x01\x01\x12-\n" +
+	"\x10disk_total_bytes\x18\b \x01(\x04H\aR\x0ediskTotalBytes\x88\x01\x01\x12#\n" +
+	"\rnet_interface\x18\t \x01(\tR\fnetInterface\x123\n" +
 	"\x14net_rx_bytes_per_sec\x18\n" +
-	" \x01(\x04R\x10netRxBytesPerSec\x12.\n" +
-	"\x14net_tx_bytes_per_sec\x18\v \x01(\x04R\x10netTxBytesPerSec\x12+\n" +
-	"\x12net_rx_bytes_total\x18\f \x01(\x04R\x0fnetRxBytesTotal\x12+\n" +
-	"\x12net_tx_bytes_total\x18\r \x01(\x04R\x0fnetTxBytesTotal\x12\x1f\n" +
-	"\vtcp_sockets\x18\x0e \x01(\rR\n" +
-	"tcpSockets\x12\x1f\n" +
-	"\vudp_sockets\x18\x0f \x01(\rR\n" +
-	"udpSockets\x12!\n" +
-	"\fonline_users\x18\x10 \x01(\rR\vonlineUsers\x12*\n" +
-	"\x11process_rss_bytes\x18\x11 \x01(\x04R\x0fprocessRssBytes\x12!\n" +
-	"\fxray_version\x18\x12 \x01(\tR\vxrayVersion\"`\n" +
+	" \x01(\x04H\bR\x10netRxBytesPerSec\x88\x01\x01\x123\n" +
+	"\x14net_tx_bytes_per_sec\x18\v \x01(\x04H\tR\x10netTxBytesPerSec\x88\x01\x01\x120\n" +
+	"\x12net_rx_bytes_total\x18\f \x01(\x04H\n" +
+	"R\x0fnetRxBytesTotal\x88\x01\x01\x120\n" +
+	"\x12net_tx_bytes_total\x18\r \x01(\x04H\vR\x0fnetTxBytesTotal\x88\x01\x01\x12$\n" +
+	"\vtcp_sockets\x18\x0e \x01(\rH\fR\n" +
+	"tcpSockets\x88\x01\x01\x12$\n" +
+	"\vudp_sockets\x18\x0f \x01(\rH\rR\n" +
+	"udpSockets\x88\x01\x01\x12!\n" +
+	"\fonline_users\x18\x10 \x01(\rR\vonlineUsers\x12/\n" +
+	"\x11process_rss_bytes\x18\x11 \x01(\x04H\x0eR\x0fprocessRssBytes\x88\x01\x01\x12!\n" +
+	"\fxray_version\x18\x12 \x01(\tR\vxrayVersionB\b\n" +
+	"\x06_load1B\b\n" +
+	"\x06_load5B\t\n" +
+	"\a_load15B\f\n" +
+	"\n" +
+	"_cpu_countB\x12\n" +
+	"\x10_swap_used_bytesB\x13\n" +
+	"\x11_swap_total_bytesB\x12\n" +
+	"\x10_disk_used_bytesB\x13\n" +
+	"\x11_disk_total_bytesB\x17\n" +
+	"\x15_net_rx_bytes_per_secB\x17\n" +
+	"\x15_net_tx_bytes_per_secB\x15\n" +
+	"\x13_net_rx_bytes_totalB\x15\n" +
+	"\x13_net_tx_bytes_totalB\x0e\n" +
+	"\f_tcp_socketsB\x0e\n" +
+	"\f_udp_socketsB\x14\n" +
+	"\x12_process_rss_bytes\"`\n" +
 	"\vUserTraffic\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x19\n" +
 	"\bup_bytes\x18\x02 \x01(\x04R\aupBytes\x12\x1d\n" +
@@ -3041,6 +3082,7 @@ func file_agent_proto_init() {
 		return
 	}
 	file_agent_proto_msgTypes[5].OneofWrappers = []any{}
+	file_agent_proto_msgTypes[7].OneofWrappers = []any{}
 	file_agent_proto_msgTypes[11].OneofWrappers = []any{
 		(*AgentUp_Hello)(nil),
 		(*AgentUp_Heartbeat)(nil),

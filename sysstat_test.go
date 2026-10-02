@@ -4,6 +4,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -66,8 +67,18 @@ func TestParseMeminfo(t *testing.T) {
 	if m.total != 2014204*1024 || m.used != (2014204-905312)*1024 {
 		t.Fatalf("%+v", m)
 	}
-	if m.swapTotal != 1048572*1024 || m.swapUsed != (1048572-786428)*1024 {
+	if m.swapTotal != 1048572*1024 || m.swapUsed != (1048572-786428)*1024 || !m.hasMem || !m.hasSwap {
 		t.Fatalf("%+v", m)
+	}
+	// W23: what the file lacks is unknown, not 0.
+	if z := parseMeminfo(nil); z.hasMem || z.hasSwap {
+		t.Fatalf("empty meminfo: %+v", z)
+	}
+	if z := parseMeminfo([]byte("MemTotal: 10 kB\n")); z.hasMem {
+		t.Fatalf("no MemAvailable/MemFree: %+v", z)
+	}
+	if z := parseMeminfo([]byte("MemTotal: 1000 kB\nMemAvailable: 900 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n")); !z.hasSwap || z.swapTotal != 0 {
+		t.Fatalf("no swap is a known 0: %+v", z)
 	}
 	// Pre-3.14 kernels: no MemAvailable.
 	old := parseMeminfo([]byte("MemTotal: 1000 kB\nMemFree: 100 kB\nBuffers: 50 kB\nCached: 250 kB\n"))
@@ -110,28 +121,31 @@ func TestParseNetDevAndBusiest(t *testing.T) {
 }
 
 func TestParseSockstatAndRSS(t *testing.T) {
-	tcp, udp := parseSockstat(fixture(t, "net/sockstat"))
-	tcp6, udp6 := parseSockstat(fixture(t, "net/sockstat6"))
-	if tcp != 120 || udp != 8 || tcp6 != 30 || udp6 != 4 {
+	tcp, udp, ok4 := parseSockstat(fixture(t, "net/sockstat"))
+	tcp6, udp6, ok6 := parseSockstat(fixture(t, "net/sockstat6"))
+	if tcp != 120 || udp != 8 || tcp6 != 30 || udp6 != 4 || !ok4 || !ok6 {
 		t.Fatalf("%d %d %d %d", tcp, udp, tcp6, udp6)
 	}
-	if got := parseStatusRSS(fixture(t, "self/status")); got != 54321*1024 {
+	if _, _, ok := parseSockstat([]byte("sockets: used 3\n")); ok {
+		t.Fatal("no TCP/UDP line is not a reading")
+	}
+	if got, ok := parseStatusRSS(fixture(t, "self/status")); !ok || got != 54321*1024 {
 		t.Fatalf("%d", got)
 	}
-	if got := parseStatusRSS([]byte("Name: x\n")); got != 0 {
+	if got, ok := parseStatusRSS([]byte("Name: x\n")); ok || got != 0 {
 		t.Fatalf("%d", got)
 	}
 }
 
 func TestRate(t *testing.T) {
-	if got := rate(1000, 3000, 2*time.Second); got != 1000 {
+	if got, ok := rate(1000, 3000, 2*time.Second); !ok || got != 1000 {
 		t.Fatalf("%d", got)
 	}
-	if got := rate(3000, 1000, time.Second); got != 0 {
-		t.Fatalf("reset must be 0, got %d", got)
+	if got, ok := rate(3000, 1000, time.Second); ok || got != 0 {
+		t.Fatalf("reset must be unknown, got %d", got)
 	}
-	if got := rate(1, 2, 0); got != 0 {
-		t.Fatalf("%d", got)
+	if _, ok := rate(1, 2, 0); ok {
+		t.Fatal("no time passed")
 	}
 }
 
@@ -169,15 +183,18 @@ func TestSamplerRates(t *testing.T) {
 		now:    func() time.Time { return now },
 	}
 	cpu1, mem, m := s.sample()
-	if m.NetInterface != "ens5" || m.NetRxBytesPerSec != 0 || m.NetTxBytesPerSec != 0 {
-		t.Fatalf("first sample has no rate: %+v", m)
+	if m.NetInterface != "ens5" || m.NetRxBytesPerSec != nil || m.NetTxBytesPerSec != nil {
+		t.Fatalf("first sample has no rate (unknown, not 0): %+v", m)
 	}
-	if cpu1 <= 0 || cpu1 >= 100 || mem.total == 0 || m.CpuCount != 2 || m.Load1 != 0.52 {
+	if cpu1 == nil || *cpu1 <= 0 || *cpu1 >= 100 || mem.total == 0 || m.GetCpuCount() != 2 || m.GetLoad1() != 0.52 {
 		t.Fatalf("cpu %v mem %+v m %+v", cpu1, mem, m)
 	}
-	if m.DiskUsedBytes != 30<<30 || m.DiskTotalBytes != 80<<30 || m.TcpSockets != 150 || m.UdpSockets != 12 ||
-		m.ProcessRssBytes != 54321*1024 || m.NetRxBytesTotal != 98765432100 {
+	if m.GetDiskUsedBytes() != 30<<30 || m.GetDiskTotalBytes() != 80<<30 || m.GetTcpSockets() != 150 ||
+		m.GetUdpSockets() != 12 || m.GetProcessRssBytes() != 54321*1024 || m.GetNetRxBytesTotal() != 98765432100 {
 		t.Fatalf("%+v", m)
+	}
+	if hb := buildHeartbeat(s, agentStats{}, func() (time.Duration, bool) { return 0, false }); len(unavailableMetrics(hb)) != 0 {
+		t.Fatalf("fixture /proc: everything readable, got unavailable %v", unavailableMetrics(hb))
 	}
 
 	// 15 s later: +15 MB in, +1.5 MB out, CPU 50% busy since.
@@ -195,27 +212,59 @@ func TestSamplerRates(t *testing.T) {
 	write("net/dev", "12345678900", "12347178900")
 	write("stat", "cpu  10132153 290696 3084719 46828483", "cpu  10132653 290696 3084719 46828983")
 	now = now.Add(15 * time.Second)
+	// (buildHeartbeat above sampled at the same instant: no time passed,
+	// no rate; it moved the previous reading, so sample again.)
 	cpu2, _, m2 := s.sample()
-	if m2.NetRxBytesPerSec != 1_000_000 || m2.NetTxBytesPerSec != 100_000 {
+	if m2.GetNetRxBytesPerSec() != 1_000_000 || m2.GetNetTxBytesPerSec() != 100_000 {
 		t.Fatalf("rates %+v", m2)
 	}
-	if math.Abs(cpu2-50) > 1e-9 {
+	if cpu2 == nil || math.Abs(*cpu2-50) > 1e-9 {
 		t.Fatalf("cpu %v", cpu2)
 	}
 
-	// Counter reset (interface re-created): rate 0, not a huge number.
+	// Counter reset (interface re-created): unknown, not a huge number.
 	write("net/dev", "98780432100", "5")
 	now = now.Add(15 * time.Second)
-	if _, _, m3 := s.sample(); m3.NetRxBytesPerSec != 0 {
-		t.Fatalf("reset rate %d", m3.NetRxBytesPerSec)
+	if _, _, m3 := s.sample(); m3.NetRxBytesPerSec != nil {
+		t.Fatalf("reset rate %d", m3.GetNetRxBytesPerSec())
 	}
 }
 
 func TestSamplerMissingProc(t *testing.T) {
 	s := &sampler{fs: procFS{root: t.TempDir()}, statfs: func(string) (uint64, uint64, bool) { return 0, 0, false }, now: time.Now}
 	cpu, mem, m := s.sample()
-	if cpu != 0 || mem.total != 0 || m.NetInterface != "" || m.TcpSockets != 0 {
-		t.Fatalf("%v %+v %+v", cpu, mem, m)
+	if cpu != nil || mem.hasMem || m.NetInterface != "" || m.TcpSockets != nil || m.Load1 != nil || m.CpuCount != nil ||
+		m.DiskTotalBytes != nil || m.ProcessRssBytes != nil || m.NetRxBytesTotal != nil || m.SwapTotalBytes != nil {
+		t.Fatalf("unreadable values must be unset (unknown), not 0: %v %+v %+v", cpu, mem, m)
+	}
+	hb := buildHeartbeat(s, agentStats{}, func() (time.Duration, bool) { return 0, false })
+	if hb.CpuPercent != nil || hb.MemTotalBytes != nil || hb.MemUsedBytes != nil {
+		t.Fatalf("%+v", hb)
+	}
+	want := []string{"cpu_percent", "memory", "cpu_count", "load", "swap", "disk", "net", "sockets", "process_rss"}
+	if got := unavailableMetrics(hb); !slices.Equal(got, want) {
+		t.Fatalf("unavailable %v", got)
+	}
+}
+
+// W23: ProcSubset=pid (the pre-W23 unit) leaves only the per-process
+// entries (/proc/self/...): everything machine-wide is unknown, the RSS is
+// still read.
+func TestSamplerPidOnlyProc(t *testing.T) {
+	root := copyTree(t)
+	for _, f := range []string{"stat", "loadavg", "meminfo", "net"} {
+		if err := os.RemoveAll(filepath.Join(root, f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := &sampler{fs: procFS{root: root}, statfs: func(string) (uint64, uint64, bool) { return 1, 2, true }, now: time.Now}
+	hb := buildHeartbeat(s, agentStats{}, func() (time.Duration, bool) { return 0, false })
+	want := []string{"cpu_percent", "memory", "cpu_count", "load", "swap", "net", "sockets"}
+	if got := unavailableMetrics(hb); !slices.Equal(got, want) {
+		t.Fatalf("unavailable %v", got)
+	}
+	if hb.Metrics.GetProcessRssBytes() != 54321*1024 || hb.Metrics.GetDiskTotalBytes() != 2 {
+		t.Fatalf("%+v", hb.Metrics)
 	}
 }
 

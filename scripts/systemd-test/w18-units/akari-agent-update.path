@@ -1,0 +1,23 @@
+# Trigger of the akari node agent's privileged updater (M6 self-update;
+# see akari-agent-update.service and docs/DEPLOY.md "Agent updates").
+#
+# The agent (unprivileged, DynamicUser) stages a verified download and then
+# writes update/apply-request.json in its StateDirectory; this unit starts
+# the updater, which consumes the request first thing (so this never loops).
+# Installed and enabled by the panel's one-line installer. By hand:
+#
+#   install -m 0644 akari-agent-update.path akari-agent-update.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now akari-agent-update.path
+#
+# The agent refuses update offers while this file is missing
+# ("updater unit missing"): /etc/systemd/system/akari-agent-update.path.
+[Unit]
+Description=Akari node agent updater trigger
+Documentation=https://github.com/akari-projectX/akari-agent
+
+[Path]
+PathExists=/var/lib/private/akari-agent/update/apply-request.json
+Unit=akari-agent-update.service
+
+[Install]
+WantedBy=paths.target

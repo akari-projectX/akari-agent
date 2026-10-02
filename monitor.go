@@ -50,11 +50,12 @@ func buildHeartbeat(smp *sampler, st agentStats, lease func() (time.Duration, bo
 	m.XrayVersion = core.Version()
 	hb := &pb.Heartbeat{
 		CpuPercent:    cpuPct,
-		MemUsedBytes:  mem.used,
-		MemTotalBytes: mem.total,
 		Connections:   st.connections,
 		UptimeSeconds: st.uptime,
 		Metrics:       m,
+	}
+	if mem.hasMem {
+		hb.MemUsedBytes, hb.MemTotalBytes = &mem.used, &mem.total
 	}
 	if left, armed := lease(); armed {
 		secs := uint64(left / time.Second)
