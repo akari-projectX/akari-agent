@@ -28,6 +28,11 @@ import (
 // sends them as deltas; WouldShrinkUnsafe).
 const agentProtocol = 5
 
+// agentCapabilities: optional features independent of agentProtocol
+// (Hello.capabilities, W11): "metrics" = Heartbeat.metrics, "latency" =
+// LatencyProbeConfig / LatencyReport.
+var agentCapabilities = []string{"metrics", "latency"}
+
 // Agent is the node-side supervisor: one persistent mTLS gRPC stream to the
 // panel, an embedded xray-core, and periodic heartbeat/traffic reporting.
 type Agent struct {
@@ -83,6 +88,11 @@ type Agent struct {
 	finalsStore *finalsStore
 	// stopping: a graceful stop began; xray stays down.
 	stopping atomic.Bool
+
+	// W11: machine status sampler (owned by the running heartbeat loop;
+	// one stream at a time) and the latency prober (process lifetime).
+	sampler *sampler
+	prober  *prober
 
 	// skipNext: the last attempt with the pending renewed identity failed
 	// for a reason that may be transient; the next attempt uses the
@@ -140,6 +150,8 @@ func NewAgent(cfg *Config, agentVersion string, ids *identities) *Agent {
 		nextRetryAfter:  2 * time.Minute,
 		fetchBackoff:    2 * time.Second,
 		exit:            os.Exit,
+		sampler:         newSampler(),
+		prober:          newProber(),
 	}
 	a.dial = a.dialPanel
 	a.enrollRPC = a.enrollPanel
@@ -193,6 +205,7 @@ func (a *Agent) run(ctx context.Context) error {
 	}
 	go a.leaseLoop(ctx)
 	go a.renewLoop(ctx)
+	go a.prober.loop(ctx, a.deliverLatency)
 	if a.trial != nil {
 		go a.trialLoop(ctx)
 	}
@@ -462,6 +475,11 @@ func (a *Agent) session(parent context.Context) (err error) {
 	if err == nil {
 		a.finals.flush(gen, send)
 		a.sendPendingReportLocked(gen, send)
+		// W11: the latest latency result again (it may have been
+		// measured while no stream was up; the panel upserts).
+		if rep := a.prober.latestReport(); rep != nil {
+			err = send(&pb.AgentUp{Msg: &pb.AgentUp_Latency{Latency: rep}})
+		}
 	}
 	a.applyMu.Unlock()
 	defer a.detachStream(gen)
@@ -479,7 +497,10 @@ func (a *Agent) session(parent context.Context) (err error) {
 			cancel()
 		}
 	}()
-	go func() { defer wg.Done(); heartbeatLoop(ctx, a.heartbeatEvery, send, a.lease.remaining, a.stats) }()
+	go func() {
+		defer wg.Done()
+		heartbeatLoop(ctx, a.heartbeatEvery, send, a.lease.remaining, a.stats, a.sampler)
+	}()
 	go func() {
 		defer wg.Done()
 		trafficLoop(ctx, a.trafficEvery, a.core, send, func() {
@@ -563,6 +584,7 @@ func (a *Agent) helloLocked() *pb.AgentUp {
 		UserVersion:     userVersion,
 		ProtocolVersion: agentProtocol,
 		StateHash:       a.core.StateHash(configVersion),
+		Capabilities:    agentCapabilities,
 		Info: &pb.AgentInfo{
 			AgentVersion: a.agentVersion,
 			CoreVersion:  core.Version(),
@@ -605,6 +627,9 @@ func (a *Agent) handleDown(ctx context.Context, gen uint64, send func(*pb.AgentU
 		return nil
 	case *pb.PanelDown_UpdateOffer:
 		return a.onUpdateOffer(ctx, gen, send, msg.UpdateOffer)
+	case *pb.PanelDown_LatencyProbe:
+		a.prober.configure(msg.LatencyProbe)
+		return nil
 	case *pb.PanelDown_Noop:
 		return nil
 	case nil:
@@ -779,10 +804,20 @@ func (a *Agent) checkLease() {
 	}
 }
 
-// stats: Heartbeat.connections (the gate's tracked dispatches) and
-// uptime_seconds (since the agent process started).
-func (a *Agent) stats() (connections, uptime uint64) {
-	return a.core.Connections(), uint64(time.Since(a.startedAt) / time.Second)
+// deliverLatency sends a fresh latency result on the current stream, if
+// any (otherwise it goes out after the next Hello).
+func (a *Agent) deliverLatency(rep *pb.LatencyReport) {
+	if _, send := a.current(); send != nil {
+		_ = send(&pb.AgentUp{Msg: &pb.AgentUp_Latency{Latency: rep}})
+	}
+}
+
+// stats: Heartbeat.connections (the gate's tracked dispatches), the
+// distinct users among them (metrics.online_users) and uptime_seconds
+// (since the agent process started).
+func (a *Agent) stats() agentStats {
+	conns, users := a.core.LiveStats()
+	return agentStats{connections: conns, onlineUsers: users, uptime: uint64(time.Since(a.startedAt) / time.Second)}
 }
 
 func (a *Agent) tlsConfig(id *nodeIdentity) *tls.Config {

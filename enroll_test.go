@@ -611,14 +611,17 @@ func TestHeartbeatCarriesConnectionsAndUptime(t *testing.T) {
 		default:
 		}
 		return nil
-	}, func() (time.Duration, bool) { return 0, false }, func() (uint64, uint64) { return 7, 42 })
+	}, func() (time.Duration, bool) { return 0, false }, func() agentStats {
+		return agentStats{connections: 7, onlineUsers: 3, uptime: 42}
+	}, newSampler())
 	hb := <-got
-	if hb.Connections != 7 || hb.UptimeSeconds != 42 {
+	if hb.Connections != 7 || hb.UptimeSeconds != 42 || hb.GetMetrics().GetOnlineUsers() != 3 ||
+		hb.GetMetrics().GetXrayVersion() == "" {
 		t.Fatalf("heartbeat %+v", hb)
 	}
 	a := NewAgent(&Config{}, "test", nil)
 	a.startedAt = time.Now().Add(-90 * time.Second)
-	if c, up := a.stats(); c != 0 || up < 90 {
-		t.Fatalf("stats %d %d", c, up)
+	if st := a.stats(); st.connections != 0 || st.onlineUsers != 0 || st.uptime < 90 {
+		t.Fatalf("stats %+v", st)
 	}
 }

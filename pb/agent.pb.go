@@ -137,7 +137,7 @@ func (x Ack_Reason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Ack_Reason.Descriptor instead.
 func (Ack_Reason) EnumDescriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{8, 0}
+	return file_agent_proto_rawDescGZIP(), []int{9, 0}
 }
 
 type UserOp_Op int32
@@ -183,7 +183,7 @@ func (x UserOp_Op) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use UserOp_Op.Descriptor instead.
 func (UserOp_Op) EnumDescriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{11, 0}
+	return file_agent_proto_rawDescGZIP(), []int{15, 0}
 }
 
 type UpdateStatus_State int32
@@ -255,7 +255,7 @@ func (x UpdateStatus_State) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use UpdateStatus_State.Descriptor instead.
 func (UpdateStatus_State) EnumDescriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{20, 0}
+	return file_agent_proto_rawDescGZIP(), []int{24, 0}
 }
 
 type EnrollRequest struct {
@@ -509,7 +509,14 @@ type Hello struct {
 	ProtocolVersion uint32 `protobuf:"varint,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	// State hash of what the agent actually runs (see "State hash" below),
 	// for config_version + the applied user set. Empty for protocol 0.
-	StateHash     string `protobuf:"bytes,6,opt,name=state_hash,json=stateHash,proto3" json:"state_hash,omitempty"`
+	StateHash string `protobuf:"bytes,6,opt,name=state_hash,json=stateHash,proto3" json:"state_hash,omitempty"`
+	// Optional features the agent supports, independent of
+	// protocol_version (W11; older agents send none, the panel serves them
+	// as before):
+	//   "metrics" = fills Heartbeat.metrics;
+	//   "latency" = accepts LatencyProbeConfig and sends LatencyReport.
+	// The panel only sends LatencyProbeConfig to agents that list "latency".
+	Capabilities  []string `protobuf:"bytes,20,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -586,6 +593,13 @@ func (x *Hello) GetStateHash() string {
 	return ""
 }
 
+func (x *Hello) GetCapabilities() []string {
+	if x != nil {
+		return x.Capabilities
+	}
+	return nil
+}
+
 type Heartbeat struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	CpuPercent    float64                `protobuf:"fixed64,1,opt,name=cpu_percent,json=cpuPercent,proto3" json:"cpu_percent,omitempty"`
@@ -599,8 +613,10 @@ type Heartbeat struct {
 	// Seconds left on the fail-closed lease (see LeaseGrant); unset while no
 	// lease is armed (no grant received since the agent started).
 	LeaseRemainingSeconds *uint64 `protobuf:"varint,6,opt,name=lease_remaining_seconds,json=leaseRemainingSeconds,proto3,oneof" json:"lease_remaining_seconds,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// Machine status (W11, capability "metrics"); unset from older agents.
+	Metrics       *NodeMetrics `protobuf:"bytes,20,opt,name=metrics,proto3" json:"metrics,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Heartbeat) Reset() {
@@ -675,6 +691,203 @@ func (x *Heartbeat) GetLeaseRemainingSeconds() uint64 {
 	return 0
 }
 
+func (x *Heartbeat) GetMetrics() *NodeMetrics {
+	if x != nil {
+		return x.Metrics
+	}
+	return nil
+}
+
+// Machine status sampled at each heartbeat (W11). Linux /proc and statfs;
+// a value the agent could not read is 0 (totals 0 = unknown). Rates are
+// averages since the previous heartbeat (0 on the first one).
+type NodeMetrics struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Load1          float64                `protobuf:"fixed64,1,opt,name=load1,proto3" json:"load1,omitempty"`
+	Load5          float64                `protobuf:"fixed64,2,opt,name=load5,proto3" json:"load5,omitempty"`
+	Load15         float64                `protobuf:"fixed64,3,opt,name=load15,proto3" json:"load15,omitempty"`
+	CpuCount       uint32                 `protobuf:"varint,4,opt,name=cpu_count,json=cpuCount,proto3" json:"cpu_count,omitempty"`
+	SwapUsedBytes  uint64                 `protobuf:"varint,5,opt,name=swap_used_bytes,json=swapUsedBytes,proto3" json:"swap_used_bytes,omitempty"`
+	SwapTotalBytes uint64                 `protobuf:"varint,6,opt,name=swap_total_bytes,json=swapTotalBytes,proto3" json:"swap_total_bytes,omitempty"`
+	// Filesystem holding "/".
+	DiskUsedBytes  uint64 `protobuf:"varint,7,opt,name=disk_used_bytes,json=diskUsedBytes,proto3" json:"disk_used_bytes,omitempty"`
+	DiskTotalBytes uint64 `protobuf:"varint,8,opt,name=disk_total_bytes,json=diskTotalBytes,proto3" json:"disk_total_bytes,omitempty"`
+	// Interface of the default IPv4 route (else IPv6, else the busiest
+	// non-loopback one); "" = none found.
+	NetInterface     string `protobuf:"bytes,9,opt,name=net_interface,json=netInterface,proto3" json:"net_interface,omitempty"`
+	NetRxBytesPerSec uint64 `protobuf:"varint,10,opt,name=net_rx_bytes_per_sec,json=netRxBytesPerSec,proto3" json:"net_rx_bytes_per_sec,omitempty"`
+	NetTxBytesPerSec uint64 `protobuf:"varint,11,opt,name=net_tx_bytes_per_sec,json=netTxBytesPerSec,proto3" json:"net_tx_bytes_per_sec,omitempty"`
+	// Interface counters since boot (wrap/reset = the kernel's).
+	NetRxBytesTotal uint64 `protobuf:"varint,12,opt,name=net_rx_bytes_total,json=netRxBytesTotal,proto3" json:"net_rx_bytes_total,omitempty"`
+	NetTxBytesTotal uint64 `protobuf:"varint,13,opt,name=net_tx_bytes_total,json=netTxBytesTotal,proto3" json:"net_tx_bytes_total,omitempty"`
+	// Sockets in use (/proc/net/sockstat + sockstat6).
+	TcpSockets uint32 `protobuf:"varint,14,opt,name=tcp_sockets,json=tcpSockets,proto3" json:"tcp_sockets,omitempty"`
+	UdpSockets uint32 `protobuf:"varint,15,opt,name=udp_sockets,json=udpSockets,proto3" json:"udp_sockets,omitempty"`
+	// Distinct users with at least one live dispatch in the gate.
+	OnlineUsers uint32 `protobuf:"varint,16,opt,name=online_users,json=onlineUsers,proto3" json:"online_users,omitempty"`
+	// Resident set size of the agent process (xray runs inside it).
+	ProcessRssBytes uint64 `protobuf:"varint,17,opt,name=process_rss_bytes,json=processRssBytes,proto3" json:"process_rss_bytes,omitempty"`
+	XrayVersion     string `protobuf:"bytes,18,opt,name=xray_version,json=xrayVersion,proto3" json:"xray_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *NodeMetrics) Reset() {
+	*x = NodeMetrics{}
+	mi := &file_agent_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeMetrics) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeMetrics) ProtoMessage() {}
+
+func (x *NodeMetrics) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeMetrics.ProtoReflect.Descriptor instead.
+func (*NodeMetrics) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *NodeMetrics) GetLoad1() float64 {
+	if x != nil {
+		return x.Load1
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetLoad5() float64 {
+	if x != nil {
+		return x.Load5
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetLoad15() float64 {
+	if x != nil {
+		return x.Load15
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetCpuCount() uint32 {
+	if x != nil {
+		return x.CpuCount
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetSwapUsedBytes() uint64 {
+	if x != nil {
+		return x.SwapUsedBytes
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetSwapTotalBytes() uint64 {
+	if x != nil {
+		return x.SwapTotalBytes
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetDiskUsedBytes() uint64 {
+	if x != nil {
+		return x.DiskUsedBytes
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetDiskTotalBytes() uint64 {
+	if x != nil {
+		return x.DiskTotalBytes
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetNetInterface() string {
+	if x != nil {
+		return x.NetInterface
+	}
+	return ""
+}
+
+func (x *NodeMetrics) GetNetRxBytesPerSec() uint64 {
+	if x != nil {
+		return x.NetRxBytesPerSec
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetNetTxBytesPerSec() uint64 {
+	if x != nil {
+		return x.NetTxBytesPerSec
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetNetRxBytesTotal() uint64 {
+	if x != nil {
+		return x.NetRxBytesTotal
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetNetTxBytesTotal() uint64 {
+	if x != nil {
+		return x.NetTxBytesTotal
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetTcpSockets() uint32 {
+	if x != nil {
+		return x.TcpSockets
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetUdpSockets() uint32 {
+	if x != nil {
+		return x.UdpSockets
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetOnlineUsers() uint32 {
+	if x != nil {
+		return x.OnlineUsers
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetProcessRssBytes() uint64 {
+	if x != nil {
+		return x.ProcessRssBytes
+	}
+	return 0
+}
+
+func (x *NodeMetrics) GetXrayVersion() string {
+	if x != nil {
+		return x.XrayVersion
+	}
+	return ""
+}
+
 type UserTraffic struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`     // panel user id; also the xray user "email" field
@@ -686,7 +899,7 @@ type UserTraffic struct {
 
 func (x *UserTraffic) Reset() {
 	*x = UserTraffic{}
-	mi := &file_agent_proto_msgTypes[6]
+	mi := &file_agent_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -698,7 +911,7 @@ func (x *UserTraffic) String() string {
 func (*UserTraffic) ProtoMessage() {}
 
 func (x *UserTraffic) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[6]
+	mi := &file_agent_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -711,7 +924,7 @@ func (x *UserTraffic) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserTraffic.ProtoReflect.Descriptor instead.
 func (*UserTraffic) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{6}
+	return file_agent_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *UserTraffic) GetUserId() string {
@@ -749,7 +962,7 @@ type TrafficReport struct {
 
 func (x *TrafficReport) Reset() {
 	*x = TrafficReport{}
-	mi := &file_agent_proto_msgTypes[7]
+	mi := &file_agent_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -761,7 +974,7 @@ func (x *TrafficReport) String() string {
 func (*TrafficReport) ProtoMessage() {}
 
 func (x *TrafficReport) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[7]
+	mi := &file_agent_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -774,7 +987,7 @@ func (x *TrafficReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrafficReport.ProtoReflect.Descriptor instead.
 func (*TrafficReport) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{7}
+	return file_agent_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *TrafficReport) GetUsers() []*UserTraffic {
@@ -819,7 +1032,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_agent_proto_msgTypes[8]
+	mi := &file_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -831,7 +1044,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[8]
+	mi := &file_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -844,7 +1057,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{8}
+	return file_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Ack) GetConfigVersion() uint64 {
@@ -912,6 +1125,7 @@ type AgentUp struct {
 	//	*AgentUp_Traffic
 	//	*AgentUp_Ack
 	//	*AgentUp_UpdateStatus
+	//	*AgentUp_Latency
 	Msg           isAgentUp_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -919,7 +1133,7 @@ type AgentUp struct {
 
 func (x *AgentUp) Reset() {
 	*x = AgentUp{}
-	mi := &file_agent_proto_msgTypes[9]
+	mi := &file_agent_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -931,7 +1145,7 @@ func (x *AgentUp) String() string {
 func (*AgentUp) ProtoMessage() {}
 
 func (x *AgentUp) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[9]
+	mi := &file_agent_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -944,7 +1158,7 @@ func (x *AgentUp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentUp.ProtoReflect.Descriptor instead.
 func (*AgentUp) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{9}
+	return file_agent_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *AgentUp) GetMsg() isAgentUp_Msg {
@@ -999,6 +1213,15 @@ func (x *AgentUp) GetUpdateStatus() *UpdateStatus {
 	return nil
 }
 
+func (x *AgentUp) GetLatency() *LatencyReport {
+	if x != nil {
+		if x, ok := x.Msg.(*AgentUp_Latency); ok {
+			return x.Latency
+		}
+	}
+	return nil
+}
+
 type isAgentUp_Msg interface {
 	isAgentUp_Msg()
 }
@@ -1023,6 +1246,10 @@ type AgentUp_UpdateStatus struct {
 	UpdateStatus *UpdateStatus `protobuf:"bytes,5,opt,name=update_status,json=updateStatus,proto3,oneof"` // protocol >= 3
 }
 
+type AgentUp_Latency struct {
+	Latency *LatencyReport `protobuf:"bytes,20,opt,name=latency,proto3,oneof"` // capability "latency" (W11)
+}
+
 func (*AgentUp_Hello) isAgentUp_Msg() {}
 
 func (*AgentUp_Heartbeat) isAgentUp_Msg() {}
@@ -1032,6 +1259,238 @@ func (*AgentUp_Traffic) isAgentUp_Msg() {}
 func (*AgentUp_Ack) isAgentUp_Msg() {}
 
 func (*AgentUp_UpdateStatus) isAgentUp_Msg() {}
+
+func (*AgentUp_Latency) isAgentUp_Msg() {}
+
+// Panel -> agent, after every Hello of an agent that has the capability
+// and whenever the panel's settings or a "test now" request change. The
+// agent keeps the last one it received (across streams).
+type LatencyProbeConfig struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Seconds between scheduled runs (the agent adds +-10% jitter); 0 = the
+	// agent's default (5 h). Clamped by the agent to [10 min, 7 d].
+	IntervalSeconds uint32 `protobuf:"varint,1,opt,name=interval_seconds,json=intervalSeconds,proto3" json:"interval_seconds,omitempty"`
+	// Test URLs (http/https), primary first. Empty = the agent's defaults.
+	Urls []string `protobuf:"bytes,2,rep,name=urls,proto3" json:"urls,omitempty"`
+	// Per-attempt timeout in milliseconds; 0 = 5000. Clamped to [1000, 30000].
+	TimeoutMs uint32 `protobuf:"varint,3,opt,name=timeout_ms,json=timeoutMs,proto3" json:"timeout_ms,omitempty"`
+	// Attempts per URL; 0 = 3. Clamped to [1, 5].
+	Attempts uint32 `protobuf:"varint,4,opt,name=attempts,proto3" json:"attempts,omitempty"`
+	// "Test now" token: when nonzero and different from the last token the
+	// agent saw, it runs a test now (at most one run per 10 s). The first
+	// token after the agent starts is only remembered (it tests at startup
+	// anyway).
+	RunToken      uint64 `protobuf:"varint,5,opt,name=run_token,json=runToken,proto3" json:"run_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LatencyProbeConfig) Reset() {
+	*x = LatencyProbeConfig{}
+	mi := &file_agent_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LatencyProbeConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LatencyProbeConfig) ProtoMessage() {}
+
+func (x *LatencyProbeConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LatencyProbeConfig.ProtoReflect.Descriptor instead.
+func (*LatencyProbeConfig) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *LatencyProbeConfig) GetIntervalSeconds() uint32 {
+	if x != nil {
+		return x.IntervalSeconds
+	}
+	return 0
+}
+
+func (x *LatencyProbeConfig) GetUrls() []string {
+	if x != nil {
+		return x.Urls
+	}
+	return nil
+}
+
+func (x *LatencyProbeConfig) GetTimeoutMs() uint32 {
+	if x != nil {
+		return x.TimeoutMs
+	}
+	return 0
+}
+
+func (x *LatencyProbeConfig) GetAttempts() uint32 {
+	if x != nil {
+		return x.Attempts
+	}
+	return 0
+}
+
+func (x *LatencyProbeConfig) GetRunToken() uint64 {
+	if x != nil {
+		return x.RunToken
+	}
+	return 0
+}
+
+type UrlLatency struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Url   string                 `protobuf:"bytes,1,opt,name=url,proto3" json:"url,omitempty"`
+	Ok    bool                   `protobuf:"varint,2,opt,name=ok,proto3" json:"ok,omitempty"`
+	// Median delay in milliseconds (ok); 0 when every attempt failed.
+	DelayMs uint32 `protobuf:"varint,3,opt,name=delay_ms,json=delayMs,proto3" json:"delay_ms,omitempty"`
+	// Per-attempt delays in milliseconds (0 = failed attempt).
+	AttemptsMs    []uint32 `protobuf:"varint,4,rep,packed,name=attempts_ms,json=attemptsMs,proto3" json:"attempts_ms,omitempty"`
+	Error         string   `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"` // last failure, short; "" when ok
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UrlLatency) Reset() {
+	*x = UrlLatency{}
+	mi := &file_agent_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UrlLatency) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UrlLatency) ProtoMessage() {}
+
+func (x *UrlLatency) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UrlLatency.ProtoReflect.Descriptor instead.
+func (*UrlLatency) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *UrlLatency) GetUrl() string {
+	if x != nil {
+		return x.Url
+	}
+	return ""
+}
+
+func (x *UrlLatency) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *UrlLatency) GetDelayMs() uint32 {
+	if x != nil {
+		return x.DelayMs
+	}
+	return 0
+}
+
+func (x *UrlLatency) GetAttemptsMs() []uint32 {
+	if x != nil {
+		return x.AttemptsMs
+	}
+	return nil
+}
+
+func (x *UrlLatency) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+// Agent -> panel: the result of one run (re-sent after the next Hello so a
+// result measured while disconnected still arrives).
+type LatencyReport struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Results []*UrlLatency          `protobuf:"bytes,1,rep,name=results,proto3" json:"results,omitempty"`
+	// When the run finished (agent clock, Unix seconds).
+	MeasuredAtUnix int64 `protobuf:"varint,2,opt,name=measured_at_unix,json=measuredAtUnix,proto3" json:"measured_at_unix,omitempty"`
+	// run_token of the request that triggered it; 0 = scheduled run.
+	RunToken      uint64 `protobuf:"varint,3,opt,name=run_token,json=runToken,proto3" json:"run_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LatencyReport) Reset() {
+	*x = LatencyReport{}
+	mi := &file_agent_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LatencyReport) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LatencyReport) ProtoMessage() {}
+
+func (x *LatencyReport) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LatencyReport.ProtoReflect.Descriptor instead.
+func (*LatencyReport) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *LatencyReport) GetResults() []*UrlLatency {
+	if x != nil {
+		return x.Results
+	}
+	return nil
+}
+
+func (x *LatencyReport) GetMeasuredAtUnix() int64 {
+	if x != nil {
+		return x.MeasuredAtUnix
+	}
+	return 0
+}
+
+func (x *LatencyReport) GetRunToken() uint64 {
+	if x != nil {
+		return x.RunToken
+	}
+	return 0
+}
 
 // One protocol account for one inbound. account_json follows the xray
 // per-protocol account schema, e.g. {"id": "...", "flow": "xtls-rprx-vision"}
@@ -1048,7 +1507,7 @@ type InboundUser struct {
 
 func (x *InboundUser) Reset() {
 	*x = InboundUser{}
-	mi := &file_agent_proto_msgTypes[10]
+	mi := &file_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1060,7 +1519,7 @@ func (x *InboundUser) String() string {
 func (*InboundUser) ProtoMessage() {}
 
 func (x *InboundUser) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[10]
+	mi := &file_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1073,7 +1532,7 @@ func (x *InboundUser) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InboundUser.ProtoReflect.Descriptor instead.
 func (*InboundUser) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{10}
+	return file_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *InboundUser) GetInboundTag() string {
@@ -1123,7 +1582,7 @@ type UserOp struct {
 
 func (x *UserOp) Reset() {
 	*x = UserOp{}
-	mi := &file_agent_proto_msgTypes[11]
+	mi := &file_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1135,7 +1594,7 @@ func (x *UserOp) String() string {
 func (*UserOp) ProtoMessage() {}
 
 func (x *UserOp) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[11]
+	mi := &file_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1148,7 +1607,7 @@ func (x *UserOp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserOp.ProtoReflect.Descriptor instead.
 func (*UserOp) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{11}
+	return file_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *UserOp) GetOp() UserOp_Op {
@@ -1194,7 +1653,7 @@ type ConfigSnapshot struct {
 
 func (x *ConfigSnapshot) Reset() {
 	*x = ConfigSnapshot{}
-	mi := &file_agent_proto_msgTypes[12]
+	mi := &file_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1206,7 +1665,7 @@ func (x *ConfigSnapshot) String() string {
 func (*ConfigSnapshot) ProtoMessage() {}
 
 func (x *ConfigSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[12]
+	mi := &file_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1219,7 +1678,7 @@ func (x *ConfigSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigSnapshot.ProtoReflect.Descriptor instead.
 func (*ConfigSnapshot) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{12}
+	return file_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ConfigSnapshot) GetConfigVersion() uint64 {
@@ -1272,7 +1731,7 @@ type UserDelta struct {
 
 func (x *UserDelta) Reset() {
 	*x = UserDelta{}
-	mi := &file_agent_proto_msgTypes[13]
+	mi := &file_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1284,7 +1743,7 @@ func (x *UserDelta) String() string {
 func (*UserDelta) ProtoMessage() {}
 
 func (x *UserDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[13]
+	mi := &file_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1297,7 +1756,7 @@ func (x *UserDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserDelta.ProtoReflect.Descriptor instead.
 func (*UserDelta) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{13}
+	return file_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *UserDelta) GetUserVersion() uint64 {
@@ -1355,7 +1814,7 @@ type LeaseGrant struct {
 
 func (x *LeaseGrant) Reset() {
 	*x = LeaseGrant{}
-	mi := &file_agent_proto_msgTypes[14]
+	mi := &file_agent_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1367,7 +1826,7 @@ func (x *LeaseGrant) String() string {
 func (*LeaseGrant) ProtoMessage() {}
 
 func (x *LeaseGrant) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[14]
+	mi := &file_agent_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1380,7 +1839,7 @@ func (x *LeaseGrant) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LeaseGrant.ProtoReflect.Descriptor instead.
 func (*LeaseGrant) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{14}
+	return file_agent_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *LeaseGrant) GetDurationSeconds() uint64 {
@@ -1405,7 +1864,7 @@ type Noop struct {
 
 func (x *Noop) Reset() {
 	*x = Noop{}
-	mi := &file_agent_proto_msgTypes[15]
+	mi := &file_agent_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1417,7 +1876,7 @@ func (x *Noop) String() string {
 func (*Noop) ProtoMessage() {}
 
 func (x *Noop) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[15]
+	mi := &file_agent_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1430,7 +1889,7 @@ func (x *Noop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Noop.ProtoReflect.Descriptor instead.
 func (*Noop) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{15}
+	return file_agent_proto_rawDescGZIP(), []int{19}
 }
 
 // --- Agent self-update (protocol >= 3, M6) --------------------------------
@@ -1466,7 +1925,7 @@ type ManifestSignature struct {
 
 func (x *ManifestSignature) Reset() {
 	*x = ManifestSignature{}
-	mi := &file_agent_proto_msgTypes[16]
+	mi := &file_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1478,7 +1937,7 @@ func (x *ManifestSignature) String() string {
 func (*ManifestSignature) ProtoMessage() {}
 
 func (x *ManifestSignature) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[16]
+	mi := &file_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1491,7 +1950,7 @@ func (x *ManifestSignature) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ManifestSignature.ProtoReflect.Descriptor instead.
 func (*ManifestSignature) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{16}
+	return file_agent_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ManifestSignature) GetKeyId() string {
@@ -1527,7 +1986,7 @@ type UpdateOffer struct {
 
 func (x *UpdateOffer) Reset() {
 	*x = UpdateOffer{}
-	mi := &file_agent_proto_msgTypes[17]
+	mi := &file_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1539,7 +1998,7 @@ func (x *UpdateOffer) String() string {
 func (*UpdateOffer) ProtoMessage() {}
 
 func (x *UpdateOffer) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[17]
+	mi := &file_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1552,7 +2011,7 @@ func (x *UpdateOffer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateOffer.ProtoReflect.Descriptor instead.
 func (*UpdateOffer) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{17}
+	return file_agent_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *UpdateOffer) GetRolloutId() string {
@@ -1593,7 +2052,7 @@ type FetchArtifactRequest struct {
 
 func (x *FetchArtifactRequest) Reset() {
 	*x = FetchArtifactRequest{}
-	mi := &file_agent_proto_msgTypes[18]
+	mi := &file_agent_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1605,7 +2064,7 @@ func (x *FetchArtifactRequest) String() string {
 func (*FetchArtifactRequest) ProtoMessage() {}
 
 func (x *FetchArtifactRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[18]
+	mi := &file_agent_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1618,7 +2077,7 @@ func (x *FetchArtifactRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchArtifactRequest.ProtoReflect.Descriptor instead.
 func (*FetchArtifactRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{18}
+	return file_agent_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *FetchArtifactRequest) GetSha256() string {
@@ -1644,7 +2103,7 @@ type ArtifactChunk struct {
 
 func (x *ArtifactChunk) Reset() {
 	*x = ArtifactChunk{}
-	mi := &file_agent_proto_msgTypes[19]
+	mi := &file_agent_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1656,7 +2115,7 @@ func (x *ArtifactChunk) String() string {
 func (*ArtifactChunk) ProtoMessage() {}
 
 func (x *ArtifactChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[19]
+	mi := &file_agent_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1669,7 +2128,7 @@ func (x *ArtifactChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactChunk.ProtoReflect.Descriptor instead.
 func (*ArtifactChunk) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{19}
+	return file_agent_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ArtifactChunk) GetData() []byte {
@@ -1695,7 +2154,7 @@ type UpdateStatus struct {
 
 func (x *UpdateStatus) Reset() {
 	*x = UpdateStatus{}
-	mi := &file_agent_proto_msgTypes[20]
+	mi := &file_agent_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1707,7 +2166,7 @@ func (x *UpdateStatus) String() string {
 func (*UpdateStatus) ProtoMessage() {}
 
 func (x *UpdateStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[20]
+	mi := &file_agent_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1720,7 +2179,7 @@ func (x *UpdateStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateStatus.ProtoReflect.Descriptor instead.
 func (*UpdateStatus) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{20}
+	return file_agent_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *UpdateStatus) GetRolloutId() string {
@@ -1760,6 +2219,7 @@ type PanelDown struct {
 	//	*PanelDown_Noop
 	//	*PanelDown_Lease
 	//	*PanelDown_UpdateOffer
+	//	*PanelDown_LatencyProbe
 	Msg           isPanelDown_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1767,7 +2227,7 @@ type PanelDown struct {
 
 func (x *PanelDown) Reset() {
 	*x = PanelDown{}
-	mi := &file_agent_proto_msgTypes[21]
+	mi := &file_agent_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1779,7 +2239,7 @@ func (x *PanelDown) String() string {
 func (*PanelDown) ProtoMessage() {}
 
 func (x *PanelDown) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[21]
+	mi := &file_agent_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1792,7 +2252,7 @@ func (x *PanelDown) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PanelDown.ProtoReflect.Descriptor instead.
 func (*PanelDown) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{21}
+	return file_agent_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *PanelDown) GetMsg() isPanelDown_Msg {
@@ -1847,6 +2307,15 @@ func (x *PanelDown) GetUpdateOffer() *UpdateOffer {
 	return nil
 }
 
+func (x *PanelDown) GetLatencyProbe() *LatencyProbeConfig {
+	if x != nil {
+		if x, ok := x.Msg.(*PanelDown_LatencyProbe); ok {
+			return x.LatencyProbe
+		}
+	}
+	return nil
+}
+
 type isPanelDown_Msg interface {
 	isPanelDown_Msg()
 }
@@ -1871,6 +2340,10 @@ type PanelDown_UpdateOffer struct {
 	UpdateOffer *UpdateOffer `protobuf:"bytes,5,opt,name=update_offer,json=updateOffer,proto3,oneof"` // protocol >= 3
 }
 
+type PanelDown_LatencyProbe struct {
+	LatencyProbe *LatencyProbeConfig `protobuf:"bytes,20,opt,name=latency_probe,json=latencyProbe,proto3,oneof"` // capability "latency" (W11)
+}
+
 func (*PanelDown_Snapshot) isPanelDown_Msg() {}
 
 func (*PanelDown_Delta) isPanelDown_Msg() {}
@@ -1880,6 +2353,8 @@ func (*PanelDown_Noop) isPanelDown_Msg() {}
 func (*PanelDown_Lease) isPanelDown_Msg() {}
 
 func (*PanelDown_UpdateOffer) isPanelDown_Msg() {}
+
+func (*PanelDown_LatencyProbe) isPanelDown_Msg() {}
 
 var File_agent_proto protoreflect.FileDescriptor
 
@@ -1898,7 +2373,7 @@ const file_agent_proto_rawDesc = "" +
 	"\ragent_version\x18\x01 \x01(\tR\fagentVersion\x12!\n" +
 	"\fcore_version\x18\x02 \x01(\tR\vcoreVersion\x12\x0e\n" +
 	"\x02os\x18\x03 \x01(\tR\x02os\x12\x12\n" +
-	"\x04arch\x18\x04 \x01(\tR\x04arch\"\xe3\x01\n" +
+	"\x04arch\x18\x04 \x01(\tR\x04arch\"\x87\x02\n" +
 	"\x05Hello\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12%\n" +
@@ -1907,7 +2382,8 @@ const file_agent_proto_rawDesc = "" +
 	"\x04info\x18\x04 \x01(\v2\x13.akari.v1.AgentInfoR\x04info\x12)\n" +
 	"\x10protocol_version\x18\x05 \x01(\rR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +
-	"state_hash\x18\x06 \x01(\tR\tstateHash\"\x9c\x02\n" +
+	"state_hash\x18\x06 \x01(\tR\tstateHash\x12\"\n" +
+	"\fcapabilities\x18\x14 \x03(\tR\fcapabilities\"\xcd\x02\n" +
 	"\tHeartbeat\x12\x1f\n" +
 	"\vcpu_percent\x18\x01 \x01(\x01R\n" +
 	"cpuPercent\x12$\n" +
@@ -1915,8 +2391,31 @@ const file_agent_proto_rawDesc = "" +
 	"\x0fmem_total_bytes\x18\x03 \x01(\x04R\rmemTotalBytes\x12 \n" +
 	"\vconnections\x18\x04 \x01(\x04R\vconnections\x12%\n" +
 	"\x0euptime_seconds\x18\x05 \x01(\x04R\ruptimeSeconds\x12;\n" +
-	"\x17lease_remaining_seconds\x18\x06 \x01(\x04H\x00R\x15leaseRemainingSeconds\x88\x01\x01B\x1a\n" +
-	"\x18_lease_remaining_seconds\"`\n" +
+	"\x17lease_remaining_seconds\x18\x06 \x01(\x04H\x00R\x15leaseRemainingSeconds\x88\x01\x01\x12/\n" +
+	"\ametrics\x18\x14 \x01(\v2\x15.akari.v1.NodeMetricsR\ametricsB\x1a\n" +
+	"\x18_lease_remaining_seconds\"\xa5\x05\n" +
+	"\vNodeMetrics\x12\x14\n" +
+	"\x05load1\x18\x01 \x01(\x01R\x05load1\x12\x14\n" +
+	"\x05load5\x18\x02 \x01(\x01R\x05load5\x12\x16\n" +
+	"\x06load15\x18\x03 \x01(\x01R\x06load15\x12\x1b\n" +
+	"\tcpu_count\x18\x04 \x01(\rR\bcpuCount\x12&\n" +
+	"\x0fswap_used_bytes\x18\x05 \x01(\x04R\rswapUsedBytes\x12(\n" +
+	"\x10swap_total_bytes\x18\x06 \x01(\x04R\x0eswapTotalBytes\x12&\n" +
+	"\x0fdisk_used_bytes\x18\a \x01(\x04R\rdiskUsedBytes\x12(\n" +
+	"\x10disk_total_bytes\x18\b \x01(\x04R\x0ediskTotalBytes\x12#\n" +
+	"\rnet_interface\x18\t \x01(\tR\fnetInterface\x12.\n" +
+	"\x14net_rx_bytes_per_sec\x18\n" +
+	" \x01(\x04R\x10netRxBytesPerSec\x12.\n" +
+	"\x14net_tx_bytes_per_sec\x18\v \x01(\x04R\x10netTxBytesPerSec\x12+\n" +
+	"\x12net_rx_bytes_total\x18\f \x01(\x04R\x0fnetRxBytesTotal\x12+\n" +
+	"\x12net_tx_bytes_total\x18\r \x01(\x04R\x0fnetTxBytesTotal\x12\x1f\n" +
+	"\vtcp_sockets\x18\x0e \x01(\rR\n" +
+	"tcpSockets\x12\x1f\n" +
+	"\vudp_sockets\x18\x0f \x01(\rR\n" +
+	"udpSockets\x12!\n" +
+	"\fonline_users\x18\x10 \x01(\rR\vonlineUsers\x12*\n" +
+	"\x11process_rss_bytes\x18\x11 \x01(\x04R\x0fprocessRssBytes\x12!\n" +
+	"\fxray_version\x18\x12 \x01(\tR\vxrayVersion\"`\n" +
 	"\vUserTraffic\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x19\n" +
 	"\bup_bytes\x18\x02 \x01(\x04R\aupBytes\x12\x1d\n" +
@@ -1941,14 +2440,34 @@ const file_agent_proto_rawDesc = "" +
 	"\x12REASON_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tREASON_OK\x10\x01\x12\x17\n" +
 	"\x13REASON_APPLY_FAILED\x10\x02\x12\x18\n" +
-	"\x14REASON_BASE_MISMATCH\x10\x03\"\x85\x02\n" +
+	"\x14REASON_BASE_MISMATCH\x10\x03\"\xba\x02\n" +
 	"\aAgentUp\x12'\n" +
 	"\x05hello\x18\x01 \x01(\v2\x0f.akari.v1.HelloH\x00R\x05hello\x123\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x13.akari.v1.HeartbeatH\x00R\theartbeat\x123\n" +
 	"\atraffic\x18\x03 \x01(\v2\x17.akari.v1.TrafficReportH\x00R\atraffic\x12!\n" +
 	"\x03ack\x18\x04 \x01(\v2\r.akari.v1.AckH\x00R\x03ack\x12=\n" +
-	"\rupdate_status\x18\x05 \x01(\v2\x16.akari.v1.UpdateStatusH\x00R\fupdateStatusB\x05\n" +
-	"\x03msg\"m\n" +
+	"\rupdate_status\x18\x05 \x01(\v2\x16.akari.v1.UpdateStatusH\x00R\fupdateStatus\x123\n" +
+	"\alatency\x18\x14 \x01(\v2\x17.akari.v1.LatencyReportH\x00R\alatencyB\x05\n" +
+	"\x03msg\"\xab\x01\n" +
+	"\x12LatencyProbeConfig\x12)\n" +
+	"\x10interval_seconds\x18\x01 \x01(\rR\x0fintervalSeconds\x12\x12\n" +
+	"\x04urls\x18\x02 \x03(\tR\x04urls\x12\x1d\n" +
+	"\n" +
+	"timeout_ms\x18\x03 \x01(\rR\ttimeoutMs\x12\x1a\n" +
+	"\battempts\x18\x04 \x01(\rR\battempts\x12\x1b\n" +
+	"\trun_token\x18\x05 \x01(\x04R\brunToken\"\x80\x01\n" +
+	"\n" +
+	"UrlLatency\x12\x10\n" +
+	"\x03url\x18\x01 \x01(\tR\x03url\x12\x0e\n" +
+	"\x02ok\x18\x02 \x01(\bR\x02ok\x12\x19\n" +
+	"\bdelay_ms\x18\x03 \x01(\rR\adelayMs\x12\x1f\n" +
+	"\vattempts_ms\x18\x04 \x03(\rR\n" +
+	"attemptsMs\x12\x14\n" +
+	"\x05error\x18\x05 \x01(\tR\x05error\"\x86\x01\n" +
+	"\rLatencyReport\x12.\n" +
+	"\aresults\x18\x01 \x03(\v2\x14.akari.v1.UrlLatencyR\aresults\x12(\n" +
+	"\x10measured_at_unix\x18\x02 \x01(\x03R\x0emeasuredAtUnix\x12\x1b\n" +
+	"\trun_token\x18\x03 \x01(\x04R\brunToken\"m\n" +
 	"\vInboundUser\x12\x1f\n" +
 	"\vinbound_tag\x18\x01 \x01(\tR\n" +
 	"inboundTag\x12!\n" +
@@ -2009,13 +2528,14 @@ const file_agent_proto_rawDesc = "" +
 	"\fSTATE_FAILED\x10\x03\x12\x14\n" +
 	"\x10STATE_RESTARTING\x10\x04\x12\x15\n" +
 	"\x11STATE_ROLLED_BACK\x10\x05\x12\x13\n" +
-	"\x0fSTATE_CONFIRMED\x10\x06\"\x87\x02\n" +
+	"\x0fSTATE_CONFIRMED\x10\x06\"\xcc\x02\n" +
 	"\tPanelDown\x126\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x18.akari.v1.ConfigSnapshotH\x00R\bsnapshot\x12+\n" +
 	"\x05delta\x18\x02 \x01(\v2\x13.akari.v1.UserDeltaH\x00R\x05delta\x12$\n" +
 	"\x04noop\x18\x03 \x01(\v2\x0e.akari.v1.NoopH\x00R\x04noop\x12,\n" +
 	"\x05lease\x18\x04 \x01(\v2\x14.akari.v1.LeaseGrantH\x00R\x05lease\x12:\n" +
-	"\fupdate_offer\x18\x05 \x01(\v2\x15.akari.v1.UpdateOfferH\x00R\vupdateOfferB\x05\n" +
+	"\fupdate_offer\x18\x05 \x01(\v2\x15.akari.v1.UpdateOfferH\x00R\vupdateOffer\x12C\n" +
+	"\rlatency_probe\x18\x14 \x01(\v2\x1c.akari.v1.LatencyProbeConfigH\x00R\flatencyProbeB\x05\n" +
 	"\x03msg*;\n" +
 	"\n" +
 	"RemoveMode\x12\x14\n" +
@@ -2041,7 +2561,7 @@ func file_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_agent_proto_goTypes = []any{
 	(RemoveMode)(0),              // 0: akari.v1.RemoveMode
 	(Ack_Reason)(0),              // 1: akari.v1.Ack.Reason
@@ -2053,57 +2573,65 @@ var file_agent_proto_goTypes = []any{
 	(*AgentInfo)(nil),            // 7: akari.v1.AgentInfo
 	(*Hello)(nil),                // 8: akari.v1.Hello
 	(*Heartbeat)(nil),            // 9: akari.v1.Heartbeat
-	(*UserTraffic)(nil),          // 10: akari.v1.UserTraffic
-	(*TrafficReport)(nil),        // 11: akari.v1.TrafficReport
-	(*Ack)(nil),                  // 12: akari.v1.Ack
-	(*AgentUp)(nil),              // 13: akari.v1.AgentUp
-	(*InboundUser)(nil),          // 14: akari.v1.InboundUser
-	(*UserOp)(nil),               // 15: akari.v1.UserOp
-	(*ConfigSnapshot)(nil),       // 16: akari.v1.ConfigSnapshot
-	(*UserDelta)(nil),            // 17: akari.v1.UserDelta
-	(*LeaseGrant)(nil),           // 18: akari.v1.LeaseGrant
-	(*Noop)(nil),                 // 19: akari.v1.Noop
-	(*ManifestSignature)(nil),    // 20: akari.v1.ManifestSignature
-	(*UpdateOffer)(nil),          // 21: akari.v1.UpdateOffer
-	(*FetchArtifactRequest)(nil), // 22: akari.v1.FetchArtifactRequest
-	(*ArtifactChunk)(nil),        // 23: akari.v1.ArtifactChunk
-	(*UpdateStatus)(nil),         // 24: akari.v1.UpdateStatus
-	(*PanelDown)(nil),            // 25: akari.v1.PanelDown
+	(*NodeMetrics)(nil),          // 10: akari.v1.NodeMetrics
+	(*UserTraffic)(nil),          // 11: akari.v1.UserTraffic
+	(*TrafficReport)(nil),        // 12: akari.v1.TrafficReport
+	(*Ack)(nil),                  // 13: akari.v1.Ack
+	(*AgentUp)(nil),              // 14: akari.v1.AgentUp
+	(*LatencyProbeConfig)(nil),   // 15: akari.v1.LatencyProbeConfig
+	(*UrlLatency)(nil),           // 16: akari.v1.UrlLatency
+	(*LatencyReport)(nil),        // 17: akari.v1.LatencyReport
+	(*InboundUser)(nil),          // 18: akari.v1.InboundUser
+	(*UserOp)(nil),               // 19: akari.v1.UserOp
+	(*ConfigSnapshot)(nil),       // 20: akari.v1.ConfigSnapshot
+	(*UserDelta)(nil),            // 21: akari.v1.UserDelta
+	(*LeaseGrant)(nil),           // 22: akari.v1.LeaseGrant
+	(*Noop)(nil),                 // 23: akari.v1.Noop
+	(*ManifestSignature)(nil),    // 24: akari.v1.ManifestSignature
+	(*UpdateOffer)(nil),          // 25: akari.v1.UpdateOffer
+	(*FetchArtifactRequest)(nil), // 26: akari.v1.FetchArtifactRequest
+	(*ArtifactChunk)(nil),        // 27: akari.v1.ArtifactChunk
+	(*UpdateStatus)(nil),         // 28: akari.v1.UpdateStatus
+	(*PanelDown)(nil),            // 29: akari.v1.PanelDown
 }
 var file_agent_proto_depIdxs = []int32{
 	7,  // 0: akari.v1.Hello.info:type_name -> akari.v1.AgentInfo
-	10, // 1: akari.v1.TrafficReport.users:type_name -> akari.v1.UserTraffic
-	1,  // 2: akari.v1.Ack.reason:type_name -> akari.v1.Ack.Reason
-	8,  // 3: akari.v1.AgentUp.hello:type_name -> akari.v1.Hello
-	9,  // 4: akari.v1.AgentUp.heartbeat:type_name -> akari.v1.Heartbeat
-	11, // 5: akari.v1.AgentUp.traffic:type_name -> akari.v1.TrafficReport
-	12, // 6: akari.v1.AgentUp.ack:type_name -> akari.v1.Ack
-	24, // 7: akari.v1.AgentUp.update_status:type_name -> akari.v1.UpdateStatus
-	2,  // 8: akari.v1.UserOp.op:type_name -> akari.v1.UserOp.Op
-	14, // 9: akari.v1.UserOp.inbound_users:type_name -> akari.v1.InboundUser
-	15, // 10: akari.v1.ConfigSnapshot.users:type_name -> akari.v1.UserOp
-	15, // 11: akari.v1.UserDelta.ops:type_name -> akari.v1.UserOp
-	0,  // 12: akari.v1.LeaseGrant.remove_mode:type_name -> akari.v1.RemoveMode
-	20, // 13: akari.v1.UpdateOffer.signatures:type_name -> akari.v1.ManifestSignature
-	3,  // 14: akari.v1.UpdateStatus.state:type_name -> akari.v1.UpdateStatus.State
-	16, // 15: akari.v1.PanelDown.snapshot:type_name -> akari.v1.ConfigSnapshot
-	17, // 16: akari.v1.PanelDown.delta:type_name -> akari.v1.UserDelta
-	19, // 17: akari.v1.PanelDown.noop:type_name -> akari.v1.Noop
-	18, // 18: akari.v1.PanelDown.lease:type_name -> akari.v1.LeaseGrant
-	21, // 19: akari.v1.PanelDown.update_offer:type_name -> akari.v1.UpdateOffer
-	13, // 20: akari.v1.AgentChannel.OpenChannel:input_type -> akari.v1.AgentUp
-	5,  // 21: akari.v1.AgentChannel.Renew:input_type -> akari.v1.RenewRequest
-	22, // 22: akari.v1.AgentChannel.FetchArtifact:input_type -> akari.v1.FetchArtifactRequest
-	4,  // 23: akari.v1.AgentEnrollment.Enroll:input_type -> akari.v1.EnrollRequest
-	25, // 24: akari.v1.AgentChannel.OpenChannel:output_type -> akari.v1.PanelDown
-	6,  // 25: akari.v1.AgentChannel.Renew:output_type -> akari.v1.IssuedCertificate
-	23, // 26: akari.v1.AgentChannel.FetchArtifact:output_type -> akari.v1.ArtifactChunk
-	6,  // 27: akari.v1.AgentEnrollment.Enroll:output_type -> akari.v1.IssuedCertificate
-	24, // [24:28] is the sub-list for method output_type
-	20, // [20:24] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	10, // 1: akari.v1.Heartbeat.metrics:type_name -> akari.v1.NodeMetrics
+	11, // 2: akari.v1.TrafficReport.users:type_name -> akari.v1.UserTraffic
+	1,  // 3: akari.v1.Ack.reason:type_name -> akari.v1.Ack.Reason
+	8,  // 4: akari.v1.AgentUp.hello:type_name -> akari.v1.Hello
+	9,  // 5: akari.v1.AgentUp.heartbeat:type_name -> akari.v1.Heartbeat
+	12, // 6: akari.v1.AgentUp.traffic:type_name -> akari.v1.TrafficReport
+	13, // 7: akari.v1.AgentUp.ack:type_name -> akari.v1.Ack
+	28, // 8: akari.v1.AgentUp.update_status:type_name -> akari.v1.UpdateStatus
+	17, // 9: akari.v1.AgentUp.latency:type_name -> akari.v1.LatencyReport
+	16, // 10: akari.v1.LatencyReport.results:type_name -> akari.v1.UrlLatency
+	2,  // 11: akari.v1.UserOp.op:type_name -> akari.v1.UserOp.Op
+	18, // 12: akari.v1.UserOp.inbound_users:type_name -> akari.v1.InboundUser
+	19, // 13: akari.v1.ConfigSnapshot.users:type_name -> akari.v1.UserOp
+	19, // 14: akari.v1.UserDelta.ops:type_name -> akari.v1.UserOp
+	0,  // 15: akari.v1.LeaseGrant.remove_mode:type_name -> akari.v1.RemoveMode
+	24, // 16: akari.v1.UpdateOffer.signatures:type_name -> akari.v1.ManifestSignature
+	3,  // 17: akari.v1.UpdateStatus.state:type_name -> akari.v1.UpdateStatus.State
+	20, // 18: akari.v1.PanelDown.snapshot:type_name -> akari.v1.ConfigSnapshot
+	21, // 19: akari.v1.PanelDown.delta:type_name -> akari.v1.UserDelta
+	23, // 20: akari.v1.PanelDown.noop:type_name -> akari.v1.Noop
+	22, // 21: akari.v1.PanelDown.lease:type_name -> akari.v1.LeaseGrant
+	25, // 22: akari.v1.PanelDown.update_offer:type_name -> akari.v1.UpdateOffer
+	15, // 23: akari.v1.PanelDown.latency_probe:type_name -> akari.v1.LatencyProbeConfig
+	14, // 24: akari.v1.AgentChannel.OpenChannel:input_type -> akari.v1.AgentUp
+	5,  // 25: akari.v1.AgentChannel.Renew:input_type -> akari.v1.RenewRequest
+	26, // 26: akari.v1.AgentChannel.FetchArtifact:input_type -> akari.v1.FetchArtifactRequest
+	4,  // 27: akari.v1.AgentEnrollment.Enroll:input_type -> akari.v1.EnrollRequest
+	29, // 28: akari.v1.AgentChannel.OpenChannel:output_type -> akari.v1.PanelDown
+	6,  // 29: akari.v1.AgentChannel.Renew:output_type -> akari.v1.IssuedCertificate
+	27, // 30: akari.v1.AgentChannel.FetchArtifact:output_type -> akari.v1.ArtifactChunk
+	6,  // 31: akari.v1.AgentEnrollment.Enroll:output_type -> akari.v1.IssuedCertificate
+	28, // [28:32] is the sub-list for method output_type
+	24, // [24:28] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_agent_proto_init() }
@@ -2112,19 +2640,21 @@ func file_agent_proto_init() {
 		return
 	}
 	file_agent_proto_msgTypes[5].OneofWrappers = []any{}
-	file_agent_proto_msgTypes[9].OneofWrappers = []any{
+	file_agent_proto_msgTypes[10].OneofWrappers = []any{
 		(*AgentUp_Hello)(nil),
 		(*AgentUp_Heartbeat)(nil),
 		(*AgentUp_Traffic)(nil),
 		(*AgentUp_Ack)(nil),
 		(*AgentUp_UpdateStatus)(nil),
+		(*AgentUp_Latency)(nil),
 	}
-	file_agent_proto_msgTypes[21].OneofWrappers = []any{
+	file_agent_proto_msgTypes[25].OneofWrappers = []any{
 		(*PanelDown_Snapshot)(nil),
 		(*PanelDown_Delta)(nil),
 		(*PanelDown_Noop)(nil),
 		(*PanelDown_Lease)(nil),
 		(*PanelDown_UpdateOffer)(nil),
+		(*PanelDown_LatencyProbe)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -2132,7 +2662,7 @@ func file_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_proto_rawDesc), len(file_agent_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   22,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

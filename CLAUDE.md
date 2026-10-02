@@ -18,13 +18,15 @@ Go 1.27 单包（`package main`，模块名 `akari/agent`），内嵌 xray-core 
 | `ratelimit.go` | W7 每用户限速（协议 4，`UserOp.speed_limit_bytes_per_sec`）：每用户一对令牌桶（上/下行，虚拟时间 GCRA 式 pacing，burst = max(rate/5, 64 KiB)，每次最多放行 32 KiB 一块——管道一次可交出数百 KiB，整批等待会让请求/响应两个方向串行、只得到约一半速率），该用户在本节点所有 inbound/连接共享；受限用户的分发链路包 `limitedReader`/`limitedWriter`（等待可被分发 ctx 取消，`Interrupt`/`Close` 透传），并置 `session.Inbound.CanSpliceCopy = 3` 关掉 XTLS Vision 的 splice（否则内核直拷绕过一切 reader/writer）；不限速用户不包装（只多一次 map 查找）。`SetLimit`：从无到有 → 断开该用户所有活连接（未包装/可能已 splice，重连后受限）；改值/取消 → 原地生效 |
 | `statehash.go` | state hash（定义见 proto，向量 `proto/state_hash_vectors.json`） |
 | `lease.go` / `boottime_*.go` | 失联租约：CLOCK_BOOTTIME、0→24h、≥1h、≤30d、50%/90% 预警 |
-| `monitor.go` | 心跳 15s（cpu/mem/租约剩余、`connections` = gate 跟踪的分发数（无锁读，不等 Rebuild）、`uptime_seconds`）、流量 10s（累计值） |
+| `monitor.go` | 心跳 15s（`-heartbeat-interval`，1s–5min；cpu/mem/租约剩余、`connections` = gate 跟踪的分发数（无锁读，不等 Rebuild）、`uptime_seconds`、W11 `metrics`（`NodeMetrics`，`buildHeartbeat`））、流量 10s（累计值） |
+| `sysstat.go` / `statfs_*.go` | W11 机器状态（无 cgo、无子进程，只读 `/proc` 与 `statfs("/")`）：纯解析函数 `parseCPUStat`/`parseLoadavg`/`parseMeminfo`（used = total − MemAvailable）/`parseDefaultRoute4`/`parseDefaultRoute6`/`parseNetDev`/`parseSockstat`/`parseStatusRSS`，`sampler` 保存上次读数算 CPU% 与网卡速率（计数回绕/换网卡 → 0）；网卡 = IPv4 默认路由（最低 metric）→ IPv6 默认路由 → 流量最大的非 lo；在线用户 = gate 里有活分发的不同用户数（`gateDispatcher.LiveStats`）。夹具 `testdata/proc/`，测试 `sysstat_test.go` |
+| `latency.go` | W11 延迟测试（能力 `latency`，Clash url-test 语义）：`prober` 进程级循环（启动后 0–60s 内一次，之后 interval ±10%，默认 5h，面板 `LatencyProbeConfig` 可改并夹到 [10min, 7d]）；每次直连（`Proxy: nil`、不复用连接、不跟随重定向）GET，延迟 = 发请求到收到响应头，`attempts`（默认 3）次取中位数，失败按超时计；URL 依次尝试，首个有响应的即止（默认 gstatic → cloudflare）；`run_token` 变化 = 立即测（进程见到的第一个只记录，10s 内合并）；最新结果在每次 Hello 后重发（`latestReport`）。测试 `latency_test.go`（本地 httptest、超时、回退、调度） |
 | `update.go` | M6 自更新（磁盘侧）：`<state>/update/`（state.json 0600：current/previous 槽位、trial（试用期，boots 计数）、rolled_back 版本表、待发 report；`finals.json` 跨重启的最终计数；`bin/` 暂存二进制 0700）。`launch()` 在 main 最早执行：**全新启动**（非 `AKARI_AGENT_LAUNCHED=1`）的已安装二进制 = 启动器，current 比自己新则 boots+1（试用中）、超过 `-update-max-boots` 即回滚（标记 rolled_back、report ROLLED_BACK、current:=previous），再按 manifest 校验大小/SHA-256 后 `syscall.Exec`；已安装版本 ≥ 暂存版本则丢弃暂存（手工升级优先）；被 exec 的进程从不再 exec（防循环）。签名只在接受 offer 时验（启动器可能早于密钥轮换），暂存文件只做完整性校验 |
 | `update_agent.go` | M6 自更新（会话侧）：`UpdateOffer` → 用**编译进来的**公钥验签 + `release.Policy`（平台、单调版本/签名 rollback、已回滚版本、min_panel_protocol）→ 失败回 `REJECTED`；接受后单任务后台经同一 mTLS 连接 `FetchArtifact` 下载（断点续传，6 次退避），校验大小+SHA-256 → 暂存 → 持 `applyMu` 且流仍活：拆 xray、持有版本 (0,0)、最终计数入队并落盘、发 `RESTARTING` 并 `flushStream` → `commit`（trial boots=1）→ exec（失败则 undo 并重发 Hello）。试用期：Snapshot/Delta ok Ack 发出后 `confirmTrialLocked`（发 `CONFIRMED`）；`trialLoop` 超时（`-update-self-check`）则拆 xray、落盘计数、exec previous/installed（exec 失败退出，交给 systemd）。待发 report 在每条新流 Hello 后发送。租约是进程内状态，不跨 exec（新进程在首个 LeaseGrant 前不跑 xray，因为 (0,0) 只能等 Snapshot，而面板总是先发 LeaseGrant） |
 | `release/` | 可导入包：manifest（schema 1，严格解码）、Ed25519 签名（上下文前缀 `akari-agent-manifest-v1\n`，key id = SHA-256(pub)[:8]）、`ParseKeys`、`Policy`、semver 比较；面板 `updates.rs` 实现同一规则，向量 `proto/update_vector.json` |
 | `cmd/akari-sign` | 离线签名工具：keygen/pubkey/sign/countersign/verify（`-key` 或 `-key-env`） |
 | `release-keys.txt` / `releasekeys*.go` | 生产固定公钥集（go:embed；生产密钥 `key-f2ad18a8bb718a1a`，自 v0.2.0 起固定；私钥仅存负责人机器 `~/secrets/akari-release-signing.key`(0600) + 仓库 secret `AKARI_RELEASE_SIGNING_KEY`；轮换 = 新公钥并列固定 + `akari-sign countersign` 双签，全网升级后删旧钥）；`akari_testkeys` 构建标签额外加入**公开的**测试公钥（`testdata/TEST-ONLY-release.*`，仅 smoke），`make dist` 的 `check-release-keys` 拒绝含测试公钥的二进制 |
-| `proto/agent.proto` | **vendor 副本**，禁止手改，只能 `make sync-proto`（worktree 中手工 cp + `buf generate proto` + diff） |
+| `proto/agent.proto` | **vendor 副本**，禁止手改，只能 `make sync-proto`（worktree 中 `make sync-proto PANEL_DIR=../<面板 worktree>`） |
 | `proto/state_hash_vectors.json` | 面板正本的副本（共享测试向量） |
 | `proto/update_vector.json` | 面板正本的副本（M6 签名 manifest 共享向量，`release` 测试读取） |
 | `proto/gate.proto` | agent 内部（非契约、不同步）：gate 的 xray app 配置消息类型 |
@@ -44,8 +46,8 @@ make dist         # dist/akari-agent-linux-{amd64,arm64} + SHA256SUMS（发布�
 make vet fmt-check
 make test         # test-canary + go test -race ./...
 make test-canary  # rt_canary_test.go（build tag canary，不带 -race：xray 的 Vision 客户端在 -race 下触发 checkptr）
-make sync-proto   # 从 ../akari-panel 拷贝契约并 buf generate
-make check-proto  # 契约漂移校验
+make sync-proto   # 从 ../akari-panel 拷贝契约并 buf generate（worktree：PANEL_DIR=../<面板 worktree>）
+make check-proto  # 契约漂移校验（同上 PANEL_DIR）
 make bench        # 开销基准（bench_test.go；-run '^$' 只跑基准）
 make build-testkeys VERSION=v900.0.0 OUT=/tmp/a   # 仅测试：额外信任测试公钥（smoke 用）
 make sign-manifest VERSION=vX.Y.Z KEY=<file>|KEY_ENV=<var>   # dist/*.manifest.{json,sig}
@@ -75,6 +77,7 @@ tag `v*` 触发 `.github/workflows/release.yml`：fmt-check/vet/test → `make d
 - **F3**：`session()` 返回前 join 所有子 goroutine（读协程可能正在 Rebuild）→ 任意时刻至多一个 handleDown；`handleDown` 持 `applyMu`，先查流 ctx，流已死则不 Rebuild、不改版本、不发送（Rebuild 期间流死 → 置 dirty）。
 - **租约**：首次收到 `LeaseGrant` 才武装（旧面板永不武装）；只接受当前流的 grant；到期（`checkLease`，5s 一次）拆 xray、最终计数入队、持有版本归 (0,0)；若流仍在（面板活着但 DB 挂了）立即发 Hello (0,0)。
 - state hash v2 绑定 inbounds：`CoreManager.inboundsJSON` = 当前实例 Snapshot 的 inbounds_json 原文（无实例时为 ""）。
+- **能力（W11）**：`Hello.capabilities` = `agentCapabilities`（`metrics`、`latency`），与协议号无关（不 bump `agentProtocol`）；`PanelDown.latency_probe` 只更新 prober 设置（不持 applyMu 做网络 I/O，不回 Ack）；旧面板不发，prober 用默认值照常测、结果在 Hello 后发出（旧面板忽略未知消息）。
 - Hello 带 `protocol_version`（常量 `agentProtocol`，当前 5 = SS2022 移除走墓碑（面板对 SS 节点的移除改发 delta）；4 = 每用户限速；3 = 自更新；2 = 会续期证书）与 state hash；Ack 带 reason、处理后持有版本、state hash。
 - **限速（W7，`ratelimit.go`）**：`applyOpLocked` 在安装凭据**之前**设置用户限速（REMOVE / 未装上任何凭据 → 清除），所以新凭据不会先放进一个未受限的连接；限速不进 state hash（与凭据同属持有版本，设置本身不会失败）。xray v26.3.27 没有按用户限速的能力（policy 只有 buffer/超时），所以在 gate 里做；升级 xray 时 `make test-canary` 里的 `TestRT_VisionSpeedLimit` 、`TestRT_MuxSpeedLimit`（mux 子流共享预算）、`TestRT_UDPSpeedLimit`（VLESS UDP）与 `TestRT_ProtocolMatrix`（每个协议：只改限速的 delta 切断未受限的转发，新连接经真实客户端按限速 ±5% 双向回显）必须仍然通过。
 - **身份（M1c）**：私钥只在节点生成、永不出节点、不进日志；token 也不进日志（只存其 SHA-256 作“已用”标记）。连接时先用待确认的 next 身份（失败为暂时性则下次用当前身份，交替），收到面板第一条消息即提升为 `identity.pem`。面板在新证书首次出现前一直接受旧证书，所以接收后、持久化前崩溃都无害。当前证书过期时每次连接都打错误日志（需 `akari node enroll-token` 发新 token 重新注册）。

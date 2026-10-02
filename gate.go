@@ -162,6 +162,20 @@ func (g *gateDispatcher) LiveTotal() int {
 	return n
 }
 
+// LiveStats returns the tracked dispatches and how many distinct users
+// (emails) they belong to (Heartbeat.metrics.online_users). Keys without
+// a live dispatch are never kept in g.live.
+func (g *gateDispatcher) LiveStats() (conns, users int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	seen := make(map[string]struct{}, len(g.live))
+	for k, c := range g.live {
+		conns += len(c)
+		seen[k.email] = struct{}{}
+	}
+	return conns, len(seen)
+}
+
 // Live returns the number of tracked dispatches for key (tests).
 func (g *gateDispatcher) Live(key gateKey) int {
 	g.mu.Lock()

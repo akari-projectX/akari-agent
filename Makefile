@@ -59,12 +59,16 @@ dist:
 proto:
 	buf generate proto
 
+# PANEL_DIR: the panel checkout holding the canonical contract (a worktree:
+#   make sync-proto PANEL_DIR=../wt-panel).
+PANEL_DIR ?= ../akari-panel
+
 sync-proto:
-	cp ../akari-panel/proto/agent.proto proto/agent.proto
+	cp $(PANEL_DIR)/proto/agent.proto proto/agent.proto
 	$(MAKE) proto
 
 check-proto:
-	diff -q ../akari-panel/proto/agent.proto proto/agent.proto
+	diff -q $(PANEL_DIR)/proto/agent.proto proto/agent.proto
 
 # Generated code (pb/) must be what buf produces from the vendored proto.
 # Needs protoc-gen-go v1.36.12 and protoc-gen-go-grpc v1.6.2 on PATH.
