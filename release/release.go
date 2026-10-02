@@ -331,18 +331,34 @@ func cmpU(a, b uint64) int {
 	return 0
 }
 
-// cmpIdent: numeric identifiers compare numerically and sort before
-// alphanumeric ones, which compare in ASCII order.
+// cmpIdent: numeric identifiers compare numerically (any length: the
+// regexp admits digits beyond uint64, and without leading zeros a longer
+// one is larger) and sort before alphanumeric ones, which compare in ASCII
+// order. Same order as the panel's updates.rs cmp_ident.
 func cmpIdent(a, b string) int {
-	na, ea := strconv.ParseUint(a, 10, 64)
-	nb, eb := strconv.ParseUint(b, 10, 64)
+	na, nb := numericIdent(a), numericIdent(b)
 	switch {
-	case ea == nil && eb == nil:
-		return cmpU(na, nb)
-	case ea == nil:
+	case na && nb:
+		if len(a) != len(b) {
+			return cmpU(uint64(len(a)), uint64(len(b)))
+		}
+		return strings.Compare(a, b)
+	case na:
 		return -1
-	case eb == nil:
+	case nb:
 		return 1
 	}
 	return strings.Compare(a, b)
+}
+
+func numericIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }

@@ -93,18 +93,22 @@ func inboundKinds(cfg *core.Config) (map[string]inboundKind, error) {
 	return kinds, nil
 }
 
-// jsonField returns obj's value for key the way Go's encoding/json (and so
-// xray) matches it: case-insensitively. ok=false when absent.
-func jsonField(obj map[string]json.RawMessage, key string) (json.RawMessage, bool) {
-	if v, ok := obj[key]; ok {
-		return v, true
-	}
-	for k, v := range obj {
-		if strings.EqualFold(k, key) {
-			return v, true
-		}
-	}
-	return nil, false
+// inboundJSON is one inbound as xray's own config structs read it (Go
+// encoding/json into a struct: keys match case-insensitively and the LAST
+// matching member wins). multiUserShadowsocks must see exactly the tag and
+// settings xray saw: a map lookup that preferred the exact-case key would
+// pick another member of {"tag":"a","TAG":"b"} than xray does, and the
+// inbound xray built as "b" would stay a single-user server.
+type inboundJSON struct {
+	Tag      string          `json:"tag"`
+	Protocol string          `json:"protocol"`
+	Settings json.RawMessage `json:"settings"`
+}
+
+// ssSettingsJSON: the "clients" member of Shadowsocks settings, as xray's
+// ShadowsocksServerConfig reads it.
+type ssSettingsJSON struct {
+	Clients json.RawMessage `json:"clients"`
 }
 
 // multiUserShadowsocks rewrites, in the built config, every Shadowsocks
@@ -119,26 +123,19 @@ func jsonField(obj map[string]json.RawMessage, key string) (json.RawMessage, boo
 func multiUserShadowsocks(inbounds []json.RawMessage, cfg *core.Config) error {
 	managed := map[string]bool{}
 	for _, raw := range inbounds {
-		var obj map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &obj); err != nil {
+		var in inboundJSON
+		if err := json.Unmarshal(raw, &in); err != nil {
 			continue // xray's own parse already accepted or refused it
 		}
-		var tag, proto string
-		if v, ok := jsonField(obj, "tag"); ok {
-			_ = json.Unmarshal(v, &tag)
-		}
-		if v, ok := jsonField(obj, "protocol"); ok {
-			_ = json.Unmarshal(v, &proto)
-		}
-		if !strings.EqualFold(proto, "shadowsocks") {
+		if !strings.EqualFold(in.Protocol, "shadowsocks") {
 			continue
 		}
-		var settings map[string]json.RawMessage
-		if v, ok := jsonField(obj, "settings"); ok {
-			_ = json.Unmarshal(v, &settings)
+		var settings ssSettingsJSON
+		if len(in.Settings) > 0 {
+			_ = json.Unmarshal(in.Settings, &settings)
 		}
-		if v, ok := jsonField(settings, "clients"); ok && !bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
-			managed[tag] = true
+		if len(settings.Clients) > 0 && !bytes.Equal(bytes.TrimSpace(settings.Clients), []byte("null")) {
+			managed[in.Tag] = true
 		}
 	}
 	for _, in := range cfg.Inbound {

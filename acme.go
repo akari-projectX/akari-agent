@@ -64,6 +64,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/mholt/acmez/v3"
 	"github.com/mholt/acmez/v3/acme"
@@ -935,13 +936,22 @@ func inboundTCPPorts(inboundsJSON string) portSet {
 // certificate credential files at f, and returns the rewritten inbounds
 // and the tags of the inbounds that changed. Exact (case-sensitive) key
 // names, as the panel's templates write them.
+//
+// A rewritten inbound is re-encoded, so the decode must be lossless for
+// what xray reads: numbers keep their literal text (UseNumber; float64
+// would round integers above 2^53), and an object on the rewritten path
+// whose keys collide case-insensitively is refused — xray takes the last
+// of such members in document order, which re-encoding (sorted keys)
+// would change.
 func rewriteCertPaths(inbounds []json.RawMessage, f certFiles) ([]json.RawMessage, []string, error) {
 	out := make([]json.RawMessage, len(inbounds))
 	var tags []string
 	for i, raw := range inbounds {
 		out[i] = raw
 		var in map[string]any
-		if json.Unmarshal(raw, &in) != nil {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		if dec.Decode(&in) != nil {
 			continue
 		}
 		ss, _ := in["streamSettings"].(map[string]any)
@@ -953,12 +963,20 @@ func rewriteCertPaths(inbounds []json.RawMessage, f certFiles) ([]json.RawMessag
 			if cm == nil || cm["certificateFile"] != nodeCertCredFile || cm["keyFile"] != nodeKeyCredFile {
 				continue
 			}
+			if foldCollision(cm) {
+				return nil, nil, fmt.Errorf("inbound %d: certificate entry has keys differing only in case", i)
+			}
 			cm["certificateFile"] = f.cert
 			cm["keyFile"] = f.key
 			changed = true
 		}
 		if !changed {
 			continue
+		}
+		for _, m := range []map[string]any{in, ss, ts} {
+			if foldCollision(m) {
+				return nil, nil, fmt.Errorf("inbound %d: TLS settings have keys differing only in case", i)
+			}
 		}
 		b, err := json.Marshal(in)
 		if err != nil {
@@ -970,4 +988,32 @@ func rewriteCertPaths(inbounds []json.RawMessage, f certFiles) ([]json.RawMessag
 		}
 	}
 	return out, tags, nil
+}
+
+// foldCollision: two keys of m that Go's encoding/json would treat as the
+// same member (Unicode simple case folding, e.g. "K" = "k" = U+212A).
+func foldCollision(m map[string]any) bool {
+	seen := make(map[string]bool, len(m))
+	for k := range m {
+		f := foldKey(k)
+		if seen[f] {
+			return true
+		}
+		seen[f] = true
+	}
+	return false
+}
+
+// foldKey maps every rune to the smallest rune of its case-folding orbit,
+// so keys that match case-insensitively map to the same string.
+func foldKey(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		lo := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			lo = min(lo, f)
+		}
+		b.WriteRune(lo)
+	}
+	return b.String()
 }

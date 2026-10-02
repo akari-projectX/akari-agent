@@ -101,3 +101,23 @@ jobs:
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
           make check-pb
         working-directory: akari-agent
+
+  coverage:
+    # ROADMAP §0: statement coverage of the revocation / rate-limit / user-op
+    # core (gate.go, ratelimit.go, core.go) >= 85%, canaries included
+    # (real xray clients; no -race, see `make test-canary`).
+    name: coverage (gate/ratelimit/core >= 85%)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: gate
+        run: |
+          set -o pipefail
+          make cover | tee cover.txt
+      - if: always()
+        run: |
+          { echo '### Agent core statement coverage'; echo; echo '```'; tail -n 4 cover.txt 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
