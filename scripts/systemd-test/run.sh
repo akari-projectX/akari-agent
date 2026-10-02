@@ -18,7 +18,9 @@
 #      rolled back;
 #   4. a good release with different units: installed with the binary
 #      (root 0644, systemd reloaded), confirmed;
-#   5. a hostile request (staged file a symlink to a root file): refused.
+#   5. a hostile request (staged file a symlink to a root file): refused;
+#   6. a broken release that trips systemd's start limit (unit failed,
+#      NRestarts frozen): rolled back within 30 s, restored agent running.
 #
 # The full flow with a panel (offer, download, rollout health gate,
 # installer) is akari-panel's smoke (M6 section).
@@ -254,7 +256,7 @@ rolled5 || fail "v900.0.5 not rolled back"
 dt=$((SECONDS - t0))
 [ "$dt" -lt 30 ] || fail "rollback took ${dt}s (the self-check timeout is minutes: the start limit was not detected)"
 ulog | grep -q 'start limit' || fail "rollback reason is not the start limit: $(ulog | tail -3)"
-x 'journalctl -u akari-agent -o cat --no-pager' | grep -q 'start-limit-hit\|start request repeated too quickly' \
+x 'journalctl -u akari-agent -o cat --no-pager' | grep -qi 'start-limit-hit\|start request repeated too quickly' \
   || fail "the start limit never tripped (test does not exercise the case)"
 x '/usr/local/bin/akari-agent -version' | grep -q 'akari-agent v900.0.3 ' || fail "not rolled back to v900.0.3"
 for _ in $(seq 1 20); do [ "$(x 'systemctl is-active akari-agent')" = active ] && break; sleep 0.5; done
