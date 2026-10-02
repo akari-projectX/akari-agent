@@ -23,8 +23,9 @@ type agentStats struct {
 // heartbeatLoop sends a Heartbeat every interval: CPU/memory, the gate's
 // connection and user counts, uptime, the lease, and the machine status
 // (W11, Heartbeat.metrics; smp keeps the previous readings for rates and
-// belongs to this loop while it runs).
-func heartbeatLoop(ctx context.Context, every time.Duration, send func(*pb.AgentUp) error, lease func() (time.Duration, bool), stats func() agentStats, smp *sampler) {
+// belongs to this loop while it runs). cert: the automatic certificate
+// (W10, Heartbeat.cert; nil = none).
+func heartbeatLoop(ctx context.Context, every time.Duration, send func(*pb.AgentUp) error, lease func() (time.Duration, bool), stats func() agentStats, smp *sampler, cert func() *pb.CertStatus) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
@@ -33,7 +34,11 @@ func heartbeatLoop(ctx context.Context, every time.Duration, send func(*pb.Agent
 			return
 		case <-ticker.C:
 		}
-		if err := send(&pb.AgentUp{Msg: &pb.AgentUp_Heartbeat{Heartbeat: buildHeartbeat(smp, stats(), lease)}}); err != nil {
+		hb := buildHeartbeat(smp, stats(), lease)
+		if cert != nil {
+			hb.Cert = cert()
+		}
+		if err := send(&pb.AgentUp{Msg: &pb.AgentUp_Heartbeat{Heartbeat: hb}}); err != nil {
 			return
 		}
 	}

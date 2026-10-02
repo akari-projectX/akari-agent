@@ -83,6 +83,141 @@ func (RemoveMode) EnumDescriptor() ([]byte, []int) {
 	return file_agent_proto_rawDescGZIP(), []int{0}
 }
 
+type CertStatus_State int32
+
+const (
+	CertStatus_STATE_UNSPECIFIED CertStatus_State = 0
+	// No certificate from the CA yet (first order running or backing off);
+	// TLS inbounds serve a self-signed placeholder meanwhile.
+	CertStatus_PENDING CertStatus_State = 1
+	// A CA-issued certificate for `domain` is served.
+	CertStatus_VALID CertStatus_State = 2
+	// The last order failed; a still valid older certificate (if any) is
+	// served until it expires (not_after).
+	CertStatus_FAILED CertStatus_State = 3
+)
+
+// Enum value maps for CertStatus_State.
+var (
+	CertStatus_State_name = map[int32]string{
+		0: "STATE_UNSPECIFIED",
+		1: "PENDING",
+		2: "VALID",
+		3: "FAILED",
+	}
+	CertStatus_State_value = map[string]int32{
+		"STATE_UNSPECIFIED": 0,
+		"PENDING":           1,
+		"VALID":             2,
+		"FAILED":            3,
+	}
+)
+
+func (x CertStatus_State) Enum() *CertStatus_State {
+	p := new(CertStatus_State)
+	*p = x
+	return p
+}
+
+func (x CertStatus_State) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CertStatus_State) Descriptor() protoreflect.EnumDescriptor {
+	return file_agent_proto_enumTypes[1].Descriptor()
+}
+
+func (CertStatus_State) Type() protoreflect.EnumType {
+	return &file_agent_proto_enumTypes[1]
+}
+
+func (x CertStatus_State) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CertStatus_State.Descriptor instead.
+func (CertStatus_State) EnumDescriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{6, 0}
+}
+
+// Classified cause of last_error, so the panel can say what to fix.
+type CertStatus_ErrorKind int32
+
+const (
+	CertStatus_ERROR_NONE  CertStatus_ErrorKind = 0
+	CertStatus_ERROR_OTHER CertStatus_ErrorKind = 1
+	// The CA could not resolve the domain (NXDOMAIN, no A/AAAA record).
+	CertStatus_ERROR_DNS CertStatus_ErrorKind = 2
+	// The CA could not connect to the node (wrong IP, firewall, port 80
+	// blocked) or got the wrong answer (the domain points elsewhere).
+	CertStatus_ERROR_CONNECTION CertStatus_ErrorKind = 3
+	// CA rate limit (Let's Encrypt: failed validations, certificates per
+	// domain, ...). The agent backs off at least an hour.
+	CertStatus_ERROR_RATE_LIMITED CertStatus_ErrorKind = 4
+	// Neither challenge port is usable on the node: TCP 80 is busy and
+	// 443 is busy or used by an inbound (see challenge).
+	CertStatus_ERROR_PORT_BUSY CertStatus_ErrorKind = 5
+	// A CAA record forbids the CA.
+	CertStatus_ERROR_CAA CertStatus_ErrorKind = 6
+	// The CA refuses the name (policy, blocklist, invalid name).
+	CertStatus_ERROR_REJECTED CertStatus_ErrorKind = 7
+	// The agent could not reach the ACME directory.
+	CertStatus_ERROR_CA_UNREACHABLE CertStatus_ErrorKind = 8
+)
+
+// Enum value maps for CertStatus_ErrorKind.
+var (
+	CertStatus_ErrorKind_name = map[int32]string{
+		0: "ERROR_NONE",
+		1: "ERROR_OTHER",
+		2: "ERROR_DNS",
+		3: "ERROR_CONNECTION",
+		4: "ERROR_RATE_LIMITED",
+		5: "ERROR_PORT_BUSY",
+		6: "ERROR_CAA",
+		7: "ERROR_REJECTED",
+		8: "ERROR_CA_UNREACHABLE",
+	}
+	CertStatus_ErrorKind_value = map[string]int32{
+		"ERROR_NONE":           0,
+		"ERROR_OTHER":          1,
+		"ERROR_DNS":            2,
+		"ERROR_CONNECTION":     3,
+		"ERROR_RATE_LIMITED":   4,
+		"ERROR_PORT_BUSY":      5,
+		"ERROR_CAA":            6,
+		"ERROR_REJECTED":       7,
+		"ERROR_CA_UNREACHABLE": 8,
+	}
+)
+
+func (x CertStatus_ErrorKind) Enum() *CertStatus_ErrorKind {
+	p := new(CertStatus_ErrorKind)
+	*p = x
+	return p
+}
+
+func (x CertStatus_ErrorKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CertStatus_ErrorKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_agent_proto_enumTypes[2].Descriptor()
+}
+
+func (CertStatus_ErrorKind) Type() protoreflect.EnumType {
+	return &file_agent_proto_enumTypes[2]
+}
+
+func (x CertStatus_ErrorKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CertStatus_ErrorKind.Descriptor instead.
+func (CertStatus_ErrorKind) EnumDescriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{6, 1}
+}
+
 type Ack_Reason int32
 
 const (
@@ -124,11 +259,11 @@ func (x Ack_Reason) String() string {
 }
 
 func (Ack_Reason) Descriptor() protoreflect.EnumDescriptor {
-	return file_agent_proto_enumTypes[1].Descriptor()
+	return file_agent_proto_enumTypes[3].Descriptor()
 }
 
 func (Ack_Reason) Type() protoreflect.EnumType {
-	return &file_agent_proto_enumTypes[1]
+	return &file_agent_proto_enumTypes[3]
 }
 
 func (x Ack_Reason) Number() protoreflect.EnumNumber {
@@ -137,7 +272,7 @@ func (x Ack_Reason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Ack_Reason.Descriptor instead.
 func (Ack_Reason) EnumDescriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{9, 0}
+	return file_agent_proto_rawDescGZIP(), []int{10, 0}
 }
 
 type UserOp_Op int32
@@ -170,11 +305,11 @@ func (x UserOp_Op) String() string {
 }
 
 func (UserOp_Op) Descriptor() protoreflect.EnumDescriptor {
-	return file_agent_proto_enumTypes[2].Descriptor()
+	return file_agent_proto_enumTypes[4].Descriptor()
 }
 
 func (UserOp_Op) Type() protoreflect.EnumType {
-	return &file_agent_proto_enumTypes[2]
+	return &file_agent_proto_enumTypes[4]
 }
 
 func (x UserOp_Op) Number() protoreflect.EnumNumber {
@@ -183,7 +318,7 @@ func (x UserOp_Op) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use UserOp_Op.Descriptor instead.
 func (UserOp_Op) EnumDescriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{15, 0}
+	return file_agent_proto_rawDescGZIP(), []int{16, 0}
 }
 
 type UpdateStatus_State int32
@@ -242,11 +377,11 @@ func (x UpdateStatus_State) String() string {
 }
 
 func (UpdateStatus_State) Descriptor() protoreflect.EnumDescriptor {
-	return file_agent_proto_enumTypes[3].Descriptor()
+	return file_agent_proto_enumTypes[5].Descriptor()
 }
 
 func (UpdateStatus_State) Type() protoreflect.EnumType {
-	return &file_agent_proto_enumTypes[3]
+	return &file_agent_proto_enumTypes[5]
 }
 
 func (x UpdateStatus_State) Number() protoreflect.EnumNumber {
@@ -255,7 +390,7 @@ func (x UpdateStatus_State) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use UpdateStatus_State.Descriptor instead.
 func (UpdateStatus_State) EnumDescriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{24, 0}
+	return file_agent_proto_rawDescGZIP(), []int{26, 0}
 }
 
 type EnrollRequest struct {
@@ -506,6 +641,10 @@ type Hello struct {
 	//       Rotations there stay Snapshots; what the agent cannot apply in
 	//       place (re-add with a new key, tombstone bound) it answers with
 	//       BASE_MISMATCH. Older agents get a Snapshot for any removal there.
+	//   6 = obtains and renews the node's TLS certificate itself over ACME
+	//       (ConfigSnapshot.acme) and reports it (Heartbeat.cert). Older
+	//       agents ignore both: they keep reading the node certificate files
+	//       the admin installs by hand (the panel flags such nodes).
 	ProtocolVersion uint32 `protobuf:"varint,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	// State hash of what the agent actually runs (see "State hash" below),
 	// for config_version + the applied user set. Empty for protocol 0.
@@ -613,6 +752,9 @@ type Heartbeat struct {
 	// Seconds left on the fail-closed lease (see LeaseGrant); unset while no
 	// lease is armed (no grant received since the agent started).
 	LeaseRemainingSeconds *uint64 `protobuf:"varint,6,opt,name=lease_remaining_seconds,json=leaseRemainingSeconds,proto3,oneof" json:"lease_remaining_seconds,omitempty"`
+	// ACME certificate state (protocol >= 6); unset while the panel asks for
+	// no automatic certificate (ConfigSnapshot.acme unset).
+	Cert *CertStatus `protobuf:"bytes,10,opt,name=cert,proto3" json:"cert,omitempty"`
 	// Machine status (W11, capability "metrics"); unset from older agents.
 	Metrics       *NodeMetrics `protobuf:"bytes,20,opt,name=metrics,proto3" json:"metrics,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -691,11 +833,134 @@ func (x *Heartbeat) GetLeaseRemainingSeconds() uint64 {
 	return 0
 }
 
+func (x *Heartbeat) GetCert() *CertStatus {
+	if x != nil {
+		return x.Cert
+	}
+	return nil
+}
+
 func (x *Heartbeat) GetMetrics() *NodeMetrics {
 	if x != nil {
 		return x.Metrics
 	}
 	return nil
+}
+
+// The automatic certificate as the agent sees it (protocol >= 6). Sent on
+// every heartbeat while ConfigSnapshot.acme is set.
+type CertStatus struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Domain string                 `protobuf:"bytes,1,opt,name=domain,proto3" json:"domain,omitempty"`
+	State  CertStatus_State       `protobuf:"varint,2,opt,name=state,proto3,enum=akari.v1.CertStatus_State" json:"state,omitempty"`
+	// Validity of the served CA-issued certificate (unix seconds); 0 = none.
+	NotAfter int64 `protobuf:"varint,3,opt,name=not_after,json=notAfter,proto3" json:"not_after,omitempty"`
+	// When the agent next orders (renewal, or the retry after a failure);
+	// unix seconds, 0 = unknown.
+	NextAttempt int64 `protobuf:"varint,4,opt,name=next_attempt,json=nextAttempt,proto3" json:"next_attempt,omitempty"`
+	// Last failure (empty after a success), English, <= 512 bytes.
+	LastError   string               `protobuf:"bytes,5,opt,name=last_error,json=lastError,proto3" json:"last_error,omitempty"`
+	ErrorKind   CertStatus_ErrorKind `protobuf:"varint,6,opt,name=error_kind,json=errorKind,proto3,enum=akari.v1.CertStatus_ErrorKind" json:"error_kind,omitempty"`
+	LastErrorAt int64                `protobuf:"varint,7,opt,name=last_error_at,json=lastErrorAt,proto3" json:"last_error_at,omitempty"` // unix seconds
+	// Challenge used by the last order: "http-01" | "tls-alpn-01" | "".
+	Challenge string `protobuf:"bytes,8,opt,name=challenge,proto3" json:"challenge,omitempty"`
+	// Consecutive failed orders (reset by a success).
+	Failures      uint32 `protobuf:"varint,9,opt,name=failures,proto3" json:"failures,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CertStatus) Reset() {
+	*x = CertStatus{}
+	mi := &file_agent_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CertStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CertStatus) ProtoMessage() {}
+
+func (x *CertStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CertStatus.ProtoReflect.Descriptor instead.
+func (*CertStatus) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *CertStatus) GetDomain() string {
+	if x != nil {
+		return x.Domain
+	}
+	return ""
+}
+
+func (x *CertStatus) GetState() CertStatus_State {
+	if x != nil {
+		return x.State
+	}
+	return CertStatus_STATE_UNSPECIFIED
+}
+
+func (x *CertStatus) GetNotAfter() int64 {
+	if x != nil {
+		return x.NotAfter
+	}
+	return 0
+}
+
+func (x *CertStatus) GetNextAttempt() int64 {
+	if x != nil {
+		return x.NextAttempt
+	}
+	return 0
+}
+
+func (x *CertStatus) GetLastError() string {
+	if x != nil {
+		return x.LastError
+	}
+	return ""
+}
+
+func (x *CertStatus) GetErrorKind() CertStatus_ErrorKind {
+	if x != nil {
+		return x.ErrorKind
+	}
+	return CertStatus_ERROR_NONE
+}
+
+func (x *CertStatus) GetLastErrorAt() int64 {
+	if x != nil {
+		return x.LastErrorAt
+	}
+	return 0
+}
+
+func (x *CertStatus) GetChallenge() string {
+	if x != nil {
+		return x.Challenge
+	}
+	return ""
+}
+
+func (x *CertStatus) GetFailures() uint32 {
+	if x != nil {
+		return x.Failures
+	}
+	return 0
 }
 
 // Machine status sampled at each heartbeat (W11). Linux /proc and statfs;
@@ -734,7 +999,7 @@ type NodeMetrics struct {
 
 func (x *NodeMetrics) Reset() {
 	*x = NodeMetrics{}
-	mi := &file_agent_proto_msgTypes[6]
+	mi := &file_agent_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -746,7 +1011,7 @@ func (x *NodeMetrics) String() string {
 func (*NodeMetrics) ProtoMessage() {}
 
 func (x *NodeMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[6]
+	mi := &file_agent_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -759,7 +1024,7 @@ func (x *NodeMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeMetrics.ProtoReflect.Descriptor instead.
 func (*NodeMetrics) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{6}
+	return file_agent_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *NodeMetrics) GetLoad1() float64 {
@@ -899,7 +1164,7 @@ type UserTraffic struct {
 
 func (x *UserTraffic) Reset() {
 	*x = UserTraffic{}
-	mi := &file_agent_proto_msgTypes[7]
+	mi := &file_agent_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -911,7 +1176,7 @@ func (x *UserTraffic) String() string {
 func (*UserTraffic) ProtoMessage() {}
 
 func (x *UserTraffic) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[7]
+	mi := &file_agent_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -924,7 +1189,7 @@ func (x *UserTraffic) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserTraffic.ProtoReflect.Descriptor instead.
 func (*UserTraffic) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{7}
+	return file_agent_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *UserTraffic) GetUserId() string {
@@ -962,7 +1227,7 @@ type TrafficReport struct {
 
 func (x *TrafficReport) Reset() {
 	*x = TrafficReport{}
-	mi := &file_agent_proto_msgTypes[8]
+	mi := &file_agent_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -974,7 +1239,7 @@ func (x *TrafficReport) String() string {
 func (*TrafficReport) ProtoMessage() {}
 
 func (x *TrafficReport) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[8]
+	mi := &file_agent_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -987,7 +1252,7 @@ func (x *TrafficReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrafficReport.ProtoReflect.Descriptor instead.
 func (*TrafficReport) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{8}
+	return file_agent_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *TrafficReport) GetUsers() []*UserTraffic {
@@ -1032,7 +1297,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_agent_proto_msgTypes[9]
+	mi := &file_agent_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1044,7 +1309,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[9]
+	mi := &file_agent_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1057,7 +1322,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{9}
+	return file_agent_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Ack) GetConfigVersion() uint64 {
@@ -1133,7 +1398,7 @@ type AgentUp struct {
 
 func (x *AgentUp) Reset() {
 	*x = AgentUp{}
-	mi := &file_agent_proto_msgTypes[10]
+	mi := &file_agent_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1145,7 +1410,7 @@ func (x *AgentUp) String() string {
 func (*AgentUp) ProtoMessage() {}
 
 func (x *AgentUp) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[10]
+	mi := &file_agent_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1158,7 +1423,7 @@ func (x *AgentUp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentUp.ProtoReflect.Descriptor instead.
 func (*AgentUp) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{10}
+	return file_agent_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *AgentUp) GetMsg() isAgentUp_Msg {
@@ -1287,7 +1552,7 @@ type LatencyProbeConfig struct {
 
 func (x *LatencyProbeConfig) Reset() {
 	*x = LatencyProbeConfig{}
-	mi := &file_agent_proto_msgTypes[11]
+	mi := &file_agent_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1299,7 +1564,7 @@ func (x *LatencyProbeConfig) String() string {
 func (*LatencyProbeConfig) ProtoMessage() {}
 
 func (x *LatencyProbeConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[11]
+	mi := &file_agent_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1312,7 +1577,7 @@ func (x *LatencyProbeConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LatencyProbeConfig.ProtoReflect.Descriptor instead.
 func (*LatencyProbeConfig) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{11}
+	return file_agent_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *LatencyProbeConfig) GetIntervalSeconds() uint32 {
@@ -1365,7 +1630,7 @@ type UrlLatency struct {
 
 func (x *UrlLatency) Reset() {
 	*x = UrlLatency{}
-	mi := &file_agent_proto_msgTypes[12]
+	mi := &file_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1377,7 +1642,7 @@ func (x *UrlLatency) String() string {
 func (*UrlLatency) ProtoMessage() {}
 
 func (x *UrlLatency) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[12]
+	mi := &file_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1390,7 +1655,7 @@ func (x *UrlLatency) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UrlLatency.ProtoReflect.Descriptor instead.
 func (*UrlLatency) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{12}
+	return file_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *UrlLatency) GetUrl() string {
@@ -1443,7 +1708,7 @@ type LatencyReport struct {
 
 func (x *LatencyReport) Reset() {
 	*x = LatencyReport{}
-	mi := &file_agent_proto_msgTypes[13]
+	mi := &file_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1455,7 +1720,7 @@ func (x *LatencyReport) String() string {
 func (*LatencyReport) ProtoMessage() {}
 
 func (x *LatencyReport) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[13]
+	mi := &file_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1468,7 +1733,7 @@ func (x *LatencyReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LatencyReport.ProtoReflect.Descriptor instead.
 func (*LatencyReport) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{13}
+	return file_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *LatencyReport) GetResults() []*UrlLatency {
@@ -1507,7 +1772,7 @@ type InboundUser struct {
 
 func (x *InboundUser) Reset() {
 	*x = InboundUser{}
-	mi := &file_agent_proto_msgTypes[14]
+	mi := &file_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1519,7 +1784,7 @@ func (x *InboundUser) String() string {
 func (*InboundUser) ProtoMessage() {}
 
 func (x *InboundUser) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[14]
+	mi := &file_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1532,7 +1797,7 @@ func (x *InboundUser) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InboundUser.ProtoReflect.Descriptor instead.
 func (*InboundUser) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{14}
+	return file_agent_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *InboundUser) GetInboundTag() string {
@@ -1582,7 +1847,7 @@ type UserOp struct {
 
 func (x *UserOp) Reset() {
 	*x = UserOp{}
-	mi := &file_agent_proto_msgTypes[15]
+	mi := &file_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1594,7 +1859,7 @@ func (x *UserOp) String() string {
 func (*UserOp) ProtoMessage() {}
 
 func (x *UserOp) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[15]
+	mi := &file_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1607,7 +1872,7 @@ func (x *UserOp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserOp.ProtoReflect.Descriptor instead.
 func (*UserOp) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{15}
+	return file_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *UserOp) GetOp() UserOp_Op {
@@ -1647,13 +1912,18 @@ type ConfigSnapshot struct {
 	InboundsJson  string                 `protobuf:"bytes,2,opt,name=inbounds_json,json=inboundsJson,proto3" json:"inbounds_json,omitempty"` // xray "inbounds" array JSON
 	UserVersion   uint64                 `protobuf:"varint,3,opt,name=user_version,json=userVersion,proto3" json:"user_version,omitempty"`
 	Users         []*UserOp              `protobuf:"bytes,4,rep,name=users,proto3" json:"users,omitempty"` // complete desired user set
+	// Automatic certificate for the node's TLS domain (protocol >= 6). Not
+	// part of the state hash: a change of the domain bumps config_version, so
+	// it always arrives with a Snapshot. Unset = no automatic certificate
+	// (inbounds read the files the admin installs, as before).
+	Acme          *AcmeConfig `protobuf:"bytes,10,opt,name=acme,proto3" json:"acme,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ConfigSnapshot) Reset() {
 	*x = ConfigSnapshot{}
-	mi := &file_agent_proto_msgTypes[16]
+	mi := &file_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1665,7 +1935,7 @@ func (x *ConfigSnapshot) String() string {
 func (*ConfigSnapshot) ProtoMessage() {}
 
 func (x *ConfigSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[16]
+	mi := &file_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1678,7 +1948,7 @@ func (x *ConfigSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigSnapshot.ProtoReflect.Descriptor instead.
 func (*ConfigSnapshot) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{16}
+	return file_agent_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ConfigSnapshot) GetConfigVersion() uint64 {
@@ -1709,6 +1979,86 @@ func (x *ConfigSnapshot) GetUsers() []*UserOp {
 	return nil
 }
 
+func (x *ConfigSnapshot) GetAcme() *AcmeConfig {
+	if x != nil {
+		return x.Acme
+	}
+	return nil
+}
+
+// ACME (RFC 8555) certificate the agent obtains and renews itself (protocol
+// >= 6). Every TLS certificate entry in inbounds_json whose certificateFile
+// and keyFile are the node certificate files
+//
+//	/run/credentials/akari-agent.service/tls_fullchain.pem
+//	/run/credentials/akari-agent.service/tls_privkey.pem
+//
+// is served this certificate instead (the agent rewrites the paths to its
+// own store before building xray; inbounds_json stays hashed verbatim).
+// Challenges: HTTP-01 on TCP 80 when that port is free, else TLS-ALPN-01 on
+// TCP 443 when no inbound uses it and it is free; DNS-01 is not supported.
+// Renewal starts with a third of the validity left (with jitter) and is
+// picked up by xray without a rebuild; failures back off exponentially.
+type AcmeConfig struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Domain        string                 `protobuf:"bytes,1,opt,name=domain,proto3" json:"domain,omitempty"`                                 // lowercase DNS name (no wildcard, no IP)
+	DirectoryUrl  string                 `protobuf:"bytes,2,opt,name=directory_url,json=directoryUrl,proto3" json:"directory_url,omitempty"` // ACME directory; "" = Let's Encrypt production
+	Email         string                 `protobuf:"bytes,3,opt,name=email,proto3" json:"email,omitempty"`                                   // optional account contact
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AcmeConfig) Reset() {
+	*x = AcmeConfig{}
+	mi := &file_agent_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AcmeConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AcmeConfig) ProtoMessage() {}
+
+func (x *AcmeConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AcmeConfig.ProtoReflect.Descriptor instead.
+func (*AcmeConfig) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *AcmeConfig) GetDomain() string {
+	if x != nil {
+		return x.Domain
+	}
+	return ""
+}
+
+func (x *AcmeConfig) GetDirectoryUrl() string {
+	if x != nil {
+		return x.DirectoryUrl
+	}
+	return ""
+}
+
+func (x *AcmeConfig) GetEmail() string {
+	if x != nil {
+		return x.Email
+	}
+	return ""
+}
+
 // Incremental user-set change (protocol >= 1). Applies only on top of
 // base: the agent applies it iff it holds exactly (base_config_version,
 // base_user_version); if it already holds the target (config_version,
@@ -1731,7 +2081,7 @@ type UserDelta struct {
 
 func (x *UserDelta) Reset() {
 	*x = UserDelta{}
-	mi := &file_agent_proto_msgTypes[17]
+	mi := &file_agent_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1743,7 +2093,7 @@ func (x *UserDelta) String() string {
 func (*UserDelta) ProtoMessage() {}
 
 func (x *UserDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[17]
+	mi := &file_agent_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1756,7 +2106,7 @@ func (x *UserDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserDelta.ProtoReflect.Descriptor instead.
 func (*UserDelta) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{17}
+	return file_agent_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *UserDelta) GetUserVersion() uint64 {
@@ -1814,7 +2164,7 @@ type LeaseGrant struct {
 
 func (x *LeaseGrant) Reset() {
 	*x = LeaseGrant{}
-	mi := &file_agent_proto_msgTypes[18]
+	mi := &file_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1826,7 +2176,7 @@ func (x *LeaseGrant) String() string {
 func (*LeaseGrant) ProtoMessage() {}
 
 func (x *LeaseGrant) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[18]
+	mi := &file_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1839,7 +2189,7 @@ func (x *LeaseGrant) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LeaseGrant.ProtoReflect.Descriptor instead.
 func (*LeaseGrant) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{18}
+	return file_agent_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *LeaseGrant) GetDurationSeconds() uint64 {
@@ -1864,7 +2214,7 @@ type Noop struct {
 
 func (x *Noop) Reset() {
 	*x = Noop{}
-	mi := &file_agent_proto_msgTypes[19]
+	mi := &file_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1876,7 +2226,7 @@ func (x *Noop) String() string {
 func (*Noop) ProtoMessage() {}
 
 func (x *Noop) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[19]
+	mi := &file_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1889,7 +2239,7 @@ func (x *Noop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Noop.ProtoReflect.Descriptor instead.
 func (*Noop) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{19}
+	return file_agent_proto_rawDescGZIP(), []int{21}
 }
 
 // --- Agent self-update (protocol >= 3, M6) --------------------------------
@@ -1925,7 +2275,7 @@ type ManifestSignature struct {
 
 func (x *ManifestSignature) Reset() {
 	*x = ManifestSignature{}
-	mi := &file_agent_proto_msgTypes[20]
+	mi := &file_agent_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1937,7 +2287,7 @@ func (x *ManifestSignature) String() string {
 func (*ManifestSignature) ProtoMessage() {}
 
 func (x *ManifestSignature) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[20]
+	mi := &file_agent_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1950,7 +2300,7 @@ func (x *ManifestSignature) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ManifestSignature.ProtoReflect.Descriptor instead.
 func (*ManifestSignature) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{20}
+	return file_agent_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ManifestSignature) GetKeyId() string {
@@ -1986,7 +2336,7 @@ type UpdateOffer struct {
 
 func (x *UpdateOffer) Reset() {
 	*x = UpdateOffer{}
-	mi := &file_agent_proto_msgTypes[21]
+	mi := &file_agent_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1998,7 +2348,7 @@ func (x *UpdateOffer) String() string {
 func (*UpdateOffer) ProtoMessage() {}
 
 func (x *UpdateOffer) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[21]
+	mi := &file_agent_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2011,7 +2361,7 @@ func (x *UpdateOffer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateOffer.ProtoReflect.Descriptor instead.
 func (*UpdateOffer) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{21}
+	return file_agent_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *UpdateOffer) GetRolloutId() string {
@@ -2052,7 +2402,7 @@ type FetchArtifactRequest struct {
 
 func (x *FetchArtifactRequest) Reset() {
 	*x = FetchArtifactRequest{}
-	mi := &file_agent_proto_msgTypes[22]
+	mi := &file_agent_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2064,7 +2414,7 @@ func (x *FetchArtifactRequest) String() string {
 func (*FetchArtifactRequest) ProtoMessage() {}
 
 func (x *FetchArtifactRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[22]
+	mi := &file_agent_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2077,7 +2427,7 @@ func (x *FetchArtifactRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchArtifactRequest.ProtoReflect.Descriptor instead.
 func (*FetchArtifactRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{22}
+	return file_agent_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *FetchArtifactRequest) GetSha256() string {
@@ -2103,7 +2453,7 @@ type ArtifactChunk struct {
 
 func (x *ArtifactChunk) Reset() {
 	*x = ArtifactChunk{}
-	mi := &file_agent_proto_msgTypes[23]
+	mi := &file_agent_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2115,7 +2465,7 @@ func (x *ArtifactChunk) String() string {
 func (*ArtifactChunk) ProtoMessage() {}
 
 func (x *ArtifactChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[23]
+	mi := &file_agent_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2128,7 +2478,7 @@ func (x *ArtifactChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactChunk.ProtoReflect.Descriptor instead.
 func (*ArtifactChunk) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{23}
+	return file_agent_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *ArtifactChunk) GetData() []byte {
@@ -2154,7 +2504,7 @@ type UpdateStatus struct {
 
 func (x *UpdateStatus) Reset() {
 	*x = UpdateStatus{}
-	mi := &file_agent_proto_msgTypes[24]
+	mi := &file_agent_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2166,7 +2516,7 @@ func (x *UpdateStatus) String() string {
 func (*UpdateStatus) ProtoMessage() {}
 
 func (x *UpdateStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[24]
+	mi := &file_agent_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2179,7 +2529,7 @@ func (x *UpdateStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateStatus.ProtoReflect.Descriptor instead.
 func (*UpdateStatus) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{24}
+	return file_agent_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *UpdateStatus) GetRolloutId() string {
@@ -2227,7 +2577,7 @@ type PanelDown struct {
 
 func (x *PanelDown) Reset() {
 	*x = PanelDown{}
-	mi := &file_agent_proto_msgTypes[25]
+	mi := &file_agent_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2239,7 +2589,7 @@ func (x *PanelDown) String() string {
 func (*PanelDown) ProtoMessage() {}
 
 func (x *PanelDown) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[25]
+	mi := &file_agent_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2252,7 +2602,7 @@ func (x *PanelDown) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PanelDown.ProtoReflect.Descriptor instead.
 func (*PanelDown) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{25}
+	return file_agent_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *PanelDown) GetMsg() isPanelDown_Msg {
@@ -2383,7 +2733,7 @@ const file_agent_proto_rawDesc = "" +
 	"\x10protocol_version\x18\x05 \x01(\rR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +
 	"state_hash\x18\x06 \x01(\tR\tstateHash\x12\"\n" +
-	"\fcapabilities\x18\x14 \x03(\tR\fcapabilities\"\xcd\x02\n" +
+	"\fcapabilities\x18\x14 \x03(\tR\fcapabilities\"\xf7\x02\n" +
 	"\tHeartbeat\x12\x1f\n" +
 	"\vcpu_percent\x18\x01 \x01(\x01R\n" +
 	"cpuPercent\x12$\n" +
@@ -2391,9 +2741,41 @@ const file_agent_proto_rawDesc = "" +
 	"\x0fmem_total_bytes\x18\x03 \x01(\x04R\rmemTotalBytes\x12 \n" +
 	"\vconnections\x18\x04 \x01(\x04R\vconnections\x12%\n" +
 	"\x0euptime_seconds\x18\x05 \x01(\x04R\ruptimeSeconds\x12;\n" +
-	"\x17lease_remaining_seconds\x18\x06 \x01(\x04H\x00R\x15leaseRemainingSeconds\x88\x01\x01\x12/\n" +
+	"\x17lease_remaining_seconds\x18\x06 \x01(\x04H\x00R\x15leaseRemainingSeconds\x88\x01\x01\x12(\n" +
+	"\x04cert\x18\n" +
+	" \x01(\v2\x14.akari.v1.CertStatusR\x04cert\x12/\n" +
 	"\ametrics\x18\x14 \x01(\v2\x15.akari.v1.NodeMetricsR\ametricsB\x1a\n" +
-	"\x18_lease_remaining_seconds\"\xa5\x05\n" +
+	"\x18_lease_remaining_seconds\"\xd4\x04\n" +
+	"\n" +
+	"CertStatus\x12\x16\n" +
+	"\x06domain\x18\x01 \x01(\tR\x06domain\x120\n" +
+	"\x05state\x18\x02 \x01(\x0e2\x1a.akari.v1.CertStatus.StateR\x05state\x12\x1b\n" +
+	"\tnot_after\x18\x03 \x01(\x03R\bnotAfter\x12!\n" +
+	"\fnext_attempt\x18\x04 \x01(\x03R\vnextAttempt\x12\x1d\n" +
+	"\n" +
+	"last_error\x18\x05 \x01(\tR\tlastError\x12=\n" +
+	"\n" +
+	"error_kind\x18\x06 \x01(\x0e2\x1e.akari.v1.CertStatus.ErrorKindR\terrorKind\x12\"\n" +
+	"\rlast_error_at\x18\a \x01(\x03R\vlastErrorAt\x12\x1c\n" +
+	"\tchallenge\x18\b \x01(\tR\tchallenge\x12\x1a\n" +
+	"\bfailures\x18\t \x01(\rR\bfailures\"B\n" +
+	"\x05State\x12\x15\n" +
+	"\x11STATE_UNSPECIFIED\x10\x00\x12\v\n" +
+	"\aPENDING\x10\x01\x12\t\n" +
+	"\x05VALID\x10\x02\x12\n" +
+	"\n" +
+	"\x06FAILED\x10\x03\"\xbb\x01\n" +
+	"\tErrorKind\x12\x0e\n" +
+	"\n" +
+	"ERROR_NONE\x10\x00\x12\x0f\n" +
+	"\vERROR_OTHER\x10\x01\x12\r\n" +
+	"\tERROR_DNS\x10\x02\x12\x14\n" +
+	"\x10ERROR_CONNECTION\x10\x03\x12\x16\n" +
+	"\x12ERROR_RATE_LIMITED\x10\x04\x12\x13\n" +
+	"\x0fERROR_PORT_BUSY\x10\x05\x12\r\n" +
+	"\tERROR_CAA\x10\x06\x12\x12\n" +
+	"\x0eERROR_REJECTED\x10\a\x12\x18\n" +
+	"\x14ERROR_CA_UNREACHABLE\x10\b\"\xa5\x05\n" +
 	"\vNodeMetrics\x12\x14\n" +
 	"\x05load1\x18\x01 \x01(\x01R\x05load1\x12\x14\n" +
 	"\x05load5\x18\x02 \x01(\x01R\x05load5\x12\x16\n" +
@@ -2481,12 +2863,19 @@ const file_agent_proto_rawDesc = "" +
 	"\x02Op\x12\a\n" +
 	"\x03ADD\x10\x00\x12\n" +
 	"\n" +
-	"\x06REMOVE\x10\x01\"\xa7\x01\n" +
+	"\x06REMOVE\x10\x01\"\xd1\x01\n" +
 	"\x0eConfigSnapshot\x12%\n" +
 	"\x0econfig_version\x18\x01 \x01(\x04R\rconfigVersion\x12#\n" +
 	"\rinbounds_json\x18\x02 \x01(\tR\finboundsJson\x12!\n" +
 	"\fuser_version\x18\x03 \x01(\x04R\vuserVersion\x12&\n" +
-	"\x05users\x18\x04 \x03(\v2\x10.akari.v1.UserOpR\x05users\"\xd5\x01\n" +
+	"\x05users\x18\x04 \x03(\v2\x10.akari.v1.UserOpR\x05users\x12(\n" +
+	"\x04acme\x18\n" +
+	" \x01(\v2\x14.akari.v1.AcmeConfigR\x04acme\"_\n" +
+	"\n" +
+	"AcmeConfig\x12\x16\n" +
+	"\x06domain\x18\x01 \x01(\tR\x06domain\x12#\n" +
+	"\rdirectory_url\x18\x02 \x01(\tR\fdirectoryUrl\x12\x14\n" +
+	"\x05email\x18\x03 \x01(\tR\x05email\"\xd5\x01\n" +
 	"\tUserDelta\x12!\n" +
 	"\fuser_version\x18\x01 \x01(\x04R\vuserVersion\x12\"\n" +
 	"\x03ops\x18\x02 \x03(\v2\x10.akari.v1.UserOpR\x03ops\x12.\n" +
@@ -2560,78 +2949,86 @@ func file_agent_proto_rawDescGZIP() []byte {
 	return file_agent_proto_rawDescData
 }
 
-var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
+var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
+var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_agent_proto_goTypes = []any{
 	(RemoveMode)(0),              // 0: akari.v1.RemoveMode
-	(Ack_Reason)(0),              // 1: akari.v1.Ack.Reason
-	(UserOp_Op)(0),               // 2: akari.v1.UserOp.Op
-	(UpdateStatus_State)(0),      // 3: akari.v1.UpdateStatus.State
-	(*EnrollRequest)(nil),        // 4: akari.v1.EnrollRequest
-	(*RenewRequest)(nil),         // 5: akari.v1.RenewRequest
-	(*IssuedCertificate)(nil),    // 6: akari.v1.IssuedCertificate
-	(*AgentInfo)(nil),            // 7: akari.v1.AgentInfo
-	(*Hello)(nil),                // 8: akari.v1.Hello
-	(*Heartbeat)(nil),            // 9: akari.v1.Heartbeat
-	(*NodeMetrics)(nil),          // 10: akari.v1.NodeMetrics
-	(*UserTraffic)(nil),          // 11: akari.v1.UserTraffic
-	(*TrafficReport)(nil),        // 12: akari.v1.TrafficReport
-	(*Ack)(nil),                  // 13: akari.v1.Ack
-	(*AgentUp)(nil),              // 14: akari.v1.AgentUp
-	(*LatencyProbeConfig)(nil),   // 15: akari.v1.LatencyProbeConfig
-	(*UrlLatency)(nil),           // 16: akari.v1.UrlLatency
-	(*LatencyReport)(nil),        // 17: akari.v1.LatencyReport
-	(*InboundUser)(nil),          // 18: akari.v1.InboundUser
-	(*UserOp)(nil),               // 19: akari.v1.UserOp
-	(*ConfigSnapshot)(nil),       // 20: akari.v1.ConfigSnapshot
-	(*UserDelta)(nil),            // 21: akari.v1.UserDelta
-	(*LeaseGrant)(nil),           // 22: akari.v1.LeaseGrant
-	(*Noop)(nil),                 // 23: akari.v1.Noop
-	(*ManifestSignature)(nil),    // 24: akari.v1.ManifestSignature
-	(*UpdateOffer)(nil),          // 25: akari.v1.UpdateOffer
-	(*FetchArtifactRequest)(nil), // 26: akari.v1.FetchArtifactRequest
-	(*ArtifactChunk)(nil),        // 27: akari.v1.ArtifactChunk
-	(*UpdateStatus)(nil),         // 28: akari.v1.UpdateStatus
-	(*PanelDown)(nil),            // 29: akari.v1.PanelDown
+	(CertStatus_State)(0),        // 1: akari.v1.CertStatus.State
+	(CertStatus_ErrorKind)(0),    // 2: akari.v1.CertStatus.ErrorKind
+	(Ack_Reason)(0),              // 3: akari.v1.Ack.Reason
+	(UserOp_Op)(0),               // 4: akari.v1.UserOp.Op
+	(UpdateStatus_State)(0),      // 5: akari.v1.UpdateStatus.State
+	(*EnrollRequest)(nil),        // 6: akari.v1.EnrollRequest
+	(*RenewRequest)(nil),         // 7: akari.v1.RenewRequest
+	(*IssuedCertificate)(nil),    // 8: akari.v1.IssuedCertificate
+	(*AgentInfo)(nil),            // 9: akari.v1.AgentInfo
+	(*Hello)(nil),                // 10: akari.v1.Hello
+	(*Heartbeat)(nil),            // 11: akari.v1.Heartbeat
+	(*CertStatus)(nil),           // 12: akari.v1.CertStatus
+	(*NodeMetrics)(nil),          // 13: akari.v1.NodeMetrics
+	(*UserTraffic)(nil),          // 14: akari.v1.UserTraffic
+	(*TrafficReport)(nil),        // 15: akari.v1.TrafficReport
+	(*Ack)(nil),                  // 16: akari.v1.Ack
+	(*AgentUp)(nil),              // 17: akari.v1.AgentUp
+	(*LatencyProbeConfig)(nil),   // 18: akari.v1.LatencyProbeConfig
+	(*UrlLatency)(nil),           // 19: akari.v1.UrlLatency
+	(*LatencyReport)(nil),        // 20: akari.v1.LatencyReport
+	(*InboundUser)(nil),          // 21: akari.v1.InboundUser
+	(*UserOp)(nil),               // 22: akari.v1.UserOp
+	(*ConfigSnapshot)(nil),       // 23: akari.v1.ConfigSnapshot
+	(*AcmeConfig)(nil),           // 24: akari.v1.AcmeConfig
+	(*UserDelta)(nil),            // 25: akari.v1.UserDelta
+	(*LeaseGrant)(nil),           // 26: akari.v1.LeaseGrant
+	(*Noop)(nil),                 // 27: akari.v1.Noop
+	(*ManifestSignature)(nil),    // 28: akari.v1.ManifestSignature
+	(*UpdateOffer)(nil),          // 29: akari.v1.UpdateOffer
+	(*FetchArtifactRequest)(nil), // 30: akari.v1.FetchArtifactRequest
+	(*ArtifactChunk)(nil),        // 31: akari.v1.ArtifactChunk
+	(*UpdateStatus)(nil),         // 32: akari.v1.UpdateStatus
+	(*PanelDown)(nil),            // 33: akari.v1.PanelDown
 }
 var file_agent_proto_depIdxs = []int32{
-	7,  // 0: akari.v1.Hello.info:type_name -> akari.v1.AgentInfo
-	10, // 1: akari.v1.Heartbeat.metrics:type_name -> akari.v1.NodeMetrics
-	11, // 2: akari.v1.TrafficReport.users:type_name -> akari.v1.UserTraffic
-	1,  // 3: akari.v1.Ack.reason:type_name -> akari.v1.Ack.Reason
-	8,  // 4: akari.v1.AgentUp.hello:type_name -> akari.v1.Hello
-	9,  // 5: akari.v1.AgentUp.heartbeat:type_name -> akari.v1.Heartbeat
-	12, // 6: akari.v1.AgentUp.traffic:type_name -> akari.v1.TrafficReport
-	13, // 7: akari.v1.AgentUp.ack:type_name -> akari.v1.Ack
-	28, // 8: akari.v1.AgentUp.update_status:type_name -> akari.v1.UpdateStatus
-	17, // 9: akari.v1.AgentUp.latency:type_name -> akari.v1.LatencyReport
-	16, // 10: akari.v1.LatencyReport.results:type_name -> akari.v1.UrlLatency
-	2,  // 11: akari.v1.UserOp.op:type_name -> akari.v1.UserOp.Op
-	18, // 12: akari.v1.UserOp.inbound_users:type_name -> akari.v1.InboundUser
-	19, // 13: akari.v1.ConfigSnapshot.users:type_name -> akari.v1.UserOp
-	19, // 14: akari.v1.UserDelta.ops:type_name -> akari.v1.UserOp
-	0,  // 15: akari.v1.LeaseGrant.remove_mode:type_name -> akari.v1.RemoveMode
-	24, // 16: akari.v1.UpdateOffer.signatures:type_name -> akari.v1.ManifestSignature
-	3,  // 17: akari.v1.UpdateStatus.state:type_name -> akari.v1.UpdateStatus.State
-	20, // 18: akari.v1.PanelDown.snapshot:type_name -> akari.v1.ConfigSnapshot
-	21, // 19: akari.v1.PanelDown.delta:type_name -> akari.v1.UserDelta
-	23, // 20: akari.v1.PanelDown.noop:type_name -> akari.v1.Noop
-	22, // 21: akari.v1.PanelDown.lease:type_name -> akari.v1.LeaseGrant
-	25, // 22: akari.v1.PanelDown.update_offer:type_name -> akari.v1.UpdateOffer
-	15, // 23: akari.v1.PanelDown.latency_probe:type_name -> akari.v1.LatencyProbeConfig
-	14, // 24: akari.v1.AgentChannel.OpenChannel:input_type -> akari.v1.AgentUp
-	5,  // 25: akari.v1.AgentChannel.Renew:input_type -> akari.v1.RenewRequest
-	26, // 26: akari.v1.AgentChannel.FetchArtifact:input_type -> akari.v1.FetchArtifactRequest
-	4,  // 27: akari.v1.AgentEnrollment.Enroll:input_type -> akari.v1.EnrollRequest
-	29, // 28: akari.v1.AgentChannel.OpenChannel:output_type -> akari.v1.PanelDown
-	6,  // 29: akari.v1.AgentChannel.Renew:output_type -> akari.v1.IssuedCertificate
-	27, // 30: akari.v1.AgentChannel.FetchArtifact:output_type -> akari.v1.ArtifactChunk
-	6,  // 31: akari.v1.AgentEnrollment.Enroll:output_type -> akari.v1.IssuedCertificate
-	28, // [28:32] is the sub-list for method output_type
-	24, // [24:28] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	9,  // 0: akari.v1.Hello.info:type_name -> akari.v1.AgentInfo
+	12, // 1: akari.v1.Heartbeat.cert:type_name -> akari.v1.CertStatus
+	13, // 2: akari.v1.Heartbeat.metrics:type_name -> akari.v1.NodeMetrics
+	1,  // 3: akari.v1.CertStatus.state:type_name -> akari.v1.CertStatus.State
+	2,  // 4: akari.v1.CertStatus.error_kind:type_name -> akari.v1.CertStatus.ErrorKind
+	14, // 5: akari.v1.TrafficReport.users:type_name -> akari.v1.UserTraffic
+	3,  // 6: akari.v1.Ack.reason:type_name -> akari.v1.Ack.Reason
+	10, // 7: akari.v1.AgentUp.hello:type_name -> akari.v1.Hello
+	11, // 8: akari.v1.AgentUp.heartbeat:type_name -> akari.v1.Heartbeat
+	15, // 9: akari.v1.AgentUp.traffic:type_name -> akari.v1.TrafficReport
+	16, // 10: akari.v1.AgentUp.ack:type_name -> akari.v1.Ack
+	32, // 11: akari.v1.AgentUp.update_status:type_name -> akari.v1.UpdateStatus
+	20, // 12: akari.v1.AgentUp.latency:type_name -> akari.v1.LatencyReport
+	19, // 13: akari.v1.LatencyReport.results:type_name -> akari.v1.UrlLatency
+	4,  // 14: akari.v1.UserOp.op:type_name -> akari.v1.UserOp.Op
+	21, // 15: akari.v1.UserOp.inbound_users:type_name -> akari.v1.InboundUser
+	22, // 16: akari.v1.ConfigSnapshot.users:type_name -> akari.v1.UserOp
+	24, // 17: akari.v1.ConfigSnapshot.acme:type_name -> akari.v1.AcmeConfig
+	22, // 18: akari.v1.UserDelta.ops:type_name -> akari.v1.UserOp
+	0,  // 19: akari.v1.LeaseGrant.remove_mode:type_name -> akari.v1.RemoveMode
+	28, // 20: akari.v1.UpdateOffer.signatures:type_name -> akari.v1.ManifestSignature
+	5,  // 21: akari.v1.UpdateStatus.state:type_name -> akari.v1.UpdateStatus.State
+	23, // 22: akari.v1.PanelDown.snapshot:type_name -> akari.v1.ConfigSnapshot
+	25, // 23: akari.v1.PanelDown.delta:type_name -> akari.v1.UserDelta
+	27, // 24: akari.v1.PanelDown.noop:type_name -> akari.v1.Noop
+	26, // 25: akari.v1.PanelDown.lease:type_name -> akari.v1.LeaseGrant
+	29, // 26: akari.v1.PanelDown.update_offer:type_name -> akari.v1.UpdateOffer
+	18, // 27: akari.v1.PanelDown.latency_probe:type_name -> akari.v1.LatencyProbeConfig
+	17, // 28: akari.v1.AgentChannel.OpenChannel:input_type -> akari.v1.AgentUp
+	7,  // 29: akari.v1.AgentChannel.Renew:input_type -> akari.v1.RenewRequest
+	30, // 30: akari.v1.AgentChannel.FetchArtifact:input_type -> akari.v1.FetchArtifactRequest
+	6,  // 31: akari.v1.AgentEnrollment.Enroll:input_type -> akari.v1.EnrollRequest
+	33, // 32: akari.v1.AgentChannel.OpenChannel:output_type -> akari.v1.PanelDown
+	8,  // 33: akari.v1.AgentChannel.Renew:output_type -> akari.v1.IssuedCertificate
+	31, // 34: akari.v1.AgentChannel.FetchArtifact:output_type -> akari.v1.ArtifactChunk
+	8,  // 35: akari.v1.AgentEnrollment.Enroll:output_type -> akari.v1.IssuedCertificate
+	32, // [32:36] is the sub-list for method output_type
+	28, // [28:32] is the sub-list for method input_type
+	28, // [28:28] is the sub-list for extension type_name
+	28, // [28:28] is the sub-list for extension extendee
+	0,  // [0:28] is the sub-list for field type_name
 }
 
 func init() { file_agent_proto_init() }
@@ -2640,7 +3037,7 @@ func file_agent_proto_init() {
 		return
 	}
 	file_agent_proto_msgTypes[5].OneofWrappers = []any{}
-	file_agent_proto_msgTypes[10].OneofWrappers = []any{
+	file_agent_proto_msgTypes[11].OneofWrappers = []any{
 		(*AgentUp_Hello)(nil),
 		(*AgentUp_Heartbeat)(nil),
 		(*AgentUp_Traffic)(nil),
@@ -2648,7 +3045,7 @@ func file_agent_proto_init() {
 		(*AgentUp_UpdateStatus)(nil),
 		(*AgentUp_Latency)(nil),
 	}
-	file_agent_proto_msgTypes[25].OneofWrappers = []any{
+	file_agent_proto_msgTypes[27].OneofWrappers = []any{
 		(*PanelDown_Snapshot)(nil),
 		(*PanelDown_Delta)(nil),
 		(*PanelDown_Noop)(nil),
@@ -2661,8 +3058,8 @@ func file_agent_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_proto_rawDesc), len(file_agent_proto_rawDesc)),
-			NumEnums:      4,
-			NumMessages:   26,
+			NumEnums:      6,
+			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

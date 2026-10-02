@@ -118,6 +118,16 @@ type CoreManager struct {
 	// removed since (xray keeps their counters; the tail is still billed).
 	counted map[string]struct{}
 	mono    map[string]*monoCounter
+	// nodeCert: where TLS inbounds naming the node certificate credential
+	// files read the ACME-managed certificate (protocol 6); nil = no
+	// rewrite (the files the admin installs). Set before each Rebuild.
+	nodeCert *certFiles
+	// acmeTags: inbounds of the running instance that serve nodeCert;
+	// acmePlaceholder: nodeCert held the self-signed placeholder when the
+	// instance was built (the first CA certificate swaps those inbounds,
+	// see ReloadInbounds).
+	acmeTags        []string
+	acmePlaceholder bool
 	// onStart is a test seam, called under mu right after a new instance
 	// is installed. Always nil in production.
 	onStart func(*core.Instance)
@@ -194,6 +204,8 @@ func (m *CoreManager) stopLocked() *pb.TrafficReport {
 		m.liveGate.Store(nil)
 		m.tags = nil
 		m.kinds = nil
+		m.acmeTags = nil
+		m.acmePlaceholder = false
 	}
 	m.inboundsJSON = ""
 	m.sessionID = newSessionID()
@@ -220,7 +232,7 @@ func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) (*pb.Traf
 
 	final := m.stopLocked()
 
-	b, err := newInstance(inboundsJSON)
+	b, err := newInstanceWith(inboundsJSON, m.nodeCert)
 	if err != nil {
 		return final, err
 	}
@@ -230,6 +242,8 @@ func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) (*pb.Traf
 	m.liveGate.Store(b.gate)
 	m.tags = b.tags
 	m.kinds = b.kinds
+	m.acmeTags = b.acmeTags
+	m.acmePlaceholder = m.nodeCert != nil && m.nodeCert.placeholder && len(b.acmeTags) > 0
 	m.inboundsJSON = inboundsJSON
 	if m.onStart != nil {
 		m.onStart(b.inst)
@@ -242,6 +256,89 @@ func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) (*pb.Traf
 		}
 	}
 	return final, firstErr
+}
+
+// SetNodeCert sets where the next Rebuild points TLS inbounds that name
+// the node certificate credential files (nil: leave them as they are).
+func (m *CoreManager) SetNodeCert(f *certFiles) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if f == nil {
+		m.nodeCert = nil
+		return
+	}
+	c := *f
+	m.nodeCert = &c
+}
+
+// ServesPlaceholder reports whether the running instance was built while
+// the node certificate was the self-signed placeholder.
+func (m *CoreManager) ServesPlaceholder() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.instance != nil && m.acmePlaceholder
+}
+
+// ReloadInbounds swaps the handlers of the inbounds serving the node
+// certificate for fresh ones built from the same config, so they read the
+// certificate files again at once (the first CA certificate after the
+// placeholder). Every other inbound, the session, the counters and the
+// gate stay as they are; each live user is re-added to the new handler
+// with its existing *MemoryUser (same gate identity). Connections on the
+// swapped inbounds may drop (a Hysteria 2 listener closes its QUIC
+// connections); those inbounds only served the placeholder until now.
+// Renewals never come here: xray re-reads the files by itself.
+func (m *CoreManager) ReloadInbounds() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.instance == nil || len(m.acmeTags) == 0 {
+		return nil
+	}
+	var inbounds []json.RawMessage
+	if err := json.Unmarshal([]byte(m.inboundsJSON), &inbounds); err != nil {
+		return fmt.Errorf("parse inbounds: %w", err)
+	}
+	cfg, _, _, err := buildConfig(inbounds, m.nodeCert)
+	if err != nil {
+		return err
+	}
+	im, err := m.manager()
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	for _, tag := range m.acmeTags {
+		var hc *core.InboundHandlerConfig
+		for _, in := range cfg.Inbound {
+			if in.Tag == tag {
+				hc = in
+				break
+			}
+		}
+		if hc == nil {
+			return fmt.Errorf("inbound %q: not in the config", tag)
+		}
+		if err := im.RemoveHandler(ctx, tag); err != nil {
+			return fmt.Errorf("inbound %q: remove handler: %w", tag, err)
+		}
+		if err := core.AddInboundHandler(m.instance, hc); err != nil {
+			return fmt.Errorf("inbound %q: add handler: %w", tag, err)
+		}
+		store, err := m.store(tag)
+		if err != nil {
+			return err
+		}
+		for uid, c := range m.issued[tag] {
+			if _, live := m.applied[uid][tag]; !live {
+				continue
+			}
+			if err := store.AddUser(ctx, c.user); err != nil {
+				return fmt.Errorf("inbound %q: re-add user %s: %w", tag, uid, err)
+			}
+		}
+	}
+	m.acmePlaceholder = false
+	return nil
 }
 
 // WouldDropCredential reports whether ops would remove or change a live
@@ -659,17 +756,24 @@ type built struct {
 	gate  *gateDispatcher
 	tags  []string
 	kinds map[string]inboundKind
+	// acmeTags: inbounds pointed at the ACME-managed node certificate.
+	acmeTags []string
 }
 
 func newInstance(inboundsJSON string) (*built, error) {
-	var inbounds []json.RawMessage
-	if err := json.Unmarshal([]byte(inboundsJSON), &inbounds); err != nil {
-		return nil, fmt.Errorf("parse inbounds: %w", err)
-	}
-	if len(inbounds) == 0 {
-		inbounds = []json.RawMessage{}
-	}
+	return newInstanceWith(inboundsJSON, nil)
+}
 
+// buildConfig turns the inbounds into xray's config (gate in place of the
+// dispatcher), with node certificate entries pointed at cert (if set).
+func buildConfig(inbounds []json.RawMessage, cert *certFiles) (*core.Config, map[string]inboundKind, []string, error) {
+	var acmeTags []string
+	if cert != nil {
+		var err error
+		if inbounds, acmeTags, err = rewriteCertPaths(inbounds, *cert); err != nil {
+			return nil, nil, nil, err
+		}
+	}
 	full := map[string]any{
 		"log":      map[string]any{"loglevel": "warning"},
 		"inbounds": inbounds,
@@ -695,26 +799,26 @@ func newInstance(inboundsJSON string) (*built, error) {
 	}
 	b, err := json.Marshal(full)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
 	jsonConfig, err := confserial.DecodeJSONConfig(bytes.NewReader(b))
 	if err != nil {
-		return nil, fmt.Errorf("decode xray config: %w", err)
+		return nil, nil, nil, fmt.Errorf("decode xray config: %w", err)
 	}
 	pbConfig, err := jsonConfig.Build()
 	if err != nil {
-		return nil, fmt.Errorf("build xray config: %w", err)
+		return nil, nil, nil, fmt.Errorf("build xray config: %w", err)
 	}
 	if err := refuseFakeDNS(pbConfig); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	if err := multiUserShadowsocks(inbounds, pbConfig); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	kinds, err := inboundKinds(pbConfig)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	// Swap xray's dispatcher for the gate (same slot in the app list, so
 	// every inbound resolves the gate when it is created).
@@ -727,7 +831,22 @@ func newInstance(inboundsJSON string) (*built, error) {
 		}
 	}
 	if !swapped {
-		return nil, fmt.Errorf("xray config has no dispatcher to replace")
+		return nil, nil, nil, fmt.Errorf("xray config has no dispatcher to replace")
+	}
+	return pbConfig, kinds, acmeTags, nil
+}
+
+func newInstanceWith(inboundsJSON string, cert *certFiles) (*built, error) {
+	var inbounds []json.RawMessage
+	if err := json.Unmarshal([]byte(inboundsJSON), &inbounds); err != nil {
+		return nil, fmt.Errorf("parse inbounds: %w", err)
+	}
+	if len(inbounds) == 0 {
+		inbounds = []json.RawMessage{}
+	}
+	pbConfig, kinds, acmeTags, err := buildConfig(inbounds, cert)
+	if err != nil {
+		return nil, err
 	}
 	inst, err := core.New(pbConfig)
 	if err != nil {
@@ -752,5 +871,5 @@ func newInstance(inboundsJSON string) (*built, error) {
 			tags = append(tags, probe.Tag)
 		}
 	}
-	return &built{inst: inst, gate: gate, tags: tags, kinds: kinds}, nil
+	return &built{inst: inst, gate: gate, tags: tags, kinds: kinds, acmeTags: acmeTags}, nil
 }
