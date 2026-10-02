@@ -196,6 +196,14 @@ func (p *prober) loop(ctx context.Context, deliver func(*pb.LatencyReport)) {
 			p.mu.Unlock()
 			if !base.IsZero() {
 				next = base.Add(p.jittered(iv))
+				if pending {
+					// A coalesced "test now" keeps its slot: a new interval
+					// only moves the scheduled run (W12: the request used to
+					// be pushed out to the new interval).
+					if due := base.Add(minProbeGap); due.Before(next) {
+						next = due
+					}
+				}
 			}
 			continue
 		}
