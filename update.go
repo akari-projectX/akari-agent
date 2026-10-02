@@ -1,25 +1,37 @@
 package main
 
-// Signed self-update (M6), node side: the staged-binary store, the launcher
-// that runs the newest staged binary, the boot counter and the rollback.
+// Signed self-update (M6), node side: the unprivileged agent's update
+// directory, the hand-over to the privileged updater and the probation
+// record of a freshly installed binary.
 //
-// Layout (<state dir>/update, 0700; files 0600, binaries 0700):
+// W^X: the agent's StateDirectory is writable by the agent and mounted
+// noexec by systemd (>= 256, DynamicUser idmapped mounts), and it stays
+// that way. The agent never executes anything it downloaded. It stages the
+// verified download and an apply request here; the updater unit
+// (akari-agent-update.path -> akari-agent-update.service, root) runs the
+// INSTALLED, trusted binary in -apply-update mode (updater.go), which treats
+// everything in this directory as untrusted: it copies the staged bytes into
+// a root-only file, verifies the copy against the signed manifest with its
+// own compiled-in keys and version policy, installs it atomically
+// (/usr/local/bin/akari-agent, the old one kept as akari-agent.prev),
+// restarts the agent and watches its self-check, rolling back on failure.
 //
-//	state.json   which staged binary to run (current), the one before it
-//	             (previous), the probation record (trial), versions this
-//	             node rolled back from, and a pending report for the panel
-//	finals.json  final traffic counters persisted across a restart
-//	bin/akari-agent-<version>-<sha256[:12]>   staged binaries
+// Layout (<state dir>/update, 0700; files 0600):
 //
-// The installed binary (systemd ExecStart, read-only /usr/local/bin) is the
-// LAUNCHER: started fresh, it execs the current staged binary when that is
-// newer than itself. Every exec into a binary on probation counts a boot;
-// after maxBoots boots without a passed self-check (a connected stream and
-// an ok-acked apply) the launcher marks the version failed and falls back to
-// the previous binary (or itself). A staged binary that runs but cannot pass
-// its self-check within the timeout rolls itself back the same way.
+//	state.json          versions this node rolled back from, a report owed
+//	                    to the panel (agent-owned)
+//	finals.json         final traffic counters persisted across a restart
+//	staged              the verified download (never executed here)
+//	apply-request.json  the request to the updater (written last: it is the
+//	                    trigger the path unit watches)
+//	apply-result.json   the updater's verdict (written by root, chowned to
+//	                    the agent): installed / confirmed / rolled_back /
+//	                    rejected / rollback_failed
+//	confirmed           written by the new binary once it passed its
+//	                    self-check (the updater's health signal)
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -30,9 +42,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -45,38 +55,79 @@ const (
 	updateDirName   = "update"
 	updateStateFile = "state.json"
 	finalsFileName  = "finals.json"
-	// envLaunched marks a process started by exec from another agent
-	// process (launcher, update switch or rollback): it never execs again
-	// at startup, so a bad state file cannot cause an exec loop.
-	envLaunched = "AKARI_AGENT_LAUNCHED"
+	stagedName      = "staged"
+	requestName     = "apply-request.json"
+	resultName      = "apply-result.json"
+	confirmedName   = "confirmed"
+
+	// defaultUpdaterUnit: the agent hands updates to the updater only when
+	// its trigger unit is installed (the installer writes it).
+	defaultUpdaterUnit = "/etc/systemd/system/akari-agent-update.path"
+	// errUpdaterMissing is shown in the panel (rollout and node view).
+	errUpdaterMissing = "updater unit missing (akari-agent-update.path): run the panel's install command (重装命令) once on this node"
 
 	defaultSelfCheck = 5 * time.Minute
 	defaultMaxBoots  = 3
-	maxRolledBack    = 32
-	stateSchema      = 1
+	// defaultApplyWait: how long the agent waits for the updater's verdict
+	// (verify + copy of the staged binary: seconds).
+	defaultApplyWait = 90 * time.Second
+	// defaultRestartWait: after "installed", how long the agent waits for
+	// the updater's restart before it exits (systemd then starts the new
+	// binary).
+	defaultRestartWait = time.Minute
+	maxRolledBack      = 32
+	stateSchema        = 1
+	requestSchema      = 1
+	maxRequestSize     = 64 << 10
+	maxResultSize      = 16 << 10
 )
 
-// errExecuted is returned by a fake exec (tests) in place of not returning.
-var errExecuted = errors.New("process image replaced")
+// Apply request kinds.
+const (
+	kindApply    = "apply"
+	kindRollback = "rollback"
+)
 
-// slot is a staged, verified binary.
-type slot struct {
-	Version    string              `json:"version"`
-	Path       string              `json:"path"`
-	Manifest   []byte              `json:"manifest"` // signed bytes, verbatim
-	Signatures []release.Signature `json:"signatures"`
+// Apply result states (the updater's verdict).
+const (
+	resInstalled      = "installed"
+	resConfirmed      = "confirmed"
+	resRolledBack     = "rolled_back"
+	resRejected       = "rejected"
+	resRollbackFailed = "rollback_failed"
+)
+
+// applyRequest is what the agent asks of the updater. Untrusted on the
+// updater's side: everything in it is re-verified there.
+type applyRequest struct {
+	Schema        int                 `json:"schema"`
+	Kind          string              `json:"kind"`
+	RolloutID     string              `json:"rollout_id"`
+	Version       string              `json:"version"`
+	PanelProtocol uint32              `json:"panel_protocol"`
+	Manifest      []byte              `json:"manifest,omitempty"` // signed bytes, verbatim
+	Signatures    []release.Signature `json:"signatures,omitempty"`
+	// Reason: why a rollback is requested (logged and reported).
+	Reason string `json:"reason,omitempty"`
 }
 
-// trialRec: the current binary is on probation.
+// applyResult is the updater's verdict.
+type applyResult struct {
+	Schema    int    `json:"schema"`
+	State     string `json:"state"`
+	Version   string `json:"version"`
+	RolloutID string `json:"rollout_id"`
+	Error     string `json:"error,omitempty"`
+}
+
+// trialRec: the running binary is on probation.
 type trialRec struct {
-	Version   string    `json:"version"`
-	RolloutID string    `json:"rollout_id"`
-	Boots     int       `json:"boots"`
-	Started   time.Time `json:"started"`
+	Version   string `json:"version"`
+	RolloutID string `json:"rollout_id"`
 }
 
 // pendingReport is an UpdateStatus owed to the panel (sent after the next
-// Hello), e.g. a rollback the launcher performed.
+// Hello), e.g. a rollback the updater performed.
 type pendingReport struct {
 	RolloutID string                `json:"rollout_id"`
 	Version   string                `json:"version"`
@@ -84,29 +135,25 @@ type pendingReport struct {
 	Error     string                `json:"error"`
 }
 
+// updState is the agent's own record. Files of the exec-launcher era
+// (current/previous/trial slots) load fine: unknown fields are dropped.
 type updState struct {
-	Schema int `json:"schema"`
-	// Installed: path of the binary systemd starts (the launcher).
-	Installed  string         `json:"installed,omitempty"`
-	Current    *slot          `json:"current,omitempty"`
-	Previous   *slot          `json:"previous,omitempty"`
-	Trial      *trialRec      `json:"trial,omitempty"`
+	Schema     int            `json:"schema"`
 	RolledBack []string       `json:"rolled_back,omitempty"`
 	Report     *pendingReport `json:"report,omitempty"`
 }
 
-// updater owns the update directory.
+// updater owns the agent side of the update directory.
 type updater struct {
-	dir       string
-	keys      []release.PublicKey
-	version   string // running version
-	self      string // running executable
-	maxBoots  int
-	selfCheck time.Duration
-	// exec replaces the process image (syscall.Exec); returns only on
-	// failure (tests: errExecuted).
-	exec func(path string, argv, env []string) error
-	now  func() time.Time
+	dir     string
+	keys    []release.PublicKey
+	version string // running version
+	// unit: the updater's trigger unit file; "" = do not check (tests).
+	unit        string
+	selfCheck   time.Duration
+	applyWait   time.Duration
+	restartWait time.Duration
+	poll        time.Duration
 
 	mu sync.Mutex
 	st updState
@@ -117,26 +164,23 @@ type updater struct {
 }
 
 func newUpdater(stateDir, version string, keys []release.PublicKey) (*updater, error) {
-	self, err := os.Executable()
-	if err != nil {
-		return nil, fmt.Errorf("own executable: %w", err)
-	}
-	if p, err := filepath.EvalSymlinks(self); err == nil {
-		self = p
-	}
 	u := &updater{
-		dir:       filepath.Join(stateDir, updateDirName),
-		keys:      keys,
-		version:   version,
-		self:      self,
-		maxBoots:  defaultMaxBoots,
-		selfCheck: defaultSelfCheck,
-		exec:      syscall.Exec,
-		now:       time.Now,
-		st:        updState{Schema: stateSchema},
+		dir:         filepath.Join(stateDir, updateDirName),
+		keys:        keys,
+		version:     version,
+		unit:        defaultUpdaterUnit,
+		selfCheck:   defaultSelfCheck,
+		applyWait:   defaultApplyWait,
+		restartWait: defaultRestartWait,
+		poll:        200 * time.Millisecond,
+		st:          updState{Schema: stateSchema},
 	}
-	if err := os.MkdirAll(u.binDir(), 0o700); err != nil {
+	if err := os.MkdirAll(u.dir, 0o700); err != nil {
 		return nil, fmt.Errorf("update dir: %w", err)
+	}
+	// The exec-launcher era staged executables in bin/ (never run again).
+	if err := os.RemoveAll(filepath.Join(u.dir, "bin")); err != nil {
+		slog.Warn("cannot remove the old staged binaries", "error", err)
 	}
 	if err := u.load(); err != nil {
 		return nil, err
@@ -144,8 +188,8 @@ func newUpdater(stateDir, version string, keys []release.PublicKey) (*updater, e
 	return u, nil
 }
 
-func (u *updater) binDir() string    { return filepath.Join(u.dir, "bin") }
-func (u *updater) statePath() string { return filepath.Join(u.dir, updateStateFile) }
+func (u *updater) path(name string) string { return filepath.Join(u.dir, name) }
+func (u *updater) statePath() string       { return u.path(updateStateFile) }
 
 func (u *updater) load() error {
 	b, err := os.ReadFile(u.statePath())
@@ -157,13 +201,13 @@ func (u *updater) load() error {
 	}
 	var st updState
 	if err := json.Unmarshal(b, &st); err != nil || st.Schema != stateSchema {
-		// Never let a damaged file stop the agent: set it aside and run
-		// the installed binary.
+		// Never let a damaged file stop the agent: set it aside.
 		bad := u.statePath() + ".corrupt"
 		slog.Error("update state unreadable; ignoring it", "error", err, "schema", st.Schema, "moved_to", bad)
 		_ = os.Rename(u.statePath(), bad)
 		return nil
 	}
+	st.Schema = stateSchema
 	u.st = st
 	return nil
 }
@@ -176,176 +220,143 @@ func (u *updater) saveLocked() error {
 	return writeSecret(u.statePath(), b)
 }
 
-// launch runs at process start, before anything else. A fresh start (the
-// installed binary, not exec'd by another agent process) execs the current
-// staged binary when it is newer than itself — counting a boot when that
-// binary is on probation and rolling back once it used up maxBoots. It
-// returns the probation record when THIS process is the binary on
-// probation; nil otherwise.
-func (u *updater) launch(launched bool) (*trialRec, error) {
+// updaterInstalled: is the privileged updater there to hand updates to?
+func (u *updater) updaterInstalled() bool {
+	if u.unit == "" {
+		return true
+	}
+	_, err := os.Stat(u.unit)
+	return err == nil
+}
+
+// boot runs at process start: it settles what the updater left behind
+// (a rollback or a refused request becomes a report owed to the panel) and
+// returns the probation record when THIS process is a freshly installed
+// binary that has not passed its self-check yet.
+func (u *updater) boot() (*trialRec, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	if !launched {
-		u.st.Installed = u.self
+	// A request no updater picked up and the download behind it are stale
+	// (the updater removes the request before it acts on it; it holds the
+	// staged file open while it copies it).
+	stale := []string{u.path(requestName), u.path(stagedName)}
+	if tmps, err := filepath.Glob(u.path(".download-*.tmp")); err == nil {
+		stale = append(stale, tmps...) // an interrupted download
 	}
-	for range 4 {
-		cur := u.st.Current
-		if cur == nil {
-			return nil, u.saveGC()
-		}
-		if launched {
-			// Drop staged files nothing refers to any more (e.g. the binary
-			// the launcher just rolled back from).
-			u.gcLocked()
-			if cur.Path == u.self && u.st.Trial != nil && u.st.Trial.Version == cur.Version && cur.Version == u.version {
-				t := *u.st.Trial
-				return &t, nil
-			}
-			return nil, nil
-		}
-		// Fresh start: this is the installed binary.
-		if c, err := release.CompareVersions(cur.Version, u.version); err == nil && c <= 0 {
-			// The installed binary was upgraded past the staged one
-			// (package update): it wins; staged binaries are dropped.
-			slog.Info("installed agent is not older than the staged one; dropping staged binaries",
-				"installed", u.version, "staged", cur.Version)
-			u.st.Current, u.st.Previous, u.st.Trial = nil, nil, nil
-			continue
-		}
-		if t := u.st.Trial; t != nil && t.Version == cur.Version {
-			t.Boots++
-			if t.Boots > u.maxBoots {
-				u.rollbackLocked(fmt.Sprintf("did not pass its self-check in %d starts", u.maxBoots))
-				continue
-			}
-		}
-		if err := verifySlot(cur); err != nil {
-			u.rollbackLocked("staged binary failed verification: " + err.Error())
-			continue
-		}
-		if err := u.saveLocked(); err != nil {
-			// Without a recorded boot the counter could not stop a crash
-			// loop: run the installed binary instead.
-			slog.Error("cannot record the boot of the staged agent; running the installed one", "error", err)
-			return nil, nil
-		}
-		slog.Info("starting staged agent", "version", cur.Version, "path", cur.Path)
-		err := u.exec(cur.Path, argvFor(cur.Path), launchedEnv())
-		if errors.Is(err, errExecuted) {
-			return nil, err
-		}
-		u.rollbackLocked(fmt.Sprintf("exec failed: %v", err))
-	}
-	return nil, u.saveGC()
-}
-
-// rollbackLocked: the current binary failed. Mark its version (never
-// accepted again), owe the panel a report, and fall back to the previous
-// binary (nil = the installed one).
-func (u *updater) rollbackLocked(why string) {
-	cur := u.st.Current
-	if cur == nil {
-		return
-	}
-	rid := ""
-	if t := u.st.Trial; t != nil && t.Version == cur.Version {
-		rid = t.RolloutID
-	}
-	slog.Error("rolling back agent update", "version", cur.Version, "reason", why)
-	if !slices.Contains(u.st.RolledBack, cur.Version) {
-		u.st.RolledBack = append(u.st.RolledBack, cur.Version)
-		if len(u.st.RolledBack) > maxRolledBack {
-			u.st.RolledBack = u.st.RolledBack[len(u.st.RolledBack)-maxRolledBack:]
-		}
-	}
-	u.st.Report = &pendingReport{RolloutID: rid, Version: cur.Version,
-		State: pb.UpdateStatus_STATE_ROLLED_BACK, Error: truncate(why, 512)}
-	u.st.Current, u.st.Previous, u.st.Trial = u.st.Previous, nil, nil
-}
-
-// saveGC persists the state and removes staged files nothing refers to.
-func (u *updater) saveGC() error {
-	if err := u.saveLocked(); err != nil {
-		return err
-	}
-	u.gcLocked()
-	return nil
-}
-
-func (u *updater) gcLocked() {
-	keep := map[string]bool{}
-	for _, s := range []*slot{u.st.Current, u.st.Previous} {
-		if s != nil {
-			keep[s.Path] = true
-		}
-	}
-	entries, err := os.ReadDir(u.binDir())
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		p := filepath.Join(u.binDir(), e.Name())
-		if keep[p] || (u.busyTok != 0 && strings.HasPrefix(e.Name(), ".download-")) {
-			continue
-		}
+	for _, p := range stale {
 		if err := os.Remove(p); err == nil {
-			slog.Info("removed unused staged agent file", "path", p)
+			slog.Warn("removed a stale update file", "file", filepath.Base(p))
 		}
 	}
+	res, err := u.readResult()
+	if err != nil {
+		slog.Error("update result unreadable; ignoring it", "error", err)
+		_ = os.Remove(u.path(resultName))
+		return nil, nil
+	}
+	if res == nil {
+		_ = os.Remove(u.path(confirmedName))
+		return nil, nil
+	}
+	switch res.State {
+	case resInstalled:
+		if res.Version != u.version {
+			// Not this binary (a reinstall replaced it, or the updater is
+			// about to restart into it): nothing to judge here.
+			return nil, nil
+		}
+		if c, _ := os.ReadFile(u.path(confirmedName)); string(c) == res.Version {
+			return nil, nil // passed; the updater has not seen it yet
+		}
+		return &trialRec{Version: res.Version, RolloutID: res.RolloutID}, nil
+	case resRolledBack:
+		u.markRolledBackLocked(res.Version)
+		u.st.Report = &pendingReport{RolloutID: res.RolloutID, Version: res.Version,
+			State: pb.UpdateStatus_STATE_ROLLED_BACK, Error: truncate(res.Error, 512)}
+	case resRejected, resRollbackFailed:
+		// The previous process stopped before it could report it.
+		u.st.Report = &pendingReport{RolloutID: res.RolloutID, Version: res.Version,
+			State: pb.UpdateStatus_STATE_FAILED, Error: truncate(res.Error, 512)}
+	}
+	_ = os.Remove(u.path(resultName))
+	_ = os.Remove(u.path(confirmedName))
+	return nil, u.saveLocked()
 }
 
-// verifySlot re-checks a staged binary before it is exec'd: the manifest
-// is well-formed and names this version, and the file matches its size and
-// SHA-256 (disk corruption, tampering by anything without the agent's own
-// privileges is out of reach anyway: the directory is 0700). The signature
-// was verified by the binary that accepted the offer (a launcher built
-// before a key rotation may not pin the newer key, so it is not re-checked
-// here).
-func verifySlot(s *slot) error {
-	m, err := release.ParseManifest(s.Manifest)
-	if err != nil {
-		return err
+func (u *updater) markRolledBackLocked(v string) {
+	if v == "" || slices.Contains(u.st.RolledBack, v) {
+		return
 	}
-	if m.Version != s.Version {
-		return fmt.Errorf("manifest version %s != slot version %s", m.Version, s.Version)
+	u.st.RolledBack = append(u.st.RolledBack, v)
+	if len(u.st.RolledBack) > maxRolledBack {
+		u.st.RolledBack = u.st.RolledBack[len(u.st.RolledBack)-maxRolledBack:]
 	}
-	sum, size, err := fileDigest(s.Path, m.Size)
-	if err != nil {
-		return err
-	}
-	if size != m.Size || sum != m.SHA256 {
-		return fmt.Errorf("%s does not match its manifest", s.Path)
-	}
-	return nil
 }
 
-func fileDigest(path string, limit int64) (string, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", 0, err
+// parseApplyRequest decodes an apply request strictly (untrusted input to
+// the privileged updater: unknown fields, trailing data, unknown kinds and
+// oversized values are errors).
+func parseApplyRequest(b []byte) (*applyRequest, error) {
+	if len(b) > maxRequestSize {
+		return nil, errors.New("apply request too large")
 	}
-	defer f.Close()
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	var r applyRequest
+	if err := dec.Decode(&r); err != nil {
+		return nil, fmt.Errorf("apply request: %w", err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("apply request: trailing data")
+	}
+	switch {
+	case r.Schema != requestSchema:
+		return nil, fmt.Errorf("apply request: schema %d", r.Schema)
+	case r.Kind != kindApply && r.Kind != kindRollback:
+		return nil, fmt.Errorf("apply request: kind %q", r.Kind)
+	case !release.ValidVersion(r.Version):
+		return nil, fmt.Errorf("apply request: version %q", r.Version)
+	case len(r.RolloutID) > 64 || len(r.Reason) > 512 || len(r.Signatures) > 8:
+		return nil, errors.New("apply request: field out of range")
+	}
+	return &r, nil
+}
+
+// digest is the SHA-256 (hex) and length of at most limit+1 bytes of r.
+func digest(r io.Reader, limit int64) (string, int64, error) {
 	h := sha256.New()
-	n, err := io.Copy(h, io.LimitReader(f, limit+1))
+	n, err := io.Copy(h, io.LimitReader(r, limit+1))
 	if err != nil {
 		return "", 0, err
 	}
 	return hex.EncodeToString(h.Sum(nil)), n, nil
 }
 
-func argvFor(path string) []string {
-	argv := append([]string{path}, os.Args[1:]...)
-	return argv
+// readResult reads the updater's verdict (nil when there is none).
+func (u *updater) readResult() (*applyResult, error) {
+	b, err := readSmall(u.path(resultName), maxResultSize)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var r applyResult
+	if err := json.Unmarshal(b, &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
 }
 
-func launchedEnv() []string {
-	env := make([]string, 0, len(os.Environ())+1)
-	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, envLaunched+"=") {
-			env = append(env, kv)
-		}
+func readSmall(path string, limit int64) ([]byte, error) {
+	st, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
 	}
-	return append(env, envLaunched+"=1")
+	if !st.Mode().IsRegular() || st.Size() > limit {
+		return nil, fmt.Errorf("%s: not a regular file of at most %d bytes", path, limit)
+	}
+	return os.ReadFile(path)
 }
 
 func truncate(s string, n int) string {
@@ -384,68 +395,67 @@ func (u *updater) setIdle(tok uint64) {
 	}
 }
 
-// stagedPath is where a verified download of m is kept.
-func (u *updater) stagedPath(m *release.Manifest) string {
-	return filepath.Join(u.binDir(), fmt.Sprintf("akari-agent-%s-%s", m.Version, m.SHA256[:12]))
+// writeRequest hands a request to the updater: written atomically (the
+// path unit fires on its appearance).
+func (u *updater) writeRequest(r applyRequest) error {
+	r.Schema = requestSchema
+	b, err := json.Marshal(&r)
+	if err != nil {
+		return err
+	}
+	return writeSecret(u.path(requestName), b)
 }
 
-// commit records new as the current binary, on probation (its first boot
-// counted), with what runs now as the previous one. It returns an undo for
-// a failed exec.
-func (u *updater) commit(next slot, rolloutID string) (undo func(), err error) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	before := u.st
-	if u.st.Installed == "" {
-		u.st.Installed = u.self
+// errApplyCanceled: the wait for the updater's verdict ended with the
+// stream (the updater carries on; the next process settles its result).
+var errApplyCanceled = errors.New("stream ended while the updater was working")
+
+// requestApply stages the request and waits for the updater's verdict.
+// done ends the wait early (the stream or the process is going away).
+func (u *updater) requestApply(done <-chan struct{}, r applyRequest) (*applyResult, error) {
+	_ = os.Remove(u.path(resultName))
+	_ = os.Remove(u.path(confirmedName))
+	r.Kind = kindApply
+	if err := u.writeRequest(r); err != nil {
+		return nil, fmt.Errorf("write the apply request: %w", err)
 	}
-	var prev *slot
-	if c := u.st.Current; c != nil && c.Path == u.self {
-		prev = c
-	}
-	u.st.Previous = prev
-	u.st.Current = &next
-	u.st.Trial = &trialRec{Version: next.Version, RolloutID: rolloutID, Boots: 1, Started: u.now().UTC()}
-	if err := u.saveLocked(); err != nil {
-		u.st = before
-		return nil, err
-	}
-	u.gcLocked()
-	return func() {
-		u.mu.Lock()
-		defer u.mu.Unlock()
-		u.st = before
-		if err := u.saveLocked(); err != nil {
-			slog.Error("cannot restore the update state after a failed switch", "error", err)
+	deadline := time.NewTimer(u.applyWait)
+	defer deadline.Stop()
+	tick := time.NewTicker(u.poll)
+	defer tick.Stop()
+	for {
+		res, err := u.readResult()
+		if err != nil {
+			return nil, fmt.Errorf("updater result: %w", err)
 		}
-	}, nil
+		if res != nil && res.Version == r.Version {
+			return res, nil
+		}
+		select {
+		case <-done:
+			return nil, errApplyCanceled
+		case <-deadline.C:
+			// Withdraw the request if the updater never took it.
+			if os.Remove(u.path(requestName)) == nil {
+				return nil, errors.New("the updater did not pick up the request (is akari-agent-update.path enabled? run the panel's install command (重装命令) once)")
+			}
+			return nil, errors.New("the updater gave no verdict in time (journalctl -u akari-agent-update)")
+		case <-tick.C:
+		}
+	}
 }
 
-// confirm ends the probation of the running binary.
-func (u *updater) confirm() error {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if u.st.Trial == nil {
-		return nil
-	}
-	u.st.Trial = nil
-	return u.saveLocked()
+// confirm ends the probation of the running binary: the updater watches
+// for this marker.
+func (u *updater) confirm(version string) error {
+	return writeSecret(u.path(confirmedName), []byte(version))
 }
 
-// rollbackTrial: the running binary failed its self-check. Returns the
-// binary to exec instead.
-func (u *updater) rollbackTrial(why string) (string, error) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	u.rollbackLocked(why)
-	target := u.st.Installed
-	if u.st.Current != nil {
-		target = u.st.Current.Path
-	}
-	if target == "" {
-		return "", errors.New("no binary to roll back to")
-	}
-	return target, u.saveLocked()
+// requestRollback: the running binary failed its self-check. The updater
+// rolls back only a binary that is still on probation in ITS records.
+func (u *updater) requestRollback(t trialRec, why string) error {
+	return u.writeRequest(applyRequest{Kind: kindRollback, RolloutID: t.RolloutID, Version: t.Version,
+		Reason: truncate(why, 512)})
 }
 
 // report returns the UpdateStatus owed to the panel, if any.

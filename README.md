@@ -141,12 +141,19 @@ release key pinned in this repository (`release-keys.txt`, compiled in); the pan
 An offer is accepted only if a signature verifies, the platform matches, the version is newer
 than the running one (or the signed manifest is an explicit `rollback` target) and the node has
 not rolled back from that version before. The binary comes over the existing mTLS connection
-(`AgentChannel.FetchArtifact`), is checked for size and SHA-256, staged in
-`<state dir>/update/bin/`, and the agent replaces its process image with it after persisting its
-final traffic counters. The new binary must connect and get an apply acknowledged within
-`-update-self-check` (default 5m) or it returns to the previous binary; one that crashes on start
-is rolled back by the installed binary (the launcher) after `-update-max-boots` (default 3)
-starts. `./agent -release-keys` lists the pinned keys.
+(`AgentChannel.FetchArtifact`) and is checked for size and SHA-256. The agent never executes
+it: its state directory is mounted `noexec` by systemd (DynamicUser), and stays so. It stages the
+file and an apply request in `<state dir>/update/`; the **privileged updater**
+(`akari-agent-update.path` + `akari-agent-update.service`, shipped in `akari-panel/deploy/systemd/`
+and installed by the panel's one-line installer) runs the *installed* binary as
+`akari-agent -apply-update <state dir>`, which treats that directory as untrusted, copies the
+file into a root-only location, re-verifies the copy with its own pinned keys and version policy,
+installs it as `/usr/local/bin/akari-agent` (keeping `akari-agent.prev`) and restarts the agent.
+The new binary must connect and get an apply acknowledged within `-update-self-check`
+(default 5m); if it does not, or crashes `-update-max-boots` times (default 3), the updater puts
+the previous binary back. Agents up to v0.4.0 executed the staged file themselves and fail on
+systemd ≥ 256 (`permission denied`): run the panel's install command for such a node once.
+`./agent -release-keys` lists the pinned keys.
 
 ### Release signing keys
 

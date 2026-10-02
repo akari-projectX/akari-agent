@@ -653,7 +653,11 @@ type Hello struct {
 	// protocol_version (W11; older agents send none, the panel serves them
 	// as before):
 	//   "metrics" = fills Heartbeat.metrics;
-	//   "latency" = accepts LatencyProbeConfig and sends LatencyReport.
+	//   "latency" = accepts LatencyProbeConfig and sends LatencyReport;
+	//   "updater" = applies UpdateOffers through the node's privileged
+	//       updater unit (akari-agent-update.path/.service, W18): its state
+	//       directory is noexec, so agents without it fail every update on
+	//       systemd >= 256 (the panel tells the admin to reinstall once).
 	// The panel only sends LatencyProbeConfig to agents that list "latency".
 	Capabilities  []string `protobuf:"bytes,20,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	unknownFields protoimpl.UnknownFields

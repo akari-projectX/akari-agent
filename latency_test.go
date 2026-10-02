@@ -236,7 +236,8 @@ func TestProberCoalescedRequestSurvivesReschedule(t *testing.T) {
 func TestAgentLatencyCapabilityAndConfig(t *testing.T) {
 	a := NewAgent(&Config{}, "test", nil)
 	h := a.helloLocked().GetHello()
-	if len(h.Capabilities) != 2 || h.Capabilities[0] != "metrics" || h.Capabilities[1] != "latency" {
+	if len(h.Capabilities) != 3 || h.Capabilities[0] != "metrics" || h.Capabilities[1] != "latency" ||
+		h.Capabilities[2] != "updater" {
 		t.Fatalf("capabilities %v", h.Capabilities)
 	}
 	out, send := collect()

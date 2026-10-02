@@ -48,7 +48,15 @@ func main() {
 	selfCheck := flag.Duration("update-self-check", defaultSelfCheck,
 		"after a self-update: how long the new binary has to connect and apply the panel's state before it is rolled back")
 	maxBoots := flag.Int("update-max-boots", defaultMaxBoots,
-		"after a self-update: starts the new binary gets to pass its self-check before the launcher rolls it back")
+		"after a self-update: restarts of the new binary without a passed self-check before the updater rolls it back")
+	updaterUnit := flag.String("updater-unit", defaultUpdaterUnit,
+		"the updater's trigger unit; self-update is refused while it is missing (\"\" = do not check)")
+	applyUpdate := flag.String("apply-update", "",
+		"UPDATER MODE (root, akari-agent-update.service): verify and install the update the agent staged in this "+
+			"state directory, restart the agent and watch its self-check; then exit")
+	updaterState := flag.String("updater-state", "", "updater mode: its own state directory (default: $STATE_DIRECTORY)")
+	updateTarget := flag.String("update-target", "", "updater mode: the installed binary to replace (default: this executable)")
+	updateService := flag.String("update-service", "akari-agent.service", "updater mode: the agent's systemd service")
 	heartbeat := flag.Duration("heartbeat-interval", 15*time.Second,
 		"how often the agent reports its machine status (heartbeat), 1s..5m")
 	acmeRoots := flag.String("acme-roots", "", "PEM file of extra CA roots trusted for the ACME directory (tests; default: system roots)")
@@ -82,15 +90,27 @@ func main() {
 		Level: slog.LevelInfo,
 	})))
 
+	if *applyUpdate != "" {
+		if keyErr != nil {
+			slog.Error("updater", "error", keyErr)
+			os.Exit(1)
+		}
+		if err := runApplyUpdate(*applyUpdate, *updaterState, *updateTarget, *updateService, keys, *selfCheck, *maxBoots); err != nil {
+			slog.Error("updater failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	dir := *stateDir
 	if dir == "" {
 		dir = defaultStateDir(*configPath)
 	}
 
-	// Self-update launcher (M6): before anything else, so a fresh start of
-	// the installed binary hands over to the newest staged one. A broken
+	// Self-update (M6): settle what the updater left behind (a rollback to
+	// report, or probation of this freshly installed binary). A broken
 	// update directory never stops the agent; it only disables updates.
-	upd, trial := startUpdater(dir, keys, keyErr, *selfCheck, *maxBoots)
+	upd, trial := startUpdater(dir, keys, keyErr, *selfCheck, *updaterUnit)
 
 	cfg, err := LoadConfig(*configPath)
 	if err != nil {
@@ -147,7 +167,7 @@ func main() {
 	slog.Info("agent stopped")
 }
 
-func startUpdater(dir string, keys []release.PublicKey, keyErr error, selfCheck time.Duration, maxBoots int) (*updater, *trialRec) {
+func startUpdater(dir string, keys []release.PublicKey, keyErr error, selfCheck time.Duration, unit string) (*updater, *trialRec) {
 	if keyErr != nil {
 		slog.Error("self-update disabled", "error", keyErr)
 		return nil, nil
@@ -158,8 +178,8 @@ func startUpdater(dir string, keys []release.PublicKey, keyErr error, selfCheck 
 		return nil, nil
 	}
 	upd.selfCheck = max(selfCheck, 10*time.Second)
-	upd.maxBoots = max(maxBoots, 1)
-	trial, err := upd.launch(os.Getenv(envLaunched) != "")
+	upd.unit = unit
+	trial, err := upd.boot()
 	if err != nil {
 		slog.Error("update state", "error", err)
 	}
@@ -167,7 +187,7 @@ func startUpdater(dir string, keys []release.PublicKey, keyErr error, selfCheck 
 	for _, k := range keys {
 		ids = append(ids, k.ID)
 	}
-	slog.Info("self-update", "release_keys", ids, "on_probation", trial != nil)
+	slog.Info("self-update", "release_keys", ids, "on_probation", trial != nil, "updater", upd.updaterInstalled())
 	return upd, trial
 }
 

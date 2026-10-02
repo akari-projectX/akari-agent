@@ -31,8 +31,10 @@ const agentProtocol = 6
 
 // agentCapabilities: optional features independent of agentProtocol
 // (Hello.capabilities, W11): "metrics" = Heartbeat.metrics, "latency" =
-// LatencyProbeConfig / LatencyReport.
-var agentCapabilities = []string{"metrics", "latency"}
+// LatencyProbeConfig / LatencyReport, "updater" = self-updates are applied
+// by the privileged updater unit (W18, updater_linux.go), never by
+// executing from the noexec state directory.
+var agentCapabilities = []string{"metrics", "latency", "updater"}
 
 // Agent is the node-side supervisor: one persistent mTLS gRPC stream to the
 // panel, an embedded xray-core, and periodic heartbeat/traffic reporting.
@@ -84,6 +86,10 @@ type Agent struct {
 	// process runs a binary on probation.
 	upd   *updater
 	trial *trialState
+	// procCtx: the process lifetime (Run's context). A stream's context
+	// outlives a stop request (gracefulStop), so waits that hold applyMu
+	// must also end on this one.
+	procCtx context.Context
 	// finalsPersisted: final counters were loaded from the update state
 	// dir; the file goes once the queue has drained.
 	finalsPersisted atomic.Bool
@@ -192,6 +198,7 @@ func (a *Agent) setDirty(d bool) {
 // capped exponential backoff. The lease is enforced independently of any
 // stream.
 func (a *Agent) Run(ctx context.Context) error {
+	a.procCtx = ctx
 	err := a.run(ctx)
 	if ctx.Err() != nil {
 		// Graceful stop (SIGTERM): whatever the stream could not carry is
