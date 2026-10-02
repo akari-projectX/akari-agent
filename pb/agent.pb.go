@@ -499,6 +499,8 @@ type Hello struct {
 	//   3 = signed self-update (UpdateOffer, FetchArtifact, UpdateStatus).
 	//       Protocol 1/2 agents are served as before; they are never
 	//       offered an update.
+	//   4 = enforces UserOp.speed_limit_bytes_per_sec. Older agents run
+	//       the same users unthrottled (the panel flags such nodes).
 	ProtocolVersion uint32 `protobuf:"varint,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	// State hash of what the agent actually runs (see "State hash" below),
 	// for config_version + the applied user set. Empty for protocol 0.
@@ -1097,12 +1099,21 @@ func (x *InboundUser) GetProtocol() string {
 // from every inbound and closes their live connections. Both are
 // idempotent.
 type UserOp struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Op            UserOp_Op              `protobuf:"varint,1,opt,name=op,proto3,enum=akari.v1.UserOp_Op" json:"op,omitempty"`
-	UserId        string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	InboundUsers  []*InboundUser         `protobuf:"bytes,3,rep,name=inbound_users,json=inboundUsers,proto3" json:"inbound_users,omitempty"` // ignored for REMOVE
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Op           UserOp_Op              `protobuf:"varint,1,opt,name=op,proto3,enum=akari.v1.UserOp_Op" json:"op,omitempty"`
+	UserId       string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	InboundUsers []*InboundUser         `protobuf:"bytes,3,rep,name=inbound_users,json=inboundUsers,proto3" json:"inbound_users,omitempty"` // ignored for REMOVE
+	// Per-user rate limit (protocol >= 4), bytes per second, applied to each
+	// direction separately and shared by ALL of the user's connections on
+	// this node (every inbound). 0 = unlimited. Ignored for REMOVE (a removed
+	// user has no limit). Part of the op like the credentials: a version the
+	// agent holds always carries that version's limits, so it is not part of
+	// the state hash. A limit that appears where there was none closes the
+	// user's live connections (they reconnect throttled); any other change
+	// applies to live connections in place. Agents < 4 ignore the field.
+	SpeedLimitBytesPerSec uint64 `protobuf:"varint,4,opt,name=speed_limit_bytes_per_sec,json=speedLimitBytesPerSec,proto3" json:"speed_limit_bytes_per_sec,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *UserOp) Reset() {
@@ -1154,6 +1165,13 @@ func (x *UserOp) GetInboundUsers() []*InboundUser {
 		return x.InboundUsers
 	}
 	return nil
+}
+
+func (x *UserOp) GetSpeedLimitBytesPerSec() uint64 {
+	if x != nil {
+		return x.SpeedLimitBytesPerSec
+	}
+	return 0
 }
 
 // Full desired state, sent when the agent's held versions mismatch the
@@ -1930,11 +1948,12 @@ const file_agent_proto_rawDesc = "" +
 	"\vinbound_tag\x18\x01 \x01(\tR\n" +
 	"inboundTag\x12!\n" +
 	"\faccount_json\x18\x02 \x01(\tR\vaccountJson\x12\x1a\n" +
-	"\bprotocol\x18\x03 \x01(\tR\bprotocol\"\x9d\x01\n" +
+	"\bprotocol\x18\x03 \x01(\tR\bprotocol\"\xd7\x01\n" +
 	"\x06UserOp\x12#\n" +
 	"\x02op\x18\x01 \x01(\x0e2\x13.akari.v1.UserOp.OpR\x02op\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12:\n" +
-	"\rinbound_users\x18\x03 \x03(\v2\x15.akari.v1.InboundUserR\finboundUsers\"\x19\n" +
+	"\rinbound_users\x18\x03 \x03(\v2\x15.akari.v1.InboundUserR\finboundUsers\x128\n" +
+	"\x19speed_limit_bytes_per_sec\x18\x04 \x01(\x04R\x15speedLimitBytesPerSec\"\x19\n" +
 	"\x02Op\x12\a\n" +
 	"\x03ADD\x10\x00\x12\n" +
 	"\n" +

@@ -8,12 +8,14 @@ package main
 //	go test -run '^$' -bench . -benchmem ./...
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"net"
 	"runtime"
 	"testing"
 
+	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/protocol"
 
 	"akari/agent/pb"
@@ -148,7 +150,7 @@ func BenchmarkGateAdmitRelease(b *testing.B) {
 		for pb.Next() {
 			x := ids[r.Intn(len(ids))]
 			c := &liveConn{cancel: func() {}}
-			if !g.admit(x.key, x.user, c) {
+			if _, ok := g.admit(x.key, x.user, c); !ok {
 				b.Error("admissible identity refused")
 				return
 			}
@@ -181,4 +183,25 @@ func BenchmarkConnections5kLive(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = m.Connections()
 	}
+}
+
+// Speed limits (ratelimit.go): the per-chunk cost on a limited user's
+// path (bucket reservation, never waiting at this rate). Unlimited users
+// are never wrapped; their only cost is the limits lookup inside admit
+// (BenchmarkGateAdmitRelease).
+func BenchmarkLimitedWrite8k(b *testing.B) {
+	lim := newUserLimit(1 << 50)
+	w := &limitedWriter{Writer: buf.Discard, ctx: context.Background(), b: &lim.down}
+	b.SetBytes(buf.Size)
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			x := buf.New()
+			x.Extend(buf.Size)
+			if err := w.WriteMultiBuffer(buf.MultiBuffer{x}); err != nil {
+				b.Error(err)
+				return
+			}
+		}
+	})
 }

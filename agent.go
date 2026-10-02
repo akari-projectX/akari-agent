@@ -22,8 +22,9 @@ import (
 
 // agentProtocol is the control-protocol revision this agent speaks
 // (Hello.protocol_version; see agent.proto). 2 = renews its certificate
-// (AgentChannel.Renew); 3 = signed self-update (UpdateOffer/FetchArtifact).
-const agentProtocol = 3
+// (AgentChannel.Renew); 3 = signed self-update (UpdateOffer/FetchArtifact);
+// 4 = per-user speed limits (UserOp.speed_limit_bytes_per_sec, ratelimit.go).
+const agentProtocol = 4
 
 // Agent is the node-side supervisor: one persistent mTLS gRPC stream to the
 // panel, an embedded xray-core, and periodic heartbeat/traffic reporting.

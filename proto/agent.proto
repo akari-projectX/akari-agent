@@ -101,6 +101,8 @@ message Hello {
   //   3 = signed self-update (UpdateOffer, FetchArtifact, UpdateStatus).
   //       Protocol 1/2 agents are served as before; they are never
   //       offered an update.
+  //   4 = enforces UserOp.speed_limit_bytes_per_sec. Older agents run
+  //       the same users unthrottled (the panel flags such nodes).
   uint32 protocol_version = 5;
   // State hash of what the agent actually runs (see "State hash" below),
   // for config_version + the applied user set. Empty for protocol 0.
@@ -218,6 +220,15 @@ message UserOp {
   Op op = 1;
   string user_id = 2;
   repeated InboundUser inbound_users = 3; // ignored for REMOVE
+  // Per-user rate limit (protocol >= 4), bytes per second, applied to each
+  // direction separately and shared by ALL of the user's connections on
+  // this node (every inbound). 0 = unlimited. Ignored for REMOVE (a removed
+  // user has no limit). Part of the op like the credentials: a version the
+  // agent holds always carries that version's limits, so it is not part of
+  // the state hash. A limit that appears where there was none closes the
+  // user's live connections (they reconnect throttled); any other change
+  // applies to live connections in place. Agents < 4 ignore the field.
+  uint64 speed_limit_bytes_per_sec = 4;
 }
 
 // Full desired state, sent when the agent's held versions mismatch the

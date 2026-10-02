@@ -43,6 +43,20 @@ install as a hardened systemd service with `akari-panel/deploy/systemd/akari-age
 Sibling checkout convention: akari-panel and akari-agent live side by side
 (`../akari-panel` / `../akari-agent`), same as the panel's smoke test expects.
 
+## Per-user speed limits (protocol 4)
+
+The panel sends each user's plan speed limit with the user
+(`UserOp.speed_limit_bytes_per_sec`, 0 = unlimited). xray-core has no
+per-user rate limiting, so the agent's gate dispatcher paces a limited
+user's traffic itself (`ratelimit.go`): one token bucket per direction per
+user, shared by all of that user's connections and inbounds on the node.
+Limited users' connections do not use XTLS Vision's kernel splice (it would
+bypass any limiter); Vision itself keeps working. Unlimited users take
+exactly the old path. A limit that appears where there was none closes the
+user's live connections (clients reconnect throttled); other changes apply
+in place. Tests: `ratelimit_test.go` (real VLESS through xray: throughput
+equals the limit), `TestRT_VisionSpeedLimit` (canary, Vision over TLS).
+
 ## Self-update (protocol 3)
 
 The panel can roll out new agent releases (staged waves, health gate, automatic halt; see

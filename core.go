@@ -340,7 +340,13 @@ func (m *CoreManager) applyOpLocked(op *pb.UserOp) (lost bool, err error) {
 			_ = store.RemoveUser(context.Background(), uid) // not-found is fine
 		}
 	}
-	// 2. Install what is missing, in a deterministic order.
+	// 2. The user's rate limit, before any new credential can admit an
+	// unthrottled connection (a REMOVE, or an ADD that installs nothing,
+	// ends with no limit below).
+	if len(want) > 0 {
+		m.gate.SetLimit(uid, op.GetSpeedLimitBytesPerSec())
+	}
+	// 3. Install what is missing, in a deterministic order.
 	tags := make([]string, 0, len(want))
 	for tag := range want {
 		tags = append(tags, tag)
@@ -360,6 +366,7 @@ func (m *CoreManager) applyOpLocked(op *pb.UserOp) (lost bool, err error) {
 		m.counted[uid] = struct{}{}
 	} else {
 		delete(m.applied, uid)
+		m.gate.SetLimit(uid, 0)
 	}
 	return lost, err
 }

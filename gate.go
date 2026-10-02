@@ -57,6 +57,8 @@ type gateDispatcher struct {
 	mu      sync.Mutex
 	allowed map[gateKey]*protocol.MemoryUser
 	live    map[gateKey]map[*liveConn]struct{}
+	// limits: per-user rate limits by email (ratelimit.go); absent = none.
+	limits map[string]*userLimit
 }
 
 func init() {
@@ -68,6 +70,7 @@ func init() {
 			inner:   new(dispatcher.DefaultDispatcher),
 			allowed: make(map[gateKey]*protocol.MemoryUser),
 			live:    make(map[gateKey]map[*liveConn]struct{}),
+			limits:  make(map[string]*userLimit),
 		}
 		err := core.RequireFeatures(ctx, func(om outbound.Manager, router routing.Router, pm policy.Manager, sm stats.Manager) error {
 			return g.inner.Init(&dispatcher.Config{}, om, router, pm, sm)
@@ -174,12 +177,13 @@ func identity(ctx context.Context) (gateKey, *protocol.MemoryUser, bool) {
 	return gateKey{tag: in.Tag, email: in.User.Email}, in.User, true
 }
 
-// admit registers c under key iff user is the key's current identity.
-func (g *gateDispatcher) admit(key gateKey, user *protocol.MemoryUser, c *liveConn) bool {
+// admit registers c under key iff user is the key's current identity, and
+// returns the user's rate limit (nil = unlimited).
+func (g *gateDispatcher) admit(key gateKey, user *protocol.MemoryUser, c *liveConn) (*userLimit, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if cur, ok := g.allowed[key]; !ok || cur != user {
-		return false
+		return nil, false
 	}
 	conns := g.live[key]
 	if conns == nil {
@@ -187,7 +191,7 @@ func (g *gateDispatcher) admit(key gateKey, user *protocol.MemoryUser, c *liveCo
 		g.live[key] = conns
 	}
 	conns[c] = struct{}{}
-	return true
+	return g.limits[key.email], true
 }
 
 func (g *gateDispatcher) release(key gateKey, c *liveConn) {
@@ -221,14 +225,16 @@ func (g *gateDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*t
 	in := &transport.Link{Reader: downR, Writer: upW}
 	out := &transport.Link{Reader: upR, Writer: downW}
 	c := &liveConn{cancel: cancel, link: in}
-	if !g.admit(key, user, c) {
+	lim, ok := g.admit(key, user, c)
+	if !ok {
 		cancel()
 		return nil, errRevoked
 	}
+	limited := limitLink(ctx, out, lim)
 	go func() {
 		defer g.release(key, c)
 		defer cancel()
-		if err := g.inner.DispatchLink(ctx, dest, out); err != nil {
+		if err := g.inner.DispatchLink(ctx, dest, limited); err != nil {
 			_ = common.Interrupt(upR)
 			_ = common.Interrupt(downW)
 		}
@@ -246,9 +252,10 @@ func (g *gateDispatcher) DispatchLink(ctx context.Context, dest net.Destination,
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	c := &liveConn{cancel: cancel, link: link}
-	if !g.admit(key, user, c) {
+	lim, ok := g.admit(key, user, c)
+	if !ok {
 		return errRevoked
 	}
 	defer g.release(key, c)
-	return g.inner.DispatchLink(ctx, dest, link)
+	return g.inner.DispatchLink(ctx, dest, limitLink(ctx, link, lim))
 }
