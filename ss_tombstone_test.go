@@ -406,3 +406,35 @@ func hashRecordsOf(m *CoreManager) []hashRecord {
 	}
 	return recs
 }
+
+// Regression: xray registers a user's traffic counters lazily on the first
+// connection (check-then-register, not atomic); the loser of a race between
+// two first connections relayed uncounted. The agent registers them when the
+// user is added, so concurrent first connections are all billed.
+func TestFirstConnectionsAreAllCounted(t *testing.T) {
+	const rounds = 20
+	e, m, ops, _ := newSSEnv(t, rounds) // one fresh user (fresh counters) per round
+	for round := 0; round < rounds; round++ {
+		var wg sync.WaitGroup
+		var total atomic.Uint64
+		for w := 0; w < 16; w++ {
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				c, _ := e.handshake(t, ssKeyOf(ops[round]), closedChan())
+				defer c.Close()
+				p := bytes.Repeat([]byte{byte(w)}, 100+w)
+				if err := exchange(c, p); err != nil {
+					t.Errorf("exchange: %v", err)
+					return
+				}
+				total.Add(uint64(len(p)))
+			}(w)
+		}
+		wg.Wait()
+		want := total.Load()
+		if got := countersByUser(m)[ops[round].UserId]; got != [2]uint64{want, want} {
+			t.Fatalf("round %d: counters %v, relayed %d each way", round, got, want)
+		}
+	}
+}
