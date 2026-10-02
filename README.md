@@ -23,7 +23,13 @@ Responsibilities:
   detects divergence
 - enforce the panel's fail-closed lease (CLOCK_BOOTTIME; stop xray when the
   panel has not confirmed the desired state for the lease duration)
-- report cumulative per-user traffic counters (10s) and heartbeats (15s)
+- report cumulative per-user traffic counters (10s) and heartbeats (15s,
+  `-heartbeat-interval`) with the machine status (W11: CPU, load,
+  memory/swap, disk, default-route interface rates and totals, TCP/UDP
+  sockets, online users, RSS, xray version; read from `/proc`, no cgo)
+- latency test like Clash's url-test (W11): HTTP GET from the node's own
+  egress every 5 h (panel-configurable; "test now" from the panel), median
+  of 3, primary URL with a fallback
 - converge to the panel's desired state after any disconnect
 
 ## Build

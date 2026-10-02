@@ -1,0 +1,5 @@
+Name:	akari-agent
+State:	S (sleeping)
+VmPeak:	 1500000 kB
+VmRSS:	   54321 kB
+Threads:	12

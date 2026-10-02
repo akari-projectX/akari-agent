@@ -17,7 +17,6 @@ full dependency graph is `go.mod` / `go.sum`.
 | [xtls/reality](https://github.com/XTLS/REALITY) | MPL-2.0 | via xray-core |
 | [grpc-go](https://github.com/grpc/grpc-go), `genproto/googleapis/rpc` | Apache-2.0 | |
 | [protobuf-go](https://github.com/protocolbuffers/protobuf-go) | BSD-3-Clause | generated code in `pb/` |
-| [gopsutil](https://github.com/shirou/gopsutil), `tklauser/go-sysconf`, `tklauser/numcpus` | BSD-3-Clause, Apache-2.0 | host statistics |
 | [BurntSushi/toml](https://github.com/BurntSushi/toml), [pelletier/go-toml](https://github.com/pelletier/go-toml), [ghodss/yaml](https://github.com/ghodss/yaml) | MIT | config parsing |
 | [google/uuid](https://github.com/google/uuid), [gorilla/websocket](https://github.com/gorilla/websocket), [miekg/dns](https://github.com/miekg/dns), [refraction-networking/utls](https://github.com/refraction-networking/utls), [cloudflare/circl](https://github.com/cloudflare/circl), [go4.org/netipx](https://github.com/go4org/netipx) | BSD-3-Clause (or BSD-style) | |
 | [klauspost/compress](https://github.com/klauspost/compress) | BSD-3-Clause + Apache-2.0 (parts) | |

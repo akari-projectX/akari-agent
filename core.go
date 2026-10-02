@@ -161,6 +161,17 @@ func (m *CoreManager) Connections() uint64 {
 	return uint64(g.LiveTotal())
 }
 
+// LiveStats returns the gate's tracked dispatches and the distinct users
+// among them (0, 0 when no instance runs).
+func (m *CoreManager) LiveStats() (conns, users uint64) {
+	g := m.liveGate.Load()
+	if g == nil {
+		return 0, 0
+	}
+	c, u := g.LiveStats()
+	return uint64(c), uint64(u)
+}
+
 // Running reports whether an xray instance is up.
 func (m *CoreManager) Running() bool {
 	m.mu.Lock()

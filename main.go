@@ -39,6 +39,8 @@ func main() {
 		"after a self-update: how long the new binary has to connect and apply the panel's state before it is rolled back")
 	maxBoots := flag.Int("update-max-boots", defaultMaxBoots,
 		"after a self-update: starts the new binary gets to pass its self-check before the launcher rolls it back")
+	heartbeat := flag.Duration("heartbeat-interval", 15*time.Second,
+		"how often the agent reports its machine status (heartbeat), 1s..5m")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(versionString())
@@ -88,6 +90,7 @@ func main() {
 	defer stop()
 
 	a := NewAgent(cfg, agentVersion, ids)
+	a.heartbeatEvery = min(max(*heartbeat, time.Second), 5*time.Minute)
 	a.upd = upd
 	a.trial = newTrialState(trial)
 	a.finalsStore = &finalsStore{dir: dir}
