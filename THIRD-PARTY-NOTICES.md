@@ -4,7 +4,7 @@ This repository's own code is MIT (see `LICENSE`). It vendors/copies the
 contract file `proto/agent.proto` (canonical copy lives in the
 `akari-panel` repository of the same organisation) and the released binary
 statically links the Go modules below. The list is generated from
-`go version -m` of the built agent (41 modules, 2026-10-02 W10, xray-core
+`go version -m` of the built agent (38 modules, 2026-10-02 W10+W11, xray-core
 `v1.260327.0`); re-check it whenever `go.mod` changes (`go version -m agent`).
 License texts are in each module (module cache / upstream repository); the
 full dependency graph is `go.mod` / `go.sum`.
