@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"akari/agent/pb"
+	"akari/agent/release"
 
 	"github.com/xtls/xray-core/common/protocol"
 	ss2022 "github.com/xtls/xray-core/proxy/shadowsocks_2022"
@@ -428,6 +429,35 @@ func FuzzLoadConfig(f *testing.F) {
 		}
 		if (cfg.Identity.CertPEM == "") != (cfg.Identity.KeyPEM == "") {
 			t.Fatal("half a v1 identity accepted")
+		}
+	})
+}
+
+// FuzzApplyRequest: the apply request is written by the unprivileged agent
+// and read by the root updater (W18). Invariants: no panic; an accepted
+// request has a known kind, a release version and bounded fields, and
+// re-encoding it parses to the same request.
+func FuzzApplyRequest(f *testing.F) {
+	f.Add([]byte(`{"schema":1,"kind":"apply","rollout_id":"r","version":"v1.2.3","panel_protocol":3,"manifest":"e30=","signatures":[{"key_id":"k","sig":"AA=="}]}`))
+	f.Add([]byte(`{"schema":1,"kind":"rollback","version":"v1.2.3-rc.1","reason":"x"}`))
+	f.Add([]byte(`{"schema":1,"kind":"apply","version":"v1.2.3","path":"/etc/shadow"}`))
+	f.Add([]byte(`{"schema":1,"kind":"apply","version":"v1.2.3"} {}`))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		r, err := parseApplyRequest(b)
+		if err != nil {
+			return
+		}
+		if (r.Kind != kindApply && r.Kind != kindRollback) || !release.ValidVersion(r.Version) ||
+			len(r.RolloutID) > 64 || len(r.Reason) > 512 || len(r.Signatures) > 8 {
+			t.Fatalf("out-of-range request accepted: %+v", r)
+		}
+		again, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r2, err := parseApplyRequest(again)
+		if err != nil || r2.Version != r.Version || r2.Kind != r.Kind || string(r2.Manifest) != string(r.Manifest) {
+			t.Fatalf("round trip: %v %+v", err, r2)
 		}
 	})
 }

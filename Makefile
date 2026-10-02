@@ -1,4 +1,4 @@
-FUZZ_MAIN = FuzzBuildConfig FuzzRewriteCertPaths FuzzBuildUser FuzzInboundTCPPorts FuzzACMEConfig FuzzProcParsers FuzzStateHash FuzzLoadConfig
+FUZZ_MAIN = FuzzBuildConfig FuzzRewriteCertPaths FuzzBuildUser FuzzInboundTCPPorts FuzzACMEConfig FuzzProcParsers FuzzStateHash FuzzLoadConfig FuzzApplyRequest
 FUZZ_RELEASE = FuzzParseManifest FuzzCompareVersions FuzzVerify FuzzParseKeys
 
 .PHONY: fuzz cover third-party check-third-party bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb vet fmt-check test test-canary vulncheck ci
@@ -142,6 +142,14 @@ COVER_MIN ?= 85
 cover:
 	go test -tags canary -count=1 -coverprofile=cover.out .
 	scripts/cover-gate.sh cover.out $(COVER_MIN)
+
+# W18: the self-update path under real systemd 257 (docker, privileged):
+# the shipped units from the panel checkout, the agent's StateDirectory
+# noexec+idmapped as on a VPS, install/confirm, crash-loop rollback and a
+# hostile request against the privileged updater. CI job `systemd-update`.
+PANEL_DIR ?= ../akari-panel
+systemd-test:
+	scripts/systemd-test/run.sh $(PANEL_DIR)
 
 # M2-6 overhead benchmarks at 10k users per node (bench_test.go; results in
 # akari-panel/docs/PERF.md).

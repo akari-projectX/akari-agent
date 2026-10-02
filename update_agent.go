@@ -2,8 +2,9 @@ package main
 
 // Signed self-update (M6), session side: UpdateOffer handling, the artifact
 // download over the existing mTLS connection (AgentChannel.FetchArtifact),
-// the switch to the new binary and the probation (self-check) of a freshly
-// started one. See update.go for the on-disk side and the launcher.
+// the hand-over to the privileged updater and the probation (self-check) of
+// a freshly installed binary. See update.go for the on-disk side and
+// updater.go for the updater.
 
 import (
 	"context"
@@ -75,6 +76,9 @@ func (a *Agent) onUpdateOffer(ctx context.Context, gen uint64, send func(*pb.Age
 	if a.upd == nil {
 		return reject("", errors.New("self-update unavailable on this node (no writable update directory)"))
 	}
+	if !a.upd.updaterInstalled() {
+		return reject("", errors.New(errUpdaterMissing))
+	}
 	sigs := make([]release.Signature, 0, len(o.GetSignatures()))
 	for _, s := range o.GetSignatures() {
 		sigs = append(sigs, release.Signature{KeyID: s.GetKeyId(), Sig: s.GetSignature()})
@@ -110,16 +114,18 @@ func (a *Agent) onUpdateOffer(ctx context.Context, gen uint64, send func(*pb.Age
 		return errStreamGone
 	}
 	slog.Info("update offer accepted", "version", m.Version, "key", keyID, "rollout", o.GetRolloutId())
-	off := acceptedOffer{rolloutID: o.GetRolloutId(), m: m, raw: o.GetManifest(), sigs: sigs}
+	off := acceptedOffer{rolloutID: o.GetRolloutId(), m: m, raw: o.GetManifest(), sigs: sigs,
+		panelProtocol: o.GetPanelProtocol()}
 	go a.runUpdate(ctx, gen, send, conn, off, tok)
 	return nil
 }
 
 type acceptedOffer struct {
-	rolloutID string
-	m         *release.Manifest
-	raw       []byte
-	sigs      []release.Signature
+	rolloutID     string
+	m             *release.Manifest
+	raw           []byte
+	sigs          []release.Signature
+	panelProtocol uint32
 }
 
 // connFor returns stream gen's connection, nil if it is no longer current.
@@ -132,9 +138,10 @@ func (a *Agent) connFor(gen uint64) grpc.ClientConnInterface {
 	return a.curConn
 }
 
-// runUpdate downloads, verifies and stages the offered binary, then
-// switches to it. Bound to the offering stream: if it dies, nothing is
-// switched (the panel offers again on the next stream).
+// runUpdate downloads and verifies the offered binary, stages it, then
+// hands it to the updater. Bound to the offering stream: if it dies before
+// the hand-over, nothing is switched (the panel offers again on the next
+// stream).
 func (a *Agent) runUpdate(ctx context.Context, gen uint64, send func(*pb.AgentUp) error, conn grpc.ClientConnInterface, off acceptedOffer, tok uint64) {
 	defer a.upd.setIdle(tok)
 	m := off.m
@@ -150,26 +157,29 @@ func (a *Agent) runUpdate(ctx context.Context, gen uint64, send func(*pb.AgentUp
 		fail(err)
 		return
 	}
-	path := a.upd.stagedPath(m)
-	if err := os.Rename(tmp, path); err != nil {
+	if err := os.Rename(tmp, a.upd.path(stagedName)); err != nil {
 		_ = os.Remove(tmp)
 		fail(fmt.Errorf("stage: %w", err))
 		return
 	}
-	syncDir(a.upd.binDir())
-	next := slot{Version: m.Version, Path: path, Manifest: off.raw, Signatures: off.sigs}
-	if err := verifySlot(&next); err != nil {
-		fail(err)
-		return
-	}
-	slog.Info("agent update verified and staged", "version", m.Version, "path", path)
+	syncDir(a.upd.dir)
+	slog.Info("agent update verified and staged", "version", m.Version)
 
+	// Waits under applyMu end with the stream or the process (a stop
+	// request needs applyMu for gracefulStop).
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if a.procCtx != nil {
+		defer context.AfterFunc(a.procCtx, cancel)()
+	}
 	a.applyMu.Lock()
 	defer a.applyMu.Unlock()
-	if ctx.Err() != nil {
+	if wctx.Err() != nil {
+		_ = os.Remove(a.upd.path(stagedName))
 		return // stream gone: the next one gets the offer again
 	}
-	if err := a.switchLocked(gen, send, next, off.rolloutID); err != nil {
+	if err := a.switchLocked(wctx, gen, send, off); err != nil {
+		_ = os.Remove(a.upd.path(stagedName))
 		fail(err)
 	}
 }
@@ -177,7 +187,7 @@ func (a *Agent) runUpdate(ctx context.Context, gen uint64, send func(*pb.AgentUp
 // download fetches m's artifact into a temp file in the update directory,
 // resuming after transient errors, and checks size and SHA-256.
 func (a *Agent) download(ctx context.Context, conn grpc.ClientConnInterface, m *release.Manifest) (string, error) {
-	f, err := os.CreateTemp(a.upd.binDir(), ".download-*.tmp")
+	f, err := os.CreateTemp(a.upd.dir, ".download-*.tmp")
 	if err != nil {
 		return "", err
 	}
@@ -217,9 +227,6 @@ func (a *Agent) download(ctx context.Context, conn grpc.ClientConnInterface, m *
 		return "", fmt.Errorf("download: sha256 %s does not match the signed manifest", sum)
 	}
 	if err := f.Sync(); err != nil {
-		return "", err
-	}
-	if err := f.Chmod(0o700); err != nil {
 		return "", err
 	}
 	if err := f.Close(); err != nil {
@@ -281,31 +288,46 @@ func (a *Agent) stopForRestartLocked() {
 	a.persistFinalsLocked("restart")
 }
 
-// switchLocked restarts into the staged binary: final counters flushed
-// (stream) and persisted (disk), state committed with the new binary on
-// probation, then the process image is replaced. Only returns on failure
-// (after undoing the switch and re-announcing the now empty state).
-// Caller holds applyMu.
-func (a *Agent) switchLocked(gen uint64, send func(*pb.AgentUp) error, next slot, rolloutID string) error {
-	slog.Info("switching to the new agent", "version", next.Version)
+// switchLocked hands the staged binary to the updater: xray stopped, final
+// counters flushed (stream) and persisted (disk), RESTARTING sent, then the
+// apply request. The updater verifies and installs the binary and restarts
+// the service (this process ends with SIGTERM); a refusal undoes the switch
+// (this binary carries on, re-announcing its now empty state). Caller holds
+// applyMu.
+func (a *Agent) switchLocked(ctx context.Context, gen uint64, send func(*pb.AgentUp) error, off acceptedOffer) error {
+	v := off.m.Version
+	slog.Info("switching to the new agent", "version", v)
 	a.stopForRestartLocked()
 	a.finals.flush(gen, send)
-	_ = send(updateStatus(rolloutID, next.Version, pb.UpdateStatus_STATE_RESTARTING, nil))
+	_ = send(updateStatus(off.rolloutID, v, pb.UpdateStatus_STATE_RESTARTING, nil))
 	a.flushStream(gen, switchFlushWait)
-	undo, err := a.upd.commit(next, rolloutID)
-	if err == nil {
-		err = a.upd.exec(next.Path, argvFor(next.Path), launchedEnv())
-		if errors.Is(err, errExecuted) {
-			return nil
+	res, err := a.upd.requestApply(ctx.Done(), applyRequest{RolloutID: off.rolloutID, Version: v,
+		PanelProtocol: off.panelProtocol, Manifest: off.raw, Signatures: off.sigs})
+	switch {
+	case errors.Is(err, errApplyCanceled):
+		// The updater carries on with the request; whatever it decides,
+		// the next process reports it.
+		return nil
+	case err == nil && res.State == resInstalled:
+		slog.Info("the updater installed the new agent; waiting for the restart", "version", v)
+		select {
+		case <-ctx.Done():
+		case <-time.After(a.upd.restartWait):
+			// The binary on disk is the new one: let systemd start it.
+			slog.Error("no restart by the updater; exiting so the service manager starts the new agent")
+			a.exit(1)
 		}
-		undo()
+		return nil
+	case err == nil:
+		err = fmt.Errorf("the updater refused %s: %s", v, res.Error)
+		_ = os.Remove(a.upd.path(resultName))
 	}
 	// Still this binary, xray stopped: claim nothing so the panel resends
 	// the desired state.
 	if serr := send(a.helloLocked()); serr == nil {
 		a.finals.flush(gen, send)
 	}
-	return fmt.Errorf("switch to %s: %w", next.Version, err)
+	return fmt.Errorf("switch to %s: %w", v, err)
 }
 
 // flushStream waits until everything queued on stream gen so far was handed
@@ -353,15 +375,17 @@ func (a *Agent) confirmTrialLocked(send func(*pb.AgentUp) error) {
 		return
 	}
 	t.once.Do(func() { close(t.confirmed) })
-	if err := a.upd.confirm(); err != nil {
-		slog.Error("cannot persist the passed self-check", "error", err)
+	if err := a.upd.confirm(t.rec.Version); err != nil {
+		slog.Error("cannot record the passed self-check for the updater", "error", err)
 	}
 	slog.Info("agent update passed its self-check", "version", t.rec.Version)
 	_ = send(updateStatus(t.rec.RolloutID, t.rec.Version, pb.UpdateStatus_STATE_CONFIRMED, nil))
 }
 
-// trialLoop rolls the binary on probation back unless it passes its
-// self-check within the timeout.
+// trialLoop asks the updater to roll the binary on probation back unless
+// it passes its self-check within the timeout. (The updater also watches
+// the probation itself; this covers a probation it is not watching, e.g.
+// after a reboot.)
 func (a *Agent) trialLoop(ctx context.Context) {
 	t := a.trial
 	timer := time.NewTimer(a.upd.selfCheck)
@@ -373,26 +397,14 @@ func (a *Agent) trialLoop(ctx context.Context) {
 		return
 	case <-timer.C:
 	}
-	a.rollbackTrial(fmt.Sprintf("no connected, acknowledged apply within %s of starting", a.upd.selfCheck))
-}
-
-// rollbackTrial replaces this process with the previous binary.
-func (a *Agent) rollbackTrial(why string) {
 	a.applyMu.Lock()
 	defer a.applyMu.Unlock()
-	if a.trial.isConfirmed() {
+	if t.isConfirmed() {
 		return
 	}
-	a.stopForRestartLocked()
-	target, err := a.upd.rollbackTrial(why)
-	if err == nil {
-		err = a.upd.exec(target, argvFor(target), launchedEnv())
-		if errors.Is(err, errExecuted) {
-			return
-		}
+	why := fmt.Sprintf("no connected, acknowledged apply within %s of starting", a.upd.selfCheck)
+	slog.Error("agent update failed its self-check; asking the updater to roll back", "version", t.rec.Version, "reason", why)
+	if err := a.upd.requestRollback(t.rec, why); err != nil {
+		slog.Error("cannot request the rollback", "error", err)
 	}
-	// Let the service manager restart the installed binary (its launcher
-	// sees the rollback in the state file).
-	slog.Error("rollback exec failed; exiting for a restart", "error", err)
-	a.exit(1)
 }
