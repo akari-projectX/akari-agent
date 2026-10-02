@@ -4,7 +4,8 @@
 // client completes a handshake through the agent's CoreManager (the same
 // code path the agent runs: gate dispatcher, dynamic users), relays data,
 // and then loses it on revocation — the established connection is cut and
-// a new one is refused. Run WITHOUT -race (Vision): `make test-canary`.
+// a new one is refused. W7: re-added with a speed limit, a new connection is
+// paced to it (every protocol, including SS2022 and Hysteria2 over QUIC). Run WITHOUT -race (Vision): `make test-canary`.
 
 package main
 
@@ -152,6 +153,54 @@ func runMatrixCase(t *testing.T, e *matrixEnv, tc matrixCase) {
 	if up < 3000 || down < 3000 {
 		t.Fatalf("RT-%s: user counters up=%d down=%d after relaying >3000 bytes", tc.name, up, down)
 	}
+	// W7: a limit-only change (a delta with the same credentials, what the
+	// panel sends when a plan's speed changes) closes the user's unthrottled
+	// connections; a new one through a fresh client is paced to the limit
+	// (both directions of the echo).
+	const rate = 256 << 10
+	const n = 512 << 10
+	op.SpeedLimitBytesPerSec = rate
+	if _, err := m.ApplyUserOps([]*pb.UserOp{op}); err != nil {
+		t.Fatal(err)
+	}
+	if echoOnce(c, "unthrottled") == nil {
+		t.Fatalf("RT-%s: unthrottled connection still relays after the new limit", tc.name)
+	}
+	// A fresh client (some keep sessions the agent just closed).
+	cp2 := freePort(t)
+	clientInstance(t, map[string]any{
+		"log": map[string]any{"loglevel": "warning"},
+		"inbounds": []any{map[string]any{"listen": "127.0.0.1", "port": cp2, "protocol": "dokodemo-door",
+			"settings": map[string]any{"address": "127.0.0.1", "port": echo, "network": "tcp"}}},
+		"outbounds": []any{tc.outbound(sp)},
+	})
+	cp = cp2
+	c.Close()
+	var lc net.Conn
+	for i := 0; i < 30; i++ {
+		if lc, err = dial(); err == nil {
+			if err = echoOnce(lc, "limited"); err == nil {
+				break
+			}
+			lc.Close()
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("RT-%s: reconnect with a limit: %v", tc.name, err)
+	}
+	took, err := echoBulk(lc, n)
+	if err != nil {
+		t.Fatalf("RT-%s: limited transfer: %v", tc.name, err)
+	}
+	// Up and down are paced concurrently: ~n/rate, not twice that.
+	want := time.Duration(n-limitBurstMin) * time.Second / rate
+	t.Logf("RT-%s-LIMIT: %d bytes echoed in %v at %d B/s (want ~%v)", tc.name, n, took, rate, want)
+	if took < want*95/100 || took > want*13/10+300*time.Millisecond {
+		t.Fatalf("RT-%s: transfer not paced to the limit: %v, want ~%v", tc.name, took, want)
+	}
+	c = lc // the revocation below runs on the throttled connection
+	defer lc.Close()
 	if tc.rebuild {
 		if _, err := m.Rebuild(inb, nil); err != nil {
 			t.Fatal(err)
@@ -169,6 +218,29 @@ func runMatrixCase(t *testing.T, e *matrixEnv, tc matrixCase) {
 		}
 	}
 	t.Logf("RT-%s: handshake ok, cut and refused after revoke", tc.name)
+}
+
+// echoBulk sends n bytes (concurrently) and reads them back; the time
+// until the last byte returned.
+func echoBulk(c net.Conn, n int) (time.Duration, error) {
+	_ = c.SetDeadline(time.Now().Add(30 * time.Second))
+	defer c.SetDeadline(time.Time{})
+	start := time.Now()
+	werr := make(chan error, 1)
+	go func() { _, err := c.Write(make([]byte, n)); werr <- err }()
+	b := make([]byte, 64<<10)
+	got := 0
+	for got < n {
+		k, err := c.Read(b)
+		got += k
+		if err != nil {
+			return 0, fmt.Errorf("read %d of %d: %w", got, n, err)
+		}
+	}
+	if err := <-werr; err != nil {
+		return 0, err
+	}
+	return time.Since(start), nil
 }
 
 func TestRT_ProtocolMatrix(t *testing.T) {

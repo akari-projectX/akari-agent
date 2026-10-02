@@ -37,6 +37,13 @@ import (
 // TLS record batch, so small exchanges are not delayed at all.
 const limitBurstMin = 64 << 10
 
+// limitChunk is the most a wrapper passes per reservation. Pipes can hand
+// over hundreds of KiB at once; pacing that as one block would hold the
+// whole batch for seconds and then release it in one go (stalling the
+// other direction of request/response protocols). Chunks keep both
+// directions flowing at the rate.
+const limitChunk = 32 << 10
+
 // monoStart anchors the monotonic clock buckets run on.
 var monoStart = time.Now()
 
@@ -142,17 +149,38 @@ type limitedReader struct {
 	buf.Reader
 	ctx context.Context
 	b   *bucket
+	// Read but not yet passed on (beyond one chunk), and the inner error
+	// that came with it (returned once it is drained).
+	pending buf.MultiBuffer
+	err     error
 }
 
 func (r *limitedReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
-	mb, err := r.Reader.ReadMultiBuffer()
-	if n := mb.Len(); n > 0 {
-		if werr := r.b.wait(r.ctx, int(n)); werr != nil {
-			buf.ReleaseMulti(mb)
-			return nil, werr
+	if r.pending.IsEmpty() {
+		if r.err != nil {
+			return nil, r.err
+		}
+		r.pending, r.err = r.Reader.ReadMultiBuffer()
+		if r.pending.IsEmpty() {
+			err := r.err
+			r.err = nil
+			return nil, err
 		}
 	}
-	return mb, err
+	rest, head := buf.SplitSize(r.pending, limitChunk)
+	r.pending = rest
+	if werr := r.b.wait(r.ctx, int(head.Len())); werr != nil {
+		buf.ReleaseMulti(head)
+		buf.ReleaseMulti(r.pending)
+		r.pending = nil
+		return nil, werr
+	}
+	if r.pending.IsEmpty() {
+		err := r.err
+		r.err = nil
+		return head, err
+	}
+	return head, nil
 }
 
 func (r *limitedReader) Interrupt()   { _ = common.Interrupt(r.Reader) }
@@ -167,13 +195,20 @@ type limitedWriter struct {
 }
 
 func (w *limitedWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
-	if n := mb.Len(); n > 0 {
-		if err := w.b.wait(w.ctx, int(n)); err != nil {
+	for !mb.IsEmpty() {
+		var head buf.MultiBuffer
+		mb, head = buf.SplitSize(mb, limitChunk)
+		if err := w.b.wait(w.ctx, int(head.Len())); err != nil {
+			buf.ReleaseMulti(head)
+			buf.ReleaseMulti(mb)
+			return err
+		}
+		if err := w.Writer.WriteMultiBuffer(head); err != nil {
 			buf.ReleaseMulti(mb)
 			return err
 		}
 	}
-	return w.Writer.WriteMultiBuffer(mb)
+	return nil
 }
 
 func (w *limitedWriter) Interrupt()   { _ = common.Interrupt(w.Writer) }
