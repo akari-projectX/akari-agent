@@ -72,11 +72,13 @@ type appliedCred struct {
 	user     *protocol.MemoryUser
 }
 
-// monoCounter keeps a reported counter monotonic within a session even if
-// the underlying xray counter were ever reset (see readCounter).
-type monoCounter struct {
-	lastRaw int64
-	offset  int64
+// userCounters: a user's xray traffic counters, resolved once when the
+// user is first installed in an instance (registerCountersLocked registers
+// them before the user can connect; xray never unregisters them), and the
+// values last put in a periodic report on the current stream.
+type userCounters struct {
+	up, down         stats.Counter
+	sentUp, sentDown int64
 }
 
 // CoreManager owns the embedded xray-core instance. The agent is a
@@ -116,8 +118,7 @@ type CoreManager struct {
 	tombs map[string]int
 	// counted: every email with counters in this instance, including users
 	// removed since (xray keeps their counters; the tail is still billed).
-	counted map[string]struct{}
-	mono    map[string]*monoCounter
+	counted map[string]*userCounters
 	// nodeCert: where TLS inbounds naming the node certificate credential
 	// files read the ACME-managed certificate (protocol 6); nil = no
 	// rewrite (the files the admin installs). Set before each Rebuild.
@@ -143,8 +144,7 @@ func (m *CoreManager) resetUsersLocked() {
 	m.applied = make(map[string]map[string]appliedCred)
 	m.issued = make(map[string]map[string]appliedCred)
 	m.tombs = make(map[string]int)
-	m.counted = make(map[string]struct{})
-	m.mono = make(map[string]*monoCounter)
+	m.counted = make(map[string]*userCounters)
 }
 
 // SessionID returns the session the current counters belong to.
@@ -195,7 +195,7 @@ func (m *CoreManager) Running() bool {
 func (m *CoreManager) stopLocked() *pb.TrafficReport {
 	var final *pb.TrafficReport
 	if m.instance != nil {
-		if counters := m.countersLocked(nil); len(counters) > 0 {
+		if counters := m.countersLocked(nil, true); len(counters) > 0 {
 			final = &pb.TrafficReport{Users: counters, SessionId: m.sessionID}
 		}
 		_ = m.instance.Close()
@@ -251,7 +251,7 @@ func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) (*pb.Traf
 
 	var firstErr error
 	for _, op := range users {
-		if _, err := m.applyOpLocked(op); err != nil && firstErr == nil {
+		if _, err := m.applyOpLocked(op, true); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -462,7 +462,7 @@ func (m *CoreManager) ApplyUserOps(ops []*pb.UserOp) (*pb.TrafficReport, error) 
 	var firstErr error
 	touched := map[string]struct{}{}
 	for _, op := range ops {
-		lost, err := m.applyOpLocked(op)
+		lost, err := m.applyOpLocked(op, false)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -472,14 +472,15 @@ func (m *CoreManager) ApplyUserOps(ops []*pb.UserOp) (*pb.TrafficReport, error) 
 	}
 	var final *pb.TrafficReport
 	if len(touched) > 0 {
-		final = &pb.TrafficReport{Users: m.countersLocked(touched), SessionId: m.sessionID}
+		final = &pb.TrafficReport{Users: m.countersLocked(touched, true), SessionId: m.sessionID}
 	}
 	return final, firstErr
 }
 
 // applyOpLocked applies one op with REPLACE semantics. Returns whether a
-// credential that was live got dropped or swapped.
-func (m *CoreManager) applyOpLocked(op *pb.UserOp) (lost bool, err error) {
+// credential that was live got dropped or swapped. fresh: the op is part of
+// a Rebuild, on an instance that started empty.
+func (m *CoreManager) applyOpLocked(op *pb.UserOp, fresh bool) (lost bool, err error) {
 	uid := op.GetUserId()
 	if uid == "" {
 		return false, fmt.Errorf("user op without user id")
@@ -501,8 +502,15 @@ func (m *CoreManager) applyOpLocked(op *pb.UserOp) (lost bool, err error) {
 	}
 	// 1. Drop everything not kept verbatim — on EVERY inbound of the
 	// instance, not only the ones we believe hold the user, so a stale or
-	// rotated credential can never stay live.
-	for _, tag := range m.tags {
+	// rotated credential can never stay live. A user with nothing applied
+	// yet on a fresh instance (Rebuild) is in no validator and no gate
+	// entry: nothing to drop (W8; 2 x users x inbounds no-op lookups
+	// saved). Deltas keep the full sweep.
+	sweep := m.tags
+	if fresh && len(cur) == 0 {
+		sweep = nil
+	}
+	for _, tag := range sweep {
 		if c, ok := cur[tag]; ok {
 			if w, keep := want[tag]; keep && w.GetProtocol() == c.protocol && w.GetAccountJson() == c.account {
 				continue
@@ -544,7 +552,7 @@ func (m *CoreManager) applyOpLocked(op *pb.UserOp) (lost bool, err error) {
 	}
 	if len(cur) > 0 {
 		m.applied[uid] = cur
-		m.counted[uid] = struct{}{}
+		m.registerCountersLocked(uid)
 	} else {
 		delete(m.applied, uid)
 		m.gate.SetLimit(uid, 0)
@@ -583,7 +591,7 @@ func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, 
 		m.gate.Allow(key, prev.user)
 		m.tombs[tag]--
 		cur[tag] = prev
-		m.counted[uid] = struct{}{}
+		m.registerCountersLocked(uid)
 		return nil
 	}
 	var memoryUser *protocol.MemoryUser
@@ -617,7 +625,6 @@ func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, 
 		m.issued[tag] = make(map[string]appliedCred)
 	}
 	m.issued[tag][uid] = c
-	m.counted[uid] = struct{}{}
 	m.registerCountersLocked(uid)
 	return nil
 }
@@ -628,17 +635,22 @@ func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, 
 // of a user racing, the loser gets a nil counter and relays uncounted —
 // bytes never billed. Registered here, under mu and before the user can
 // connect, every connection finds the counter and the race cannot occur.
+// The counters are kept in m.counted (resolved once: a report reads two
+// atomics per user, no name building or lookup). Idempotent.
 func (m *CoreManager) registerCountersLocked(uid string) {
-	if m.instance == nil {
+	if _, ok := m.counted[uid]; ok || m.instance == nil {
 		return
 	}
 	sm, ok := m.instance.GetFeature(stats.ManagerType()).(stats.Manager)
 	if !ok {
 		return
 	}
-	for _, dir := range []string{"uplink", "downlink"} {
-		_, _ = stats.GetOrRegisterCounter(sm, "user>>>"+uid+">>>traffic>>>"+dir)
+	up, err1 := stats.GetOrRegisterCounter(sm, "user>>>"+uid+">>>traffic>>>uplink")
+	down, err2 := stats.GetOrRegisterCounter(sm, "user>>>"+uid+">>>traffic>>>downlink")
+	if err1 != nil || err2 != nil || up == nil || down == nil {
+		return
 	}
+	m.counted[uid] = &userCounters{up: up, down: down}
 }
 
 // Tombstones returns the number of tombstones on tag (tests, bench).
@@ -661,7 +673,11 @@ func (m *CoreManager) manager() (inbound.Manager, error) {
 func (m *CoreManager) StateHash(configVersion uint64) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var recs []hashRecord
+	n := 0
+	for _, tags := range m.applied {
+		n += len(tags)
+	}
+	recs := make([]hashRecord, 0, n)
 	for uid, tags := range m.applied {
 		for tag, c := range tags {
 			recs = append(recs, hashRecord{UserID: uid, Tag: tag, Protocol: c.protocol, Account: c.account})
@@ -672,75 +688,86 @@ func (m *CoreManager) StateHash(configVersion uint64) string {
 
 // TrafficSnapshot returns the current session id together with the
 // cumulative per-user counters of the instance that session names. Both are
-// read under mu, so a concurrent Rebuild cannot split them.
+// read under mu, so a concurrent Rebuild cannot split them. Every user with
+// traffic is in it (tests; the periodic report is TrafficChanges).
 func (m *CoreManager) TrafficSnapshot() *pb.TrafficReport {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.instance == nil {
 		return nil
 	}
-	return &pb.TrafficReport{Users: m.countersLocked(nil), SessionId: m.sessionID}
+	return &pb.TrafficReport{Users: m.countersLocked(nil, true), SessionId: m.sessionID}
+}
+
+// TrafficChanges is the periodic report: the session id and the cumulative
+// counters of the users whose counters moved since the last TrafficChanges
+// on this stream (W1: an idle user costs neither the agent nor the panel
+// anything). The panel bills per (node, user, session) from cumulative
+// values, so leaving an unchanged row out changes nothing; after ResetSent
+// (every new stream) the next report is complete again. nil = nothing to
+// report.
+func (m *CoreManager) TrafficChanges() *pb.TrafficReport {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.instance == nil {
+		return nil
+	}
+	users := m.countersLocked(nil, false)
+	if len(users) == 0 {
+		return nil
+	}
+	return &pb.TrafficReport{Users: users, SessionId: m.sessionID}
+}
+
+// ResetSent forgets what the periodic reports carried: the next
+// TrafficChanges reports every user with traffic. Called after each Hello
+// on a new stream (the panel instance behind it may never have seen this
+// session's counters).
+func (m *CoreManager) ResetSent() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, c := range m.counted {
+		c.sentUp, c.sentDown = 0, 0
+	}
 }
 
 // countersLocked reads per-user counters of m.instance for `only` (nil =
-// every counted email). Caller holds mu.
-func (m *CoreManager) countersLocked(only map[string]struct{}) []*pb.UserTraffic {
-	sm, ok := m.instance.GetFeature(stats.ManagerType()).(stats.Manager)
-	if !ok {
-		return nil
-	}
-	set := only
-	if set == nil {
-		set = m.counted
-	}
-	emails := make([]string, 0, len(set))
-	for e := range set {
-		emails = append(emails, e)
-	}
-	sort.Strings(emails)
-
+// every counted user), in no particular order (the panel keys rows by user
+// id). all: every user with traffic (final reports, removed users' tails);
+// otherwise only users whose counters changed since the last such report,
+// which is then recorded as sent. Caller holds mu.
+//
+// xray v26.3.27 never unregisters or resets per-user counters (RemoveUser
+// only touches the validator; nothing calls stats.UnregisterCounter), so a
+// value read here never goes backwards within a session. Should a future
+// core reset them, the fix is a new session id, not compensation here.
+func (m *CoreManager) countersLocked(only map[string]struct{}, all bool) []*pb.UserTraffic {
 	var out []*pb.UserTraffic
-	for _, email := range emails {
-		up := m.readCounter(sm, "user>>>"+email+">>>traffic>>>uplink")
-		down := m.readCounter(sm, "user>>>"+email+">>>traffic>>>downlink")
+	visit := func(uid string, c *userCounters) {
+		up, down := c.up.Value(), c.down.Value()
 		if up == 0 && down == 0 {
-			continue
+			return
 		}
-		out = append(out, &pb.UserTraffic{
-			UserId:    email,
-			UpBytes:   uint64(up),
-			DownBytes: uint64(down),
-		})
+		if !all {
+			if up == c.sentUp && down == c.sentDown {
+				return
+			}
+			c.sentUp, c.sentDown = up, down
+		}
+		out = append(out, &pb.UserTraffic{UserId: uid, UpBytes: uint64(up), DownBytes: uint64(down)})
+	}
+	if only != nil {
+		for uid := range only {
+			if c := m.counted[uid]; c != nil {
+				visit(uid, c)
+			}
+		}
+		return out
+	}
+	for uid, c := range m.counted {
+		visit(uid, c)
 	}
 	return out
-}
-
-// readCounter returns a session-monotonic value for an xray counter. xray
-// v26.3.27 never unregisters or resets per-user counters when a user is
-// removed and re-added (RemoveUser only touches the validator; nothing
-// calls stats.UnregisterCounter), so the offset stays 0 in practice. It is a
-// guard against a future core doing so: any drop is carried as an offset,
-// so the cumulative value the panel bills per session never goes backwards.
-func (m *CoreManager) readCounter(sm stats.Manager, name string) int64 {
-	raw := counterValue(sm, name)
-	st := m.mono[name]
-	if st == nil {
-		st = &monoCounter{}
-		m.mono[name] = st
-	}
-	if raw < st.lastRaw {
-		st.offset += st.lastRaw
-	}
-	st.lastRaw = raw
-	return raw + st.offset
-}
-
-func counterValue(sm stats.Manager, name string) int64 {
-	c := sm.GetCounter(name)
-	if c == nil {
-		return 0
-	}
-	return c.Value()
 }
 
 // refuseFakeDNS is the authoritative FakeDNS check (the panel's JSON check

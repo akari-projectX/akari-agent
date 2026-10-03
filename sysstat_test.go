@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xtls/xray-core/common/protocol"
 )
 
 func fixture(t *testing.T, name string) []byte {
@@ -271,17 +273,60 @@ func TestSamplerPidOnlyProc(t *testing.T) {
 // Online users = distinct emails with at least one live dispatch, over all
 // inbounds.
 func TestGateLiveStats(t *testing.T) {
-	g := &gateDispatcher{live: map[gateKey]map[*liveConn]struct{}{
-		{tag: "a", email: "u1"}: {&liveConn{}: {}, &liveConn{}: {}},
-		{tag: "b", email: "u1"}: {&liveConn{}: {}},
-		{tag: "a", email: "u2"}: {&liveConn{}: {}},
-	}}
-	if c, u := g.LiveStats(); c != 4 || u != 2 {
-		t.Fatalf("conns %d users %d", c, u)
+	g := newGate()
+	u1, u2 := &protocol.MemoryUser{Email: "u1"}, &protocol.MemoryUser{Email: "u2"}
+	a1, b1, a2 := gateKey{tag: "a", email: "u1"}, gateKey{tag: "b", email: "u1"}, gateKey{tag: "a", email: "u2"}
+	g.Allow(a1, u1)
+	g.Allow(b1, u1)
+	g.Allow(a2, u2)
+	admit := func(k gateKey, u *protocol.MemoryUser) *liveConn {
+		c := &liveConn{cancel: func() {}}
+		if _, ok := g.admit(k, u, c); !ok {
+			t.Fatal("refused")
+		}
+		return c
 	}
-	if c, u := (&gateDispatcher{live: map[gateKey]map[*liveConn]struct{}{}}).LiveStats(); c != 0 || u != 0 {
-		t.Fatalf("%d %d", c, u)
+	want := func(conns, users int) {
+		t.Helper()
+		if c, u := g.LiveStats(); c != conns || u != users || g.LiveTotal() != conns {
+			t.Fatalf("conns %d users %d, want %d %d", c, u, conns, users)
+		}
+		// The O(1) counters agree with a recount of the tracked set.
+		g.mu.Lock()
+		n, seen := 0, map[string]struct{}{}
+		for k, cs := range g.live {
+			n += len(cs)
+			seen[k.email] = struct{}{}
+		}
+		g.mu.Unlock()
+		if n != conns || len(seen) != users {
+			t.Fatalf("recount %d/%d, counters %d/%d", n, len(seen), conns, users)
+		}
 	}
+	want(0, 0)
+	c1, c2, c3 := admit(a1, u1), admit(a1, u1), admit(b1, u1)
+	c4 := admit(a2, u2)
+	want(4, 2)
+	g.release(a1, c1)
+	want(3, 2)
+	g.release(a1, c1) // double release: no change
+	want(3, 2)
+	g.Revoke(a1) // takes c2
+	want(2, 2)
+	g.release(a1, c2) // the relay ending after the revocation
+	want(2, 2)
+	g.release(b1, c3)
+	want(1, 1)
+	g.Allow(a2, &protocol.MemoryUser{Email: "u2"}) // rotation: c4 cut
+	want(0, 0)
+	g.release(a2, c4)
+	want(0, 0)
+	g.Allow(a1, u1)
+	admit(a1, u1)
+	admit(a2, g.allowed[a2])
+	want(2, 2)
+	_ = g.Close()
+	want(0, 0)
 	var m CoreManager
 	if c, u := m.LiveStats(); c != 0 || u != 0 {
 		t.Fatalf("no instance: %d %d", c, u)

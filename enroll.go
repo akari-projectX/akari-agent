@@ -97,11 +97,12 @@ func (a *Agent) ensureEnrolled(ctx context.Context) error {
 		case codes.InvalidArgument:
 			return fmt.Errorf("enrollment: the panel refused the request: %w", err)
 		}
-		slog.Warn("enrollment failed, retrying", "error", err, "retry_in", backoff)
+		wait := fullJitter(backoff)
+		slog.Warn("enrollment failed, retrying", "error", err, "retry_in", wait)
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(backoff):
+		case <-time.After(wait):
 		}
 		backoff = min(backoff*2, 30*a.backoffBase)
 	}

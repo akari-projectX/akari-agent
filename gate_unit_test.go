@@ -21,13 +21,7 @@ import (
 	"github.com/xtls/xray-core/transport/pipe"
 )
 
-func newBareGate() *gateDispatcher {
-	return &gateDispatcher{
-		allowed: make(map[gateKey]*protocol.MemoryUser),
-		live:    make(map[gateKey]map[*liveConn]struct{}),
-		limits:  make(map[string]*userLimit),
-	}
-}
+func newBareGate() *gateDispatcher { return newGate() }
 
 // liveFor registers a tracked dispatch for key as user (what Dispatch /
 // DispatchLink do) and returns it with a channel closed on cancel and the

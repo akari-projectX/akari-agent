@@ -314,7 +314,7 @@ func TestReplaceRemovesStaleTags(t *testing.T) {
 
 // xray keeps a user's counters across RemoveUser+AddUser within one
 // instance (nothing unregisters them), so the reported cumulative value
-// stays monotonic; and if a counter ever did reset, the guard carries it.
+// stays monotonic, and the agent reads the very counter xray counts into.
 func TestCountersSurviveRemoveAndReAdd(t *testing.T) {
 	m := NewCoreManager()
 	defer m.Teardown()
@@ -349,7 +349,7 @@ func TestCountersSurviveRemoveAndReAdd(t *testing.T) {
 	}
 	m.mu.Lock()
 	sm := m.instance.GetFeature(stats.ManagerType()).(stats.Manager)
-	raw := counterValue(sm, "user>>>"+userA+">>>traffic>>>uplink")
+	raw := sm.GetCounter("user>>>" + userA + ">>>traffic>>>uplink").Value()
 	m.mu.Unlock()
 	if uint64(raw) != before {
 		t.Fatalf("xray reset the counter on re-add: raw %d, before %d", raw, before)
@@ -361,16 +361,15 @@ func TestCountersSurviveRemoveAndReAdd(t *testing.T) {
 	if after <= before {
 		t.Fatalf("counter not monotonic after re-add: %d <= %d", after, before)
 	}
-	// Simulated reset (a future core unregistering counters): still
-	// monotonic.
+	// The counter read for reports is the one xray counts into (resolved
+	// once at install, W1): a core that replaced it on re-add would leave
+	// the report frozen, so pin the identity here (xray upgrade guard).
 	m.mu.Lock()
-	_ = sm.UnregisterCounter("user>>>" + userA + ">>>traffic>>>uplink")
+	held := m.counted[userA]
+	live := sm.GetCounter("user>>>" + userA + ">>>traffic>>>uplink")
 	m.mu.Unlock()
-	c, err = vlessDial(p, idA, echo)
-	mustEcho(t, c, err, "x")
-	c.Close()
-	if got := up(); got < after {
-		t.Fatalf("reported value went backwards after a counter reset: %d < %d", got, after)
+	if held == nil || held.up != live {
+		t.Fatal("reported counter is not the one xray counts into")
 	}
 }
 

@@ -4,7 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"sort"
+	"slices"
+	"strings"
 )
 
 // hashRecord is one applied (user, inbound) credential.
@@ -21,32 +22,37 @@ type hashRecord struct {
 // inbound_tag, protocol, account_json || u32be(32) || SHA-256(inbounds
 // JSON verbatim as sent; "" when nothing runs). Records must be unique per
 // (user_id, inbound_tag). Test vectors: proto/state_hash_vectors.json.
+//
+// recs is sorted in place. Each record is encoded into one reused scratch
+// buffer (W2: no per-field []byte(s) copies; 20k records hash with a
+// constant number of allocations).
 func stateHash(configVersion uint64, inboundsJSON string, recs []hashRecord) string {
-	sorted := append([]hashRecord(nil), recs...)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].UserID != sorted[j].UserID {
-			return sorted[i].UserID < sorted[j].UserID
+	slices.SortFunc(recs, func(a, b hashRecord) int {
+		if c := strings.Compare(a.UserID, b.UserID); c != 0 {
+			return c
 		}
-		return sorted[i].Tag < sorted[j].Tag
+		return strings.Compare(a.Tag, b.Tag)
 	})
 	h := sha256.New()
-	h.Write([]byte("akari-state-v2\n"))
-	var b8 [8]byte
-	binary.BigEndian.PutUint64(b8[:], configVersion)
-	h.Write(b8[:])
-	var b4 [4]byte
-	field := func(s string) {
-		binary.BigEndian.PutUint32(b4[:], uint32(len(s)))
-		h.Write(b4[:])
-		h.Write([]byte(s))
+	scratch := make([]byte, 0, 512)
+	scratch = append(scratch, "akari-state-v2\n"...)
+	scratch = binary.BigEndian.AppendUint64(scratch, configVersion)
+	h.Write(scratch)
+	field := func(b []byte, s string) []byte {
+		b = binary.BigEndian.AppendUint32(b, uint32(len(s)))
+		return append(b, s...)
 	}
-	for _, r := range sorted {
-		field(r.UserID)
-		field(r.Tag)
-		field(r.Protocol)
-		field(r.Account)
+	for _, r := range recs {
+		scratch = field(scratch[:0], r.UserID)
+		scratch = field(scratch, r.Tag)
+		scratch = field(scratch, r.Protocol)
+		scratch = field(scratch, r.Account)
+		h.Write(scratch)
 	}
 	inb := sha256.Sum256([]byte(inboundsJSON))
-	field(string(inb[:]))
-	return hex.EncodeToString(h.Sum(nil))
+	scratch = binary.BigEndian.AppendUint32(scratch[:0], uint32(len(inb)))
+	scratch = append(scratch, inb[:]...)
+	h.Write(scratch)
+	var sum [sha256.Size]byte
+	return hex.EncodeToString(h.Sum(sum[:0]))
 }

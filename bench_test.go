@@ -120,6 +120,43 @@ func BenchmarkTrafficSnapshot10k(b *testing.B) {
 	}
 }
 
+// W1: the periodic report when no counter moved (steady state).
+func BenchmarkTrafficChanges10kIdle(b *testing.B) {
+	m := benchCore(b, benchUsersN)
+	_ = m.TrafficChanges() // first report on the stream: complete
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if r := m.TrafficChanges(); r != nil {
+			b.Fatalf("idle report has %d users", len(r.Users))
+		}
+	}
+}
+
+// W1: the periodic report when 10% of the users moved since the last one.
+func BenchmarkTrafficChanges10kTenPct(b *testing.B) {
+	m := benchCore(b, benchUsersN)
+	_ = m.TrafficChanges()
+	m.mu.Lock()
+	ctrs := make([]*userCounters, 0, benchUsersN/10)
+	for i := 0; i < benchUsersN; i += 10 {
+		ctrs = append(ctrs, m.counted[benchUserID(i)])
+	}
+	m.mu.Unlock()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		for _, c := range ctrs {
+			c.up.Add(1)
+		}
+		b.StartTimer()
+		if r := m.TrafficChanges(); len(r.Users) != len(ctrs) {
+			b.Fatalf("report has %d users, want %d", len(r.GetUsers()), len(ctrs))
+		}
+	}
+}
+
 // State hash over 20k credentials (Hello / every Ack).
 func BenchmarkStateHash10k(b *testing.B) {
 	m := benchCore(b, benchUsersN)

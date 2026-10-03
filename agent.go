@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"runtime"
 	"sync"
@@ -133,7 +134,9 @@ type Agent struct {
 	// the report is forgotten (see finalsConfirmAfter).
 	finalsConfirm time.Duration
 	// Bound on handing final counters to the transport at graceful stop.
-	shutdownFlush   time.Duration
+	shutdownFlush time.Duration
+	// sendStall: see the constant.
+	sendStall       time.Duration
 	heartbeatEvery  time.Duration
 	renewCheckEvery time.Duration
 	// How long a stream may run on the current certificate while a renewed
@@ -164,6 +167,7 @@ func NewAgent(cfg *Config, agentVersion string, ids *identities) *Agent {
 		trafficEvery:    10 * time.Second,
 		finalsConfirm:   finalsConfirmAfter,
 		shutdownFlush:   5 * time.Second,
+		sendStall:       sendStall,
 		heartbeatEvery:  15 * time.Second,
 		renewCheckEvery: 30 * time.Second,
 		nextRetryAfter:  2 * time.Minute,
@@ -243,14 +247,26 @@ func (a *Agent) run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		slog.Warn("channel closed", "error", err, "retry_in", backoff)
+		wait := fullJitter(backoff)
+		slog.Warn("channel closed", "error", err, "retry_in", wait)
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(backoff):
+		case <-time.After(wait):
 		}
 		backoff = nextBackoff(backoff, a.backoffBase, lived)
 	}
+}
+
+// fullJitter: a uniformly random wait in [0, d) ("full jitter", W6). Every
+// node of a fleet loses its stream at the same moment when the panel
+// restarts; without jitter they all reconnect (TLS handshake, desired-state
+// read) in the same instant, at every step of the backoff.
+func fullJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	return rand.N(d)
 }
 
 // stableStream: a stream that lived this long resets the reconnect backoff.
@@ -345,6 +361,17 @@ func (a *Agent) gracefulStop(gen uint64, send func(*pb.AgentUp) error, flush fun
 
 // keepalive: a silently dead connection is noticed after Time + Timeout.
 const (
+	// sendQueue: upstream messages buffered for the writer.
+	sendQueue = 256
+	// sendStall: how long a send may wait for room in a full queue before
+	// the stream is closed (C2). Longer than the keepalive's Time +
+	// Timeout, so a dead connection is still left to the keepalive; this
+	// only catches a live connection whose peer does not read.
+	sendStall = keepaliveTime + keepaliveTimeout + 20*time.Second
+	// maxRecvMsg: largest panel message accepted (C3). grpc-go's default
+	// of 4 MiB is a Snapshot of ~18k users on two inbounds: past it the
+	// stream died on every Snapshot and the node never converged.
+	maxRecvMsg       = 64 << 20
 	keepaliveTime    = 30 * time.Second
 	keepaliveTimeout = 10 * time.Second
 	// finalsConfirmAfter: a final report counts as delivered only after the
@@ -362,13 +389,21 @@ func (a *Agent) clientConn(id *nodeIdentity) (*grpc.ClientConn, error) {
 	tlsCfg := a.tlsConfig(id)
 	return grpc.NewClient(
 		a.cfg.PanelAddr,
-		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
+		append(channelDialOptions(), grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))...,
+	)
+}
+
+// channelDialOptions: everything about the panel connection but its
+// transport credentials (the tests dial with the same options).
+func channelDialOptions() []grpc.DialOption {
+	return []grpc.DialOption{
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxRecvMsg)),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                keepaliveTime,
 			Timeout:             keepaliveTimeout,
 			PermitWithoutStream: true,
 		}),
-	)
+	}
 }
 
 // session runs one gRPC stream until it breaks. It returns only after every
@@ -427,8 +462,14 @@ func (a *Agent) session(parent context.Context) (err error) {
 	slog.Info("channel established", "panel", a.cfg.PanelAddr, "identity", id.source,
 		"cert_not_after", id.leaf.NotAfter)
 
-	sendCh := make(chan *pb.AgentUp, 256)
+	sendCh := make(chan *pb.AgentUp, sendQueue)
 	done := make(chan error, 2)
+	var stalled atomic.Bool
+	defer func() {
+		if stalled.Load() {
+			err = errStreamStalled
+		}
+	}()
 	var wg sync.WaitGroup
 	defer wg.Wait() // runs after cancel (defers are LIFO)
 	defer cancel()
@@ -461,6 +502,14 @@ func (a *Agent) session(parent context.Context) (err error) {
 		}
 	}()
 
+	// send queues msg for the writer. It never blocks for long (C2): when
+	// the queue stays full for sendStall (the connection is alive — the
+	// keepalive would have ended it before — but the panel does not read)
+	// the stream is cancelled, so whoever holds applyMu returns at once
+	// and run() reconnects with backoff. Once the process is asked to
+	// stop, a waiting send gets at most shutdownFlush more, so
+	// gracefulStop takes applyMu (and finals are persisted) well within
+	// systemd's TimeoutStopSec.
 	send := func(msg *pb.AgentUp) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -468,8 +517,26 @@ func (a *Agent) session(parent context.Context) (err error) {
 		select {
 		case sendCh <- msg:
 			return nil
-		case <-ctx.Done():
-			return ctx.Err()
+		default:
+		}
+		stall := time.NewTimer(a.sendStall)
+		defer stall.Stop()
+		stopping := parent.Done()
+		for {
+			select {
+			case sendCh <- msg:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-stopping:
+				stopping = nil
+				stall.Reset(a.shutdownFlush)
+			case <-stall.C:
+				slog.Warn("panel is not reading the stream; closing it", "queued", len(sendCh))
+				stalled.Store(true)
+				cancel()
+				return errStreamStalled
+			}
 		}
 	}
 
@@ -497,6 +564,9 @@ func (a *Agent) session(parent context.Context) (err error) {
 	a.streamMu.Unlock()
 	err = send(a.helloLocked())
 	if err == nil {
+		// W1: the first periodic report on this stream is complete (the
+		// panel instance behind it may never have seen these counters).
+		a.core.ResetSent()
 		a.finals.flush(gen, send)
 		a.sendPendingReportLocked(gen, send)
 		// W11: the latest latency result again (it may have been
@@ -626,6 +696,10 @@ func (a *Agent) helloLocked() *pb.AgentUp {
 }
 
 var errStreamGone = errors.New("stream closed before the message was handled")
+
+// errStreamStalled: the panel kept the connection alive but stopped
+// reading; the stream was closed (C2).
+var errStreamStalled = errors.New("panel stopped reading the stream")
 
 // handleDown applies one panel message. ctx is the stream's: once it is
 // done nothing of the message may take effect (no Rebuild, no version
