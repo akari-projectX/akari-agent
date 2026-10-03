@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"github.com/xtls/xray-core/app/dispatcher"
 	"github.com/xtls/xray-core/common"
@@ -58,8 +59,16 @@ type gateDispatcher struct {
 	mu      sync.Mutex
 	allowed map[gateKey]*protocol.MemoryUser
 	live    map[gateKey]map[*liveConn]struct{}
+	// liveKeys: email -> how many keys (inbounds) in live it has.
+	liveKeys map[string]int
 	// limits: per-user rate limits by email (ratelimit.go); absent = none.
 	limits map[string]*userLimit
+
+	// W7: the heartbeat's counts, kept up to date under mu (a key's 0<->1
+	// transitions) and read without it: the number of tracked dispatches
+	// and of distinct emails among them.
+	liveConns atomic.Int64
+	liveUsers atomic.Int64
 }
 
 func init() {
@@ -67,12 +76,7 @@ func init() {
 	// list (in place of dispatcher.Config, see newInstance) makes the gate
 	// THE dispatcher every inbound resolves at creation.
 	common.Must(common.RegisterConfig((*pb.GateDispatcherConfig)(nil), func(ctx context.Context, _ interface{}) (interface{}, error) {
-		g := &gateDispatcher{
-			inner:   new(dispatcher.DefaultDispatcher),
-			allowed: make(map[gateKey]*protocol.MemoryUser),
-			live:    make(map[gateKey]map[*liveConn]struct{}),
-			limits:  make(map[string]*userLimit),
-		}
+		g := newGate()
 		err := core.RequireFeatures(ctx, func(om outbound.Manager, router routing.Router, pm policy.Manager, sm stats.Manager) error {
 			return g.inner.Init(&dispatcher.Config{}, om, router, pm, sm)
 		})
@@ -81,6 +85,16 @@ func init() {
 		}
 		return g, nil
 	}))
+}
+
+func newGate() *gateDispatcher {
+	return &gateDispatcher{
+		inner:    new(dispatcher.DefaultDispatcher),
+		allowed:  make(map[gateKey]*protocol.MemoryUser),
+		live:     make(map[gateKey]map[*liveConn]struct{}),
+		liveKeys: make(map[string]int),
+		limits:   make(map[string]*userLimit),
+	}
 }
 
 // Type implements common.HasType: this IS the instance's dispatcher.
@@ -97,6 +111,9 @@ func (g *gateDispatcher) Close() error {
 		}
 		delete(g.live, k)
 	}
+	clear(g.liveKeys)
+	g.liveConns.Store(0)
+	g.liveUsers.Store(0)
 	g.allowed = make(map[gateKey]*protocol.MemoryUser)
 	g.mu.Unlock()
 	for _, c := range all {
@@ -143,8 +160,12 @@ func (g *gateDispatcher) Revoke(key gateKey) int {
 }
 
 func (g *gateDispatcher) takeLocked(key gateKey) []*liveConn {
-	conns := g.live[key]
-	delete(g.live, key)
+	conns, ok := g.live[key]
+	if !ok {
+		return nil
+	}
+	g.dropKeyLocked(key)
+	g.liveConns.Add(-int64(len(conns)))
 	out := make([]*liveConn, 0, len(conns))
 	for c := range conns {
 		out = append(out, c)
@@ -152,29 +173,29 @@ func (g *gateDispatcher) takeLocked(key gateKey) []*liveConn {
 	return out
 }
 
-// LiveTotal returns the number of tracked dispatches over all keys.
-func (g *gateDispatcher) LiveTotal() int {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	n := 0
-	for _, conns := range g.live {
-		n += len(conns)
+// dropKeyLocked removes key from live (it had at least one dispatch).
+func (g *gateDispatcher) dropKeyLocked(key gateKey) {
+	delete(g.live, key)
+	if n := g.liveKeys[key.email] - 1; n > 0 {
+		g.liveKeys[key.email] = n
+	} else {
+		delete(g.liveKeys, key.email)
+		g.liveUsers.Add(-1)
 	}
-	return n
+}
+
+// LiveTotal returns the number of tracked dispatches over all keys.
+// Lock-free (W7).
+func (g *gateDispatcher) LiveTotal() int {
+	return int(g.liveConns.Load())
 }
 
 // LiveStats returns the tracked dispatches and how many distinct users
-// (emails) they belong to (Heartbeat.metrics.online_users). Keys without
-// a live dispatch are never kept in g.live.
+// (emails) they belong to (Heartbeat.metrics.online_users). Lock-free and
+// O(1) (W7): the two values are read separately, so they may straddle a
+// concurrent admit or release.
 func (g *gateDispatcher) LiveStats() (conns, users int) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	seen := make(map[string]struct{}, len(g.live))
-	for k, c := range g.live {
-		conns += len(c)
-		seen[k.email] = struct{}{}
-	}
-	return conns, len(seen)
+	return int(g.liveConns.Load()), int(g.liveUsers.Load())
 }
 
 // Live returns the number of tracked dispatches for key (tests).
@@ -204,8 +225,12 @@ func (g *gateDispatcher) admit(key gateKey, user *protocol.MemoryUser, c *liveCo
 	if conns == nil {
 		conns = make(map[*liveConn]struct{})
 		g.live[key] = conns
+		if g.liveKeys[key.email]++; g.liveKeys[key.email] == 1 {
+			g.liveUsers.Add(1)
+		}
 	}
 	conns[c] = struct{}{}
+	g.liveConns.Add(1)
 	return g.limits[key.email], true
 }
 
@@ -213,9 +238,13 @@ func (g *gateDispatcher) release(key gateKey, c *liveConn) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if conns := g.live[key]; conns != nil {
+		if _, ok := conns[c]; !ok {
+			return // already taken by Revoke/Allow/Close
+		}
 		delete(conns, c)
+		g.liveConns.Add(-1)
 		if len(conns) == 0 {
-			delete(g.live, key)
+			g.dropKeyLocked(key)
 		}
 	}
 }

@@ -64,8 +64,9 @@ func buildHeartbeat(smp *sampler, st agentStats, lease func() (time.Duration, bo
 	return hb
 }
 
-// trafficLoop reports cumulative counters every interval; onTick runs after
-// each tick on which the stream was still usable.
+// trafficLoop reports the cumulative counters that changed every interval
+// (TrafficChanges; the stream's first report is complete, see ResetSent);
+// onTick runs after each tick on which the stream was still usable.
 func trafficLoop(ctx context.Context, every time.Duration, cm *CoreManager, send func(*pb.AgentUp) error, onTick func()) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
@@ -75,8 +76,7 @@ func trafficLoop(ctx context.Context, every time.Duration, cm *CoreManager, send
 			return
 		case <-ticker.C:
 		}
-		report := cm.TrafficSnapshot()
-		if report != nil && len(report.Users) > 0 {
+		if report := cm.TrafficChanges(); report != nil {
 			if err := send(&pb.AgentUp{Msg: &pb.AgentUp_Traffic{Traffic: report}}); err != nil {
 				return
 			}

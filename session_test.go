@@ -74,13 +74,13 @@ func (f *fakePanel) OpenChannel(s pb.AgentChannel_OpenChannelServer) error {
 	return f.onStream(f.streams.Add(1), s)
 }
 
-func startFakePanel(t *testing.T, f *fakePanel) string {
+func startFakePanel(t *testing.T, f *fakePanel, opts ...grpc.ServerOption) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(opts...)
 	pb.RegisterAgentChannelServer(srv, f)
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(srv.Stop)
@@ -91,7 +91,7 @@ func testAgent(t *testing.T, addr string) *Agent {
 	a := NewAgent(&Config{PanelAddr: addr}, "test", newTestCA(t).enrolledIDs(t))
 	a.backoffBase = 10 * time.Millisecond
 	a.dial = func(ctx context.Context, _ *nodeIdentity) (*dialed, error) {
-		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient(addr, append(channelDialOptions(), grpc.WithTransportCredentials(insecure.NewCredentials()))...)
 		if err != nil {
 			return nil, err
 		}
