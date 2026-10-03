@@ -1,24 +1,26 @@
 package main
 
-// Per-protocol handling of panel-managed inbounds (W8): which inbounds take
-// dynamic users, how a panel account becomes an xray user, and the
-// Shadowsocks 2022 multi-user specifics.
+// Per-protocol handling of panel-managed inbounds (W8; W26: one module per
+// protocol behind protocolModule, the rules from proto/protocols.toml):
+// which inbounds take dynamic users, how a panel account becomes an xray
+// user, and protocol specifics (Shadowsocks 2022 multi-user, tombstones).
 //
 // Managed protocols (the panel issues credentials, the xray "email" is the
-// panel user id, the gate admits by *MemoryUser):
+// panel user id, the gate admits by *MemoryUser); wire name = manifest
+// `wire`, the agent contract's InboundUser.protocol:
 //
-//	vless       account {"id","flow"}       flow "" or xtls-rprx-vision
-//	vmess       account {"id"}
-//	trojan      account {"password"}
-//	shadowsocks account {"password"}        2022-blake3-aes-{128,256}-gcm
-//	                                        multi-user only; base64 user key
-//	                                        of the method's key length
-//	hysteria    account {"auth"}            Hysteria 2 (xray `hysteria`
-//	                                        proxy + `hysteria` transport)
+//	vless       account {"id","flow"}       proto_vless.go
+//	vmess       account {"id"}              proto_vmess.go
+//	trojan      account {"password"}        proto_trojan.go
+//	shadowsocks account {"password"}        proto_ss2022.go (2022 multi-user)
+//	hysteria    account {"auth"}            proto_hysteria2.go (Hysteria 2)
+//
+// Adding a protocol: a [[protocol]] in the panel's manifest (synced here),
+// a module file implementing protocolModule (and its canary builder in
+// rt_matrix_test.go), registered in protocolModules. TestModulesMatchManifest
+// fails until both sides agree.
 
 import (
-	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -32,31 +34,48 @@ import (
 	_ "github.com/xtls/xray-core/transport/internet/httpupgrade"
 	_ "github.com/xtls/xray-core/transport/internet/hysteria"
 	_ "github.com/xtls/xray-core/transport/internet/splithttp"
-
-	"github.com/xtls/xray-core/proxy/hysteria"
-	hyaccount "github.com/xtls/xray-core/proxy/hysteria/account"
-	ss2022 "github.com/xtls/xray-core/proxy/shadowsocks_2022"
-	"github.com/xtls/xray-core/proxy/trojan"
-	"github.com/xtls/xray-core/proxy/vless"
-	vlessin "github.com/xtls/xray-core/proxy/vless/inbound"
-	"github.com/xtls/xray-core/proxy/vmess"
-	vmessin "github.com/xtls/xray-core/proxy/vmess/inbound"
 )
 
 // inboundKind is what xray built for one inbound tag: the managed protocol
-// name ("" = an inbound without panel-managed users) and, for Shadowsocks
-// 2022, the user key length its method needs.
+// (wire name; "" = an inbound without panel-managed users) and, for
+// Shadowsocks 2022, the user key length its method needs.
 type inboundKind struct {
 	protocol string
 	ssKeyLen int
 }
 
-// ss2022KeyLen: multi-user Shadowsocks 2022 methods xray supports, and
-// their key length in bytes. xray's multi-user server only implements the
-// AES methods (2022-blake3-chacha20-poly1305 is single-user only).
-var ss2022KeyLen = map[string]int{
-	"2022-blake3-aes-128-gcm": 16,
-	"2022-blake3-aes-256-gcm": 32,
+// protocolModule is one managed protocol on the xray kernel.
+type protocolModule interface {
+	// wire: the protocol's agent-contract name (manifest `wire`).
+	wire() string
+	// classify: is msg (an inbound's proxy settings as xray built them)
+	// this protocol, and its kind. Authoritative: after xray's own parse.
+	classify(tag string, msg proto.Message) (inboundKind, bool, error)
+	// account: the xray account for a panel account_json on an inbound of
+	// this kind (the module's credential checks; kind.protocol == wire()).
+	account(accountJSON string, kind inboundKind) (proto.Message, error)
+}
+
+// protocolModules: the registry, in manifest order.
+var protocolModules = []protocolModule{
+	vlessModule{}, vmessModule{}, trojanModule{}, ss2022Module{}, hysteria2Module{},
+}
+
+var modulesByWire = func() map[string]protocolModule {
+	out := make(map[string]protocolModule, len(protocolModules))
+	for _, mod := range protocolModules {
+		out[mod.wire()] = mod
+	}
+	return out
+}()
+
+// protocolSpec: the manifest entry of a module (the registry and the
+// manifest agree: TestModulesMatchManifest).
+func protocolSpec(wire string) *manifestProtocol {
+	if p := manifest.protocolByWire(wire); p != nil {
+		return p
+	}
+	return &manifestProtocol{Wire: wire}
 }
 
 // inboundKinds classifies every inbound of a built config by the proxy
@@ -72,118 +91,19 @@ func inboundKinds(cfg *core.Config) (map[string]inboundKind, error) {
 			return nil, fmt.Errorf("inbound %q: proxy settings: %w", in.Tag, err)
 		}
 		var k inboundKind
-		switch c := msg.(type) {
-		case *vlessin.Config:
-			k.protocol = "vless"
-		case *vmessin.Config:
-			k.protocol = "vmess"
-		case *trojan.ServerConfig:
-			k.protocol = "trojan"
-		case *hysteria.ServerConfig:
-			k.protocol = "hysteria"
-		case *ss2022.MultiUserServerConfig:
-			n, ok := ss2022KeyLen[c.GetMethod()]
-			if !ok {
-				return nil, fmt.Errorf("inbound %q: shadowsocks method %q has no multi-user server", in.Tag, c.GetMethod())
+		for _, mod := range protocolModules {
+			mk, ok, err := mod.classify(in.Tag, msg)
+			if err != nil {
+				return nil, err
 			}
-			k = inboundKind{protocol: "shadowsocks", ssKeyLen: n}
+			if ok {
+				k = mk
+				break
+			}
 		}
 		kinds[in.Tag] = k
 	}
 	return kinds, nil
-}
-
-// inboundJSON is one inbound as xray's own config structs read it (Go
-// encoding/json into a struct: keys match case-insensitively and the LAST
-// matching member wins). multiUserShadowsocks must see exactly the tag and
-// settings xray saw: a map lookup that preferred the exact-case key would
-// pick another member of {"tag":"a","TAG":"b"} than xray does, and the
-// inbound xray built as "b" would stay a single-user server.
-type inboundJSON struct {
-	Tag      string          `json:"tag"`
-	Protocol string          `json:"protocol"`
-	Settings json.RawMessage `json:"settings"`
-}
-
-// ssSettingsJSON: the "clients" member of Shadowsocks settings, as xray's
-// ShadowsocksServerConfig reads it.
-type ssSettingsJSON struct {
-	Clients json.RawMessage `json:"clients"`
-}
-
-// multiUserShadowsocks rewrites, in the built config, every Shadowsocks
-// 2022 inbound whose JSON settings carry a "clients" array (even an empty
-// one: users are added later through the user manager) into xray's
-// multi-user server. Stock xray only builds the multi-user server when the
-// list is non-empty and otherwise makes a single-user server keyed by the
-// inbound password: one shared credential, no user identity, nothing for
-// the gate to revoke. Without "clients" the inbound stays as xray built it
-// (no panel-managed users). The server PSK is checked here (base64, the
-// method's key length) so a bad PSK fails the apply, not the first client.
-func multiUserShadowsocks(inbounds []json.RawMessage, cfg *core.Config) error {
-	managed := map[string]bool{}
-	for _, raw := range inbounds {
-		var in inboundJSON
-		if err := json.Unmarshal(raw, &in); err != nil {
-			continue // xray's own parse already accepted or refused it
-		}
-		if !strings.EqualFold(in.Protocol, "shadowsocks") {
-			continue
-		}
-		var settings ssSettingsJSON
-		if len(in.Settings) > 0 {
-			_ = json.Unmarshal(in.Settings, &settings)
-		}
-		if len(settings.Clients) > 0 && !bytes.Equal(bytes.TrimSpace(settings.Clients), []byte("null")) {
-			managed[in.Tag] = true
-		}
-	}
-	for _, in := range cfg.Inbound {
-		if !managed[in.Tag] || in.ProxySettings == nil {
-			continue
-		}
-		msg, err := in.ProxySettings.GetInstance()
-		if err != nil {
-			return fmt.Errorf("inbound %q: proxy settings: %w", in.Tag, err)
-		}
-		var method, key string
-		var multi *ss2022.MultiUserServerConfig
-		switch c := msg.(type) {
-		case *ss2022.ServerConfig: // empty client list
-			method, key = c.GetMethod(), c.GetKey()
-			multi = &ss2022.MultiUserServerConfig{Method: method, Key: key, Network: c.GetNetwork()}
-		case *ss2022.MultiUserServerConfig:
-			method, key = c.GetMethod(), c.GetKey()
-		default:
-			return fmt.Errorf("inbound %q: shadowsocks with clients must use a 2022-blake3-aes-*-gcm method", in.Tag)
-		}
-		n, ok := ss2022KeyLen[method]
-		if !ok {
-			return fmt.Errorf("inbound %q: shadowsocks method %q has no multi-user server (use 2022-blake3-aes-128-gcm or -256-gcm)", in.Tag, method)
-		}
-		if err := checkSSKey(key, n); err != nil {
-			return fmt.Errorf("inbound %q: server password: %w", in.Tag, err)
-		}
-		if multi != nil {
-			in.ProxySettings = commonserial.ToTypedMessage(multi)
-		}
-	}
-	return nil
-}
-
-// checkSSKey: standard base64 of exactly n bytes. sing-shadowsocks would
-// stretch longer keys and reject shorter ones; worse, xray's multi-user
-// AddUser ignores the error of its user-table update, so one bad key would
-// silently freeze the table. Only exact keys get that far.
-func checkSSKey(key string, n int) error {
-	b, err := base64.StdEncoding.DecodeString(key)
-	if err != nil {
-		return fmt.Errorf("key is not standard base64")
-	}
-	if len(b) != n {
-		return fmt.Errorf("key is %d bytes, the method needs %d", len(b), n)
-	}
-	return nil
 }
 
 // decodeStrict unmarshals one JSON object refusing unknown fields.
@@ -205,57 +125,13 @@ func buildUser(protocolName, accountJSON, userID string, kind inboundKind) (*pro
 	if protocolName != kind.protocol {
 		return nil, fmt.Errorf("credential is %s, inbound is %s", protocolName, kind.protocol)
 	}
-	var account proto.Message
-	switch protocolName {
-	case "vless":
-		a := &vless.Account{}
-		if err := json.Unmarshal([]byte(accountJSON), a); err != nil {
-			return nil, fmt.Errorf("vless account: %w", err)
-		}
-		switch a.Flow {
-		case "", vless.XRV:
-		default:
-			return nil, fmt.Errorf("vless account: unsupported flow %q", a.Flow)
-		}
-		account = a
-	case "vmess":
-		a := &vmess.Account{}
-		if err := json.Unmarshal([]byte(accountJSON), a); err != nil {
-			return nil, fmt.Errorf("vmess account: %w", err)
-		}
-		account = a
-	case "trojan":
-		a := &trojan.Account{}
-		if err := json.Unmarshal([]byte(accountJSON), a); err != nil {
-			return nil, fmt.Errorf("trojan account: %w", err)
-		}
-		account = a
-	case "shadowsocks":
-		var a struct {
-			Password string `json:"password"`
-		}
-		if err := decodeStrict(accountJSON, &a); err != nil {
-			return nil, fmt.Errorf("shadowsocks account: %w", err)
-		}
-		if err := checkSSKey(a.Password, kind.ssKeyLen); err != nil {
-			return nil, fmt.Errorf("shadowsocks account: %w", err)
-		}
-		account = &ss2022.Account{Key: a.Password}
-	case "hysteria":
-		var a struct {
-			Auth string `json:"auth"`
-		}
-		if err := decodeStrict(accountJSON, &a); err != nil {
-			return nil, fmt.Errorf("hysteria account: %w", err)
-		}
-		// The validator keys users by auth: an empty or short one would be
-		// guessable or collide.
-		if len(a.Auth) < 16 {
-			return nil, fmt.Errorf("hysteria account: auth must be at least 16 characters")
-		}
-		account = &hyaccount.Account{Auth: a.Auth}
-	default:
+	mod, ok := modulesByWire[protocolName]
+	if !ok {
 		return nil, fmt.Errorf("unsupported protocol %q", protocolName)
+	}
+	account, err := mod.account(accountJSON, kind)
+	if err != nil {
+		return nil, err
 	}
 	return &protocol.User{
 		Level:   0,
@@ -264,24 +140,10 @@ func buildUser(protocolName, accountJSON, userID string, kind inboundKind) (*pro
 	}, nil
 }
 
-// shrinkUnsafe: a user must never leave the user table of a running xray
-// multi-user Shadowsocks 2022 inbound. MultiUserInbound.RemoveUser
-// swap-deletes from the slice the service's user indexes point into, and
-// the connection path reads `users[index]` without a lock after a handshake
-// the client can stall: a pending handshake of the removed user would then
-// run as whichever user moved into its slot (admitted by the gate under
-// that user, billed to them), or index past the end and panic the agent.
-//
-// So on these inbounds (W9) the agent never calls RemoveUser. A removal
-// revokes the user in the gate only and leaves the credential in the table
-// as a tombstone: indices never move, an in-flight or new handshake with
-// that key resolves to the removed user's own *MemoryUser, which the gate
-// refuses. Re-adding the SAME credential revives the tombstone (the gate
-// admits that pointer again; xray is not touched). xray's AddUser refuses a
-// duplicate email, so a different credential for a user the table holds
-// (rotation, re-add with a new key) needs a new instance: such deltas are
-// refused (BASE_MISMATCH) and the panel sends a Snapshot, which also
-// compacts. Tombstones are bounded (maxTombstones); a removal past the
-// bound is refused the same way. Tombstones are not "applied": they are
-// outside the state hash and the user count. Additions append and are safe.
-func shrinkUnsafe(k inboundKind) bool { return k.protocol == "shadowsocks" }
+// shrinkUnsafe: a user must never leave the user table of a running
+// inbound of this kind (manifest `shrink_unsafe`: Shadowsocks 2022, whose
+// xray multi-user inbound swap-deletes; see proto_ss2022.go). Removals
+// there are tombstones; rotations need a rebuild (BASE_MISMATCH).
+func shrinkUnsafe(k inboundKind) bool {
+	return k.protocol != "" && protocolSpec(k.protocol).ShrinkUnsafe
+}
