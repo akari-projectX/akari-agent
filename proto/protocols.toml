@@ -1,0 +1,503 @@
+# Akari protocol capability manifest (W26, ruling R41).
+#
+# The single source of truth for the protocol layer: which protocols,
+# transports and security layers the panel manages, their fields, the
+# legal combinations, the per-user credentials, and what each subscription
+# format can express. Canonical here (akari-panel/proto/); akari-agent keeps
+# a byte-identical copy (`make -C akari-agent sync-proto`, verified by its
+# `check-proto`), exactly like agent.proto and the state-hash vectors.
+#
+# Generated from it (never edit the outputs by hand):
+#   - panel: the validation tables (build.rs -> crate::protocols::manifest),
+#     docs/DEPLOY.md §3d "support matrix" section, the admin form schema
+#     (spa/src/lib/protocols.gen.ts), table-driven tests;
+#   - agent: the managed protocols and their credential checks, the
+#     revocation canary scenario table (rt_matrix_test.go).
+# Regenerate after an edit: `make gen-protocols` (panel), then
+# `make -C ../akari-agent sync-proto`. CI fails on any stale output.
+#
+# Names are KERNEL-NEUTRAL. What a kernel calls things (xray's
+# "streamSettings.network", "hysteria", "splithttp", ...) belongs to that
+# kernel's adapter (panel `protocols::xray`, agent per-protocol modules),
+# never to this file — except `wire`, the protocol name of the agent
+# contract (InboundUser.protocol, node_users.credentials[].protocol), which
+# is frozen by agent.proto and the state hash.
+#
+# Ordering matters: arrays are rendered in the order written (docs, forms).
+# Labels: `label` is English (docs), `label_zh` is the admin console (Chinese).
+
+schema = 1
+
+# Kernels an adapter exists for. Only xray today; a sing-box adapter is a
+# future addition (research/singbox-spike): it would add a [[kernel]] and
+# per-combination availability below (`kernels` lists on transports).
+[[kernel]]
+id = "xray"
+label = "xray-core"
+version = "v26.3.27"
+
+# ---------------------------------------------------------------- security
+# Every managed inbound has exactly one security layer.
+[[security]]
+id = "none"
+label = "none"
+label_zh = "无"
+
+[[security]]
+id = "tls"
+label = "TLS"
+label_zh = "TLS（节点证书）"
+# The node's own certificate (automatic over ACME with 节点域名, else the
+# files the admin installs). Templates point at it; subscriptions use the SNI.
+needs_certificate = true
+
+  [[security.field]]
+  name = "server_name"
+  label_zh = "证书域名（SNI）"
+  type = "domain"
+  required = false
+  help_zh = "留空 = 节点域名"
+
+[[security]]
+id = "reality"
+label = "REALITY"
+label_zh = "REALITY"
+
+  [[security.field]]
+  name = "dest"
+  label_zh = "目标站点"
+  type = "dest"
+  required = false
+  help_zh = "host 或 host:port（默认 443）；留空 = 列表第一个"
+
+  [[security.field]]
+  name = "server_name"
+  label_zh = "SNI"
+  type = "domain"
+  required = false
+  help_zh = "留空 = 目标站点的域名"
+
+  [[security.field]]
+  name = "fingerprint"
+  label_zh = "uTLS 指纹"
+  type = "enum"
+  values = ["chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized"]
+  default = "chrome"
+  required = false
+
+# ---------------------------------------------------------------- transports
+# `native` = the protocol's own transport (Shadowsocks: TCP+UDP itself;
+# Hysteria 2: QUIC). The stackable transports carry vless/vmess/trojan.
+# `alpn` = the ALPN the panel's TLS settings advertise on this transport.
+[[transport]]
+id = "tcp"
+label = "raw TCP"
+label_zh = "TCP（raw）"
+alpn = ["h2", "http/1.1"]
+
+[[transport]]
+id = "ws"
+label = "WebSocket"
+label_zh = "WebSocket"
+alpn = ["http/1.1"]
+
+  [[transport.field]]
+  name = "path"
+  label_zh = "路径"
+  type = "path"
+  required = false
+  help_zh = "以 / 开头；留空 = 随机"
+
+  [[transport.field]]
+  name = "host"
+  label_zh = "Host"
+  type = "host"
+  required = false
+  help_zh = "客户端发送的 Host 头（可选）"
+
+[[transport]]
+id = "httpupgrade"
+label = "HTTPUpgrade"
+label_zh = "HTTPUpgrade"
+alpn = ["http/1.1"]
+
+  [[transport.field]]
+  name = "path"
+  label_zh = "路径"
+  type = "path"
+  required = false
+  help_zh = "以 / 开头；留空 = 随机"
+
+  [[transport.field]]
+  name = "host"
+  label_zh = "Host"
+  type = "host"
+  required = false
+  help_zh = "客户端发送的 Host 头（可选）"
+
+[[transport]]
+id = "xhttp"
+label = "XHTTP"
+label_zh = "XHTTP"
+alpn = ["h2", "http/1.1"]
+
+  [[transport.field]]
+  name = "path"
+  label_zh = "路径"
+  type = "path"
+  required = false
+  help_zh = "以 / 开头；留空 = 随机"
+
+  [[transport.field]]
+  name = "host"
+  label_zh = "Host"
+  type = "host"
+  required = false
+  help_zh = "客户端发送的 Host 头（可选）"
+
+  [[transport.field]]
+  name = "mode"
+  label_zh = "模式"
+  type = "enum"
+  values = ["auto", "packet-up", "stream-up", "stream-one"]
+  default = "auto"
+  required = false
+
+[[transport]]
+id = "grpc"
+label = "gRPC"
+label_zh = "gRPC"
+alpn = ["h2"]
+
+  [[transport.field]]
+  name = "service_name"
+  label_zh = "serviceName"
+  type = "service_name"
+  required = false
+  help_zh = "留空 = 随机"
+
+[[transport]]
+id = "native"
+label = "(own)"
+label_zh = "协议自带"
+alpn = []
+
+# ---------------------------------------------------------------- protocols
+# wire        = the contract name (agent.proto InboundUser.protocol); frozen.
+# transports  = transports validation accepts for this protocol.
+# security    = security layers validation accepts for this protocol.
+# l4          = what the inbound listens on: "tcp", "udp", or "option:<name>"
+#               (an option holding a comma-separated tcp/udp list).
+# template_requires_tls = the templates refuse this protocol without TLS
+#               (stored hand-written inbounds without it are still accepted).
+# [[protocol.credential]] = the per-user account (account_json), one entry
+#               per key, in key order:
+#   uuid          random UUID v4
+#   hex           `bytes` random bytes, lowercase hex
+#   base64_key    random key, standard base64, length = key_len of the
+#                 option `key_len_from` (an enum whose values carry key_len)
+#   option        copied from the inbound's option `from` (and kept equal
+#                 to it when the inbound changes: refit)
+#   min_len       (agent) the smallest length a kernel accepts
+# [[protocol.option]] = inbound settings of the protocol (not per user).
+
+[[protocol]]
+id = "vless"
+wire = "vless"
+label = "VLESS"
+label_zh = "VLESS"
+transports = ["tcp", "ws", "httpupgrade", "xhttp", "grpc"]
+security = ["none", "tls", "reality"]
+l4 = "tcp"
+
+  [[protocol.credential]]
+  field = "flow"
+  kind = "option"
+  from = "flow"
+
+  [[protocol.credential]]
+  field = "id"
+  kind = "uuid"
+
+  [[protocol.option]]
+  name = "flow"
+  label_zh = "流控"
+  type = "enum"
+  values = ["", "xtls-rprx-vision"]
+  value_labels_zh = ["无", "Vision（xtls-rprx-vision）"]
+  default = ""
+  required = false
+
+  [[protocol.option]]
+  # VLESS Encryption is not in any subscription format: only "none".
+  name = "encryption"
+  label_zh = "加密"
+  type = "enum"
+  values = ["none"]
+  default = "none"
+  required = false
+
+[[protocol]]
+id = "vmess"
+wire = "vmess"
+label = "VMess"
+label_zh = "VMess"
+transports = ["tcp", "ws", "httpupgrade", "xhttp", "grpc"]
+security = ["none", "tls"]
+l4 = "tcp"
+
+  [[protocol.credential]]
+  field = "id"
+  kind = "uuid"
+
+[[protocol]]
+id = "trojan"
+wire = "trojan"
+label = "Trojan"
+label_zh = "Trojan"
+transports = ["tcp", "ws", "httpupgrade", "xhttp", "grpc"]
+security = ["none", "tls"]
+l4 = "tcp"
+template_requires_tls = true
+
+  [[protocol.credential]]
+  field = "password"
+  kind = "hex"
+  bytes = 32
+  min_len = 1
+
+[[protocol]]
+id = "ss2022"
+wire = "shadowsocks"
+label = "Shadowsocks 2022"
+label_zh = "Shadowsocks 2022"
+transports = ["native"]
+security = ["none"]
+l4 = "option:network"
+# A removed user stays in the kernel's user table as a gate-refused
+# tombstone (xray's multi-user SS2022 inbound cannot drop a user while
+# running): removals are deltas, rotations need a rebuild (W9).
+shrink_unsafe = true
+
+  [[protocol.credential]]
+  field = "password"
+  kind = "base64_key"
+  key_len_from = "method"
+
+  [[protocol.option]]
+  name = "method"
+  label_zh = "加密方式"
+  type = "enum"
+  # Multi-user methods only: 2022-blake3-chacha20-poly1305 has no
+  # multi-user server in xray; legacy methods have no per-user keys.
+  values = ["2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm"]
+  key_len = [16, 32]
+  default = "2022-blake3-aes-128-gcm"
+  required = false
+
+  [[protocol.option]]
+  # Server PSK (base64, key_len of the method); generated by the panel.
+  name = "psk"
+  label_zh = "服务端密钥"
+  type = "base64_key"
+  key_len_from = "method"
+  generated = true
+  required = true
+
+  [[protocol.option]]
+  name = "network"
+  label_zh = "网络"
+  type = "l4_list"
+  values = ["tcp", "udp"]
+  default = "tcp,udp"
+  required = false
+
+[[protocol]]
+id = "hysteria2"
+wire = "hysteria"
+label = "Hysteria 2"
+label_zh = "Hysteria 2"
+transports = ["native"]
+security = ["tls"]
+l4 = "udp"
+# The QUIC handshake advertises h3.
+alpn = ["h3"]
+
+  [[protocol.credential]]
+  field = "auth"
+  kind = "hex"
+  bytes = 32
+  # The kernel keys users by auth: short ones would be guessable/collide.
+  min_len = 16
+
+# ---------------------------------------------------------------- rules
+# Combination rules beyond the per-protocol transport/security lists,
+# checked in this order. `when` selects inbounds (all keys must match),
+# `require` must then hold. Keys: protocol, transport, security, and
+# `option.<name>` (a protocol option's value). The admin-facing message of
+# each rule is the kernel adapter's (it names the kernel's JSON fields).
+[[rule]]
+id = "reality_protocol"
+when = { security = ["reality"] }
+require = { protocol = ["vless"] }
+doc = "REALITY only with VLESS"
+
+[[rule]]
+id = "reality_transport"
+when = { security = ["reality"] }
+require = { transport = ["tcp", "xhttp", "grpc"] }
+doc = "REALITY only over raw TCP, XHTTP or gRPC"
+
+[[rule]]
+id = "vision"
+when = { "option.flow" = ["xtls-rprx-vision"] }
+require = { transport = ["tcp"], security = ["tls", "reality"] }
+doc = "Vision (xtls-rprx-vision) only on raw TCP with TLS or REALITY"
+
+[[rule]]
+id = "grpc_tls"
+# Template rule only: hand-written gRPC inbounds without TLS are accepted.
+template_only = true
+when = { transport = ["grpc"] }
+require = { security = ["tls", "reality"] }
+doc = "the templates put gRPC behind TLS"
+
+# ---------------------------------------------------------------- formats
+# Subscription formats and what they cannot express. A proxy matching an
+# `[[format.unsupported]]` entry is left out of that format (logged with
+# `reason`) instead of being rendered as a config the client rejects.
+# `notes` (docs only): per protocol, how the format carries it.
+[[format]]
+id = "links"
+label = "Links (v2rayN/Shadowrocket)"
+notes = { vless = "`vless://`, `flow=`", vmess = "`vmess://` (`aid 0`, `scy auto`)", trojan = "`trojan://`", ss2022 = "`ss://method:psk%3Akey@` (SIP002, AEAD-2022 form)", hysteria2 = "`hysteria2://auth@host:port/?sni=`" }
+
+[[format]]
+id = "clash"
+label = "Clash (mihomo)"
+notes = { vless = "`type: vless`, `flow:`", vmess = "`alterId: 0`, `cipher: auto`", trojan = "`type: trojan`", ss2022 = "`type: ss`, `cipher`, `password: \"psk:key\"`", hysteria2 = "`type: hysteria2`" }
+
+  [[format.unsupported]]
+  transport = ["xhttp"]
+  protocol_not = ["vless"]
+  reason = "mihomo supports xhttp only for vless"
+
+[[format]]
+id = "sing-box"
+label = "sing-box"
+notes = { vless = "`vless`, `flow`", vmess = "`vmess`", trojan = "`trojan`", ss2022 = "`shadowsocks`, `method`, `password`", hysteria2 = "`hysteria2`" }
+
+  [[format.unsupported]]
+  transport = ["xhttp"]
+  reason = "sing-box has no xhttp transport"
+
+# ---------------------------------------------------------------- scenarios
+# End-to-end scenarios: the agent's revocation canary (rt_matrix_test.go:
+# a real kernel client handshakes, relays, is billed, is paced to a speed
+# limit, is cut on revocation, reconnects after a re-add) runs exactly
+# these. `option.*` keys pick protocol option values.
+[[scenario]]
+name = "VLESS-REALITY-Vision"
+protocol = "vless"
+transport = "tcp"
+security = "reality"
+options = { flow = "xtls-rprx-vision" }
+
+[[scenario]]
+name = "VLESS-TLS-Vision"
+protocol = "vless"
+transport = "tcp"
+security = "tls"
+options = { flow = "xtls-rprx-vision" }
+
+[[scenario]]
+name = "VLESS-REALITY-XHTTP"
+protocol = "vless"
+transport = "xhttp"
+security = "reality"
+
+[[scenario]]
+name = "VLESS-XHTTP"
+protocol = "vless"
+transport = "xhttp"
+security = "none"
+
+[[scenario]]
+name = "VLESS-XHTTP-TLS"
+protocol = "vless"
+transport = "xhttp"
+security = "tls"
+
+[[scenario]]
+name = "VLESS-HTTPUpgrade"
+protocol = "vless"
+transport = "httpupgrade"
+security = "none"
+
+[[scenario]]
+name = "VLESS-HTTPUpgrade-TLS"
+protocol = "vless"
+transport = "httpupgrade"
+security = "tls"
+
+[[scenario]]
+name = "VLESS-WS-TLS"
+protocol = "vless"
+transport = "ws"
+security = "tls"
+
+[[scenario]]
+name = "VLESS-gRPC-TLS"
+protocol = "vless"
+transport = "grpc"
+security = "tls"
+
+[[scenario]]
+name = "VLESS-REALITY-gRPC"
+protocol = "vless"
+transport = "grpc"
+security = "reality"
+
+[[scenario]]
+name = "VMess-TCP"
+protocol = "vmess"
+transport = "tcp"
+security = "none"
+
+[[scenario]]
+name = "VMess-WS"
+protocol = "vmess"
+transport = "ws"
+security = "none"
+
+[[scenario]]
+name = "Trojan-WS-TLS"
+protocol = "trojan"
+transport = "ws"
+security = "tls"
+
+[[scenario]]
+name = "Trojan-gRPC-TLS"
+protocol = "trojan"
+transport = "grpc"
+security = "tls"
+
+[[scenario]]
+name = "SS2022-AES128"
+protocol = "ss2022"
+transport = "native"
+security = "none"
+options = { method = "2022-blake3-aes-128-gcm" }
+
+[[scenario]]
+name = "SS2022-AES256"
+protocol = "ss2022"
+transport = "native"
+security = "none"
+options = { method = "2022-blake3-aes-256-gcm" }
+
+[[scenario]]
+name = "Hysteria2"
+protocol = "hysteria2"
+transport = "native"
+security = "tls"

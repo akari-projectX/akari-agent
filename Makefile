@@ -81,12 +81,17 @@ proto:
 #   make sync-proto PANEL_DIR=../wt-panel).
 PANEL_DIR ?= ../akari-panel
 
+# W26: proto/protocols.toml (the protocol capability manifest: managed
+# protocols, credential rules, canary scenarios) is canonical in the panel
+# too and travels with the contract.
+CONTRACT_FILES = agent.proto protocols.toml
+
 sync-proto:
-	cp $(PANEL_DIR)/proto/agent.proto proto/agent.proto
+	for f in $(CONTRACT_FILES); do cp $(PANEL_DIR)/proto/$$f proto/$$f || exit 1; done
 	$(MAKE) proto
 
 check-proto:
-	diff -q $(PANEL_DIR)/proto/agent.proto proto/agent.proto
+	@for f in $(CONTRACT_FILES); do diff -q $(PANEL_DIR)/proto/$$f proto/$$f || { echo "proto/$$f differs from $(PANEL_DIR)/proto/$$f: make sync-proto"; exit 1; }; done; echo "contract: in sync with $(PANEL_DIR)"
 
 # W23: the systemd units are canonical HERE (systemd/, compiled into the
 # binary: -print-unit / -print-units). akari-panel keeps a byte-identical

@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xtls/xray-core/proxy/vless"
+
 	_ "github.com/xtls/xray-core/proxy/hysteria"
 	_ "github.com/xtls/xray-core/proxy/shadowsocks_2022"
 
@@ -288,191 +290,175 @@ func echoBulk(c net.Conn, n int) (time.Duration, error) {
 	return time.Since(start), nil
 }
 
+// TestRT_ProtocolMatrix runs every end-to-end scenario of the protocol
+// manifest (proto/protocols.toml [[scenario]], W26): the case table is
+// composed from per-protocol, per-transport and per-security builders
+// (scenarioCase); a scenario without a builder fails the test, so adding a
+// combination to the manifest means teaching the canary to run it.
 func TestRT_ProtocolMatrix(t *testing.T) {
 	e := newMatrixEnv(t)
 	realityDest := tlsEcho(t, e.cert) // TLS 1.3 target REALITY borrows
-	vless := func(flow string) string { return fmt.Sprintf(`{"flow":%q,"id":%q}`, flow, idA) }
-	vlessOut := func(port int, flow string, stream map[string]any) map[string]any {
-		return map[string]any{"protocol": "vless", "settings": map[string]any{"vnext": []any{map[string]any{
-			"address": "127.0.0.1", "port": port, "users": []any{map[string]any{"id": idA, "flow": flow, "encryption": "none"}}}}},
-			"streamSettings": stream}
+	if len(manifest.Scenario) == 0 {
+		t.Fatal("the manifest lists no scenarios")
 	}
-	vlessIn := `"protocol":"vless","settings":{"clients":[],"decryption":"none"}`
-	ssPSK := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef"))
-	ssUser := base64.StdEncoding.EncodeToString([]byte("fedcba9876543210"))
-	ssPSK256 := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
-	ssUser256 := base64.StdEncoding.EncodeToString([]byte("fedcba9876543210fedcba9876543210"))
-	ssCase := func(name, method, psk, user string) matrixCase {
-		return matrixCase{
-			name: name, protocol: "shadowsocks",
-			inbound: func(int) string {
-				return fmt.Sprintf(`"protocol":"shadowsocks","settings":{"method":%q,"password":%q,"clients":[],"network":"tcp,udp"}`, method, psk)
-			},
-			account: fmt.Sprintf(`{"password":%q}`, user),
-			outbound: func(p int) map[string]any {
-				return map[string]any{"protocol": "shadowsocks", "settings": map[string]any{"servers": []any{map[string]any{
-					"address": "127.0.0.1", "port": p, "method": method, "password": psk + ":" + user}}}}
-			},
+	for _, sc := range manifest.Scenario {
+		tc, err := scenarioCase(e, realityDest, sc)
+		if err != nil {
+			t.Fatalf("%v: %v", sc, err)
 		}
-	}
-	hyAuth := "0123456789abcdef0123456789abcdef"
-	cases := []matrixCase{
-		{
-			name: "VLESS-REALITY-Vision", protocol: "vless", innerTLS: true, account: vless("xtls-rprx-vision"),
-			inbound: func(int) string {
-				return `"protocol":"vless","settings":{"clients":[],"decryption":"none","flow":"xtls-rprx-vision"},"streamSettings":{"network":"tcp",` + e.serverReality(realityDest) + `}`
-			},
-			outbound: func(p int) map[string]any {
-				return vlessOut(p, "xtls-rprx-vision", map[string]any{"network": "tcp", "security": "reality", "realitySettings": e.clientReality()})
-			},
-		},
-		{
-			name: "VLESS-TLS-Vision", protocol: "vless", innerTLS: true, account: vless("xtls-rprx-vision"),
-			inbound: func(int) string {
-				return `"protocol":"vless","settings":{"clients":[],"decryption":"none","flow":"xtls-rprx-vision"},"streamSettings":{"network":"tcp",` + e.serverTLS() + `}`
-			},
-			outbound: func(p int) map[string]any {
-				return vlessOut(p, "xtls-rprx-vision", map[string]any{"network": "tcp", "security": "tls", "tlsSettings": e.clientTLS()})
-			},
-		},
-		{
-			name: "VLESS-REALITY-XHTTP", protocol: "vless", account: vless(""),
-			inbound: func(int) string {
-				return vlessIn + `,"streamSettings":{"network":"xhttp","xhttpSettings":{"path":"/xh","mode":"auto"},` + e.serverReality(realityDest) + `}`
-			},
-			outbound: func(p int) map[string]any {
-				return vlessOut(p, "", map[string]any{"network": "xhttp", "xhttpSettings": map[string]any{"path": "/xh", "mode": "auto"},
-					"security": "reality", "realitySettings": e.clientReality()})
-			},
-		},
-		{
-			name: "VLESS-XHTTP", protocol: "vless", account: vless(""),
-			inbound: func(int) string {
-				return vlessIn + `,"streamSettings":{"network":"xhttp","xhttpSettings":{"path":"/xh","mode":"auto"}}`
-			},
-			outbound: func(p int) map[string]any {
-				return vlessOut(p, "", map[string]any{"network": "xhttp", "xhttpSettings": map[string]any{"path": "/xh", "mode": "packet-up"}})
-			},
-		},
-		{
-			name: "VLESS-XHTTP-TLS", protocol: "vless", account: vless(""),
-			inbound: func(int) string {
-				return vlessIn + `,"streamSettings":{"network":"xhttp","xhttpSettings":{"path":"/xh","mode":"auto"},` + e.serverTLS() + `}`
-			},
-			outbound: func(p int) map[string]any {
-				return vlessOut(p, "", map[string]any{"network": "xhttp", "xhttpSettings": map[string]any{"path": "/xh", "mode": "stream-one"},
-					"security": "tls", "tlsSettings": e.clientTLS("h2")})
-			},
-		},
-		{
-			name: "VLESS-HTTPUpgrade", protocol: "vless", account: vless(""),
-			inbound: func(int) string {
-				return vlessIn + `,"streamSettings":{"network":"httpupgrade","httpupgradeSettings":{"path":"/hu"}}`
-			},
-			outbound: func(p int) map[string]any {
-				return vlessOut(p, "", map[string]any{"network": "httpupgrade", "httpupgradeSettings": map[string]any{"path": "/hu"}})
-			},
-		},
-		{
-			name: "VLESS-HTTPUpgrade-TLS", protocol: "vless", account: vless(""),
-			inbound: func(int) string {
-				return vlessIn + `,"streamSettings":{"network":"httpupgrade","httpupgradeSettings":{"path":"/hu"},` + e.serverTLS("http/1.1") + `}`
-			},
-			outbound: func(p int) map[string]any {
-				return vlessOut(p, "", map[string]any{"network": "httpupgrade", "httpupgradeSettings": map[string]any{"path": "/hu"},
-					"security": "tls", "tlsSettings": e.clientTLS("http/1.1")})
-			},
-		},
-		{
-			name: "VLESS-WS-TLS", protocol: "vless", account: vless(""),
-			inbound: func(int) string {
-				return vlessIn + `,"streamSettings":{"network":"ws","wsSettings":{"path":"/ws"},` + e.serverTLS("http/1.1") + `}`
-			},
-			outbound: func(p int) map[string]any {
-				return vlessOut(p, "", map[string]any{"network": "ws", "wsSettings": map[string]any{"path": "/ws"},
-					"security": "tls", "tlsSettings": e.clientTLS("http/1.1")})
-			},
-		},
-		{
-			name: "VLESS-gRPC-TLS", protocol: "vless", account: vless(""),
-			inbound: func(int) string {
-				return vlessIn + `,"streamSettings":{"network":"grpc","grpcSettings":{"serviceName":"svc"},` + e.serverTLS("h2") + `}`
-			},
-			outbound: func(p int) map[string]any {
-				return vlessOut(p, "", map[string]any{"network": "grpc", "grpcSettings": map[string]any{"serviceName": "svc"},
-					"security": "tls", "tlsSettings": e.clientTLS("h2")})
-			},
-		},
-		{
-			name: "VLESS-REALITY-gRPC", protocol: "vless", account: vless(""),
-			inbound: func(int) string {
-				return vlessIn + `,"streamSettings":{"network":"grpc","grpcSettings":{"serviceName":"svc"},` + e.serverReality(realityDest) + `}`
-			},
-			outbound: func(p int) map[string]any {
-				return vlessOut(p, "", map[string]any{"network": "grpc", "grpcSettings": map[string]any{"serviceName": "svc", "multiMode": true},
-					"security": "reality", "realitySettings": e.clientReality()})
-			},
-		},
-		{
-			name: "VMess-TCP", protocol: "vmess", account: fmt.Sprintf(`{"id":%q}`, idA),
-			inbound: func(int) string {
-				return `"protocol":"vmess","settings":{"clients":[]},"streamSettings":{"network":"tcp"}`
-			},
-			outbound: func(p int) map[string]any {
-				return map[string]any{"protocol": "vmess", "settings": map[string]any{"vnext": []any{map[string]any{
-					"address": "127.0.0.1", "port": p, "users": []any{map[string]any{"id": idA, "security": "auto"}}}}}}
-			},
-		},
-		{
-			name: "VMess-WS", protocol: "vmess", account: fmt.Sprintf(`{"id":%q}`, idA),
-			inbound: func(int) string {
-				return `"protocol":"vmess","settings":{"clients":[]},"streamSettings":{"network":"ws","wsSettings":{"path":"/vm"}}`
-			},
-			outbound: func(p int) map[string]any {
-				return map[string]any{"protocol": "vmess", "settings": map[string]any{"vnext": []any{map[string]any{
-					"address": "127.0.0.1", "port": p, "users": []any{map[string]any{"id": idA, "security": "auto"}}}}},
-					"streamSettings": map[string]any{"network": "ws", "wsSettings": map[string]any{"path": "/vm"}}}
-			},
-		},
-		{
-			name: "Trojan-WS-TLS", protocol: "trojan", account: `{"password":"rt-trojan-password-0123"}`,
-			inbound: func(int) string {
-				return `"protocol":"trojan","settings":{"clients":[]},"streamSettings":{"network":"ws","wsSettings":{"path":"/tj"},` + e.serverTLS("http/1.1") + `}`
-			},
-			outbound: func(p int) map[string]any {
-				return map[string]any{"protocol": "trojan", "settings": map[string]any{"servers": []any{map[string]any{
-					"address": "127.0.0.1", "port": p, "password": "rt-trojan-password-0123"}}},
-					"streamSettings": map[string]any{"network": "ws", "wsSettings": map[string]any{"path": "/tj"},
-						"security": "tls", "tlsSettings": e.clientTLS("http/1.1")}}
-			},
-		},
-		{
-			name: "Trojan-gRPC-TLS", protocol: "trojan", account: `{"password":"rt-trojan-password-0123"}`,
-			inbound: func(int) string {
-				return `"protocol":"trojan","settings":{"clients":[]},"streamSettings":{"network":"grpc","grpcSettings":{"serviceName":"tg"},` + e.serverTLS("h2") + `}`
-			},
-			outbound: func(p int) map[string]any {
-				return map[string]any{"protocol": "trojan", "settings": map[string]any{"servers": []any{map[string]any{
-					"address": "127.0.0.1", "port": p, "password": "rt-trojan-password-0123"}}},
-					"streamSettings": map[string]any{"network": "grpc", "grpcSettings": map[string]any{"serviceName": "tg"},
-						"security": "tls", "tlsSettings": e.clientTLS("h2")}}
-			},
-		},
-		ssCase("SS2022-AES128", "2022-blake3-aes-128-gcm", ssPSK, ssUser),
-		ssCase("SS2022-AES256", "2022-blake3-aes-256-gcm", ssPSK256, ssUser256),
-		{
-			name: "Hysteria2", protocol: "hysteria", account: fmt.Sprintf(`{"auth":%q}`, hyAuth),
-			inbound: func(int) string {
-				return `"protocol":"hysteria","settings":{"version":2,"clients":[]},"streamSettings":{"network":"hysteria","hysteriaSettings":{"version":2},` + e.serverTLS("h3") + `}`
-			},
-			outbound: func(p int) map[string]any {
-				return map[string]any{"protocol": "hysteria", "settings": map[string]any{"version": 2, "address": "127.0.0.1", "port": p},
-					"streamSettings": map[string]any{"network": "hysteria", "hysteriaSettings": map[string]any{"version": 2, "auth": hyAuth},
-						"security": "tls", "tlsSettings": e.clientTLS("h3")}}
-			},
-		},
-	}
-	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) { runMatrixCase(t, e, tc) })
 	}
+}
+
+// matrixPart: one layer's contribution to the server inbound (JSON members)
+// and to the client outbound's streamSettings.
+type matrixPart struct {
+	server []string
+	client map[string]any
+}
+
+// scenarioCase composes a manifest scenario into a canary case.
+func scenarioCase(e *matrixEnv, realityDest int, sc manifestScenario) (matrixCase, error) {
+	p := manifest.protocolByID(sc.Protocol)
+	if p == nil {
+		return matrixCase{}, fmt.Errorf("unknown protocol")
+	}
+	tc := matrixCase{name: sc.Name, protocol: p.Wire}
+	// Security first: the transport's client settings depend on it.
+	var alpn []string
+	if tr := manifestTransport(sc.Transport); tr != nil {
+		alpn = tr.ALPN
+	}
+	if sc.Transport == "native" {
+		alpn = p.ALPN
+	}
+	var sec matrixPart
+	switch sc.Security {
+	case "none":
+	case "tls":
+		sec.server = []string{e.serverTLS(alpn...)}
+		sec.client = map[string]any{"security": "tls"}
+		if sc.Transport == "tcp" {
+			sec.client["tlsSettings"] = e.clientTLS()
+		} else {
+			sec.client["tlsSettings"] = e.clientTLS(alpn[0])
+		}
+	case "reality":
+		sec.server = []string{e.serverReality(realityDest)}
+		sec.client = map[string]any{"security": "reality", "realitySettings": e.clientReality()}
+	default:
+		return tc, fmt.Errorf("no canary builder for security %q", sc.Security)
+	}
+	var net matrixPart
+	switch sc.Transport {
+	case "tcp":
+		net = matrixPart{[]string{`"network":"tcp"`}, map[string]any{"network": "tcp"}}
+	case "ws":
+		net = matrixPart{[]string{`"network":"ws","wsSettings":{"path":"/ws"}`},
+			map[string]any{"network": "ws", "wsSettings": map[string]any{"path": "/ws"}}}
+	case "httpupgrade":
+		net = matrixPart{[]string{`"network":"httpupgrade","httpupgradeSettings":{"path":"/hu"}`},
+			map[string]any{"network": "httpupgrade", "httpupgradeSettings": map[string]any{"path": "/hu"}}}
+	case "xhttp":
+		// The client exercises a different XHTTP mode per security (the
+		// server accepts all of them in "auto").
+		mode := map[string]string{"none": "packet-up", "tls": "stream-one", "reality": "auto"}[sc.Security]
+		net = matrixPart{[]string{`"network":"xhttp","xhttpSettings":{"path":"/xh","mode":"auto"}`},
+			map[string]any{"network": "xhttp", "xhttpSettings": map[string]any{"path": "/xh", "mode": mode}}}
+	case "grpc":
+		grpc := map[string]any{"serviceName": "svc"}
+		if sc.Security == "reality" {
+			grpc["multiMode"] = true
+		}
+		net = matrixPart{[]string{`"network":"grpc","grpcSettings":{"serviceName":"svc"}`},
+			map[string]any{"network": "grpc", "grpcSettings": grpc}}
+	case "native":
+		if sc.Protocol == "hysteria2" {
+			net = matrixPart{[]string{`"network":"hysteria","hysteriaSettings":{"version":2}`},
+				map[string]any{"network": "hysteria"}}
+		}
+	default:
+		return tc, fmt.Errorf("no canary builder for transport %q", sc.Transport)
+	}
+	server := append(net.server, sec.server...)
+	client := map[string]any{}
+	for _, part := range []map[string]any{net.client, sec.client} {
+		for k, v := range part {
+			client[k] = v
+		}
+	}
+	stream := ""
+	if len(server) > 0 {
+		stream = `,"streamSettings":{` + strings.Join(server, ",") + `}`
+	}
+	switch sc.Protocol {
+	case "vless":
+		flow := sc.Options["flow"]
+		tc.innerTLS = flow == vless.XRV // Vision splice runs on inner TLS
+		settings := `{"clients":[],"decryption":"none"}`
+		if flow != "" {
+			settings = fmt.Sprintf(`{"clients":[],"decryption":"none","flow":%q}`, flow)
+		}
+		tc.account = fmt.Sprintf(`{"flow":%q,"id":%q}`, flow, idA)
+		tc.inbound = func(int) string { return `"protocol":"vless","settings":` + settings + stream }
+		tc.outbound = func(port int) map[string]any {
+			return map[string]any{"protocol": "vless", "settings": map[string]any{"vnext": []any{map[string]any{
+				"address": "127.0.0.1", "port": port, "users": []any{map[string]any{"id": idA, "flow": flow, "encryption": "none"}}}}},
+				"streamSettings": client}
+		}
+	case "vmess":
+		tc.account = fmt.Sprintf(`{"id":%q}`, idA)
+		tc.inbound = func(int) string { return `"protocol":"vmess","settings":{"clients":[]}` + stream }
+		tc.outbound = func(port int) map[string]any {
+			return map[string]any{"protocol": "vmess", "settings": map[string]any{"vnext": []any{map[string]any{
+				"address": "127.0.0.1", "port": port, "users": []any{map[string]any{"id": idA, "security": "auto"}}}}},
+				"streamSettings": client}
+		}
+	case "trojan":
+		const pw = "rt-trojan-password-0123"
+		tc.account = fmt.Sprintf(`{"password":%q}`, pw)
+		tc.inbound = func(int) string { return `"protocol":"trojan","settings":{"clients":[]}` + stream }
+		tc.outbound = func(port int) map[string]any {
+			return map[string]any{"protocol": "trojan", "settings": map[string]any{"servers": []any{map[string]any{
+				"address": "127.0.0.1", "port": port, "password": pw}}},
+				"streamSettings": client}
+		}
+	case "ss2022":
+		method := sc.Options["method"]
+		n := p.option("method").keyLens()[method]
+		if n == 0 {
+			return tc, fmt.Errorf("no key length for method %q", method)
+		}
+		psk := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("0123456789abcdef", 2)[:n]))
+		user := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("fedcba9876543210", 2)[:n]))
+		tc.account = fmt.Sprintf(`{"password":%q}`, user)
+		tc.inbound = func(int) string {
+			return fmt.Sprintf(`"protocol":"shadowsocks","settings":{"method":%q,"password":%q,"clients":[],"network":"tcp,udp"}`, method, psk) + stream
+		}
+		tc.outbound = func(port int) map[string]any {
+			return map[string]any{"protocol": "shadowsocks", "settings": map[string]any{"servers": []any{map[string]any{
+				"address": "127.0.0.1", "port": port, "method": method, "password": psk + ":" + user}}}}
+		}
+	case "hysteria2":
+		const auth = "0123456789abcdef0123456789abcdef"
+		tc.account = fmt.Sprintf(`{"auth":%q}`, auth)
+		tc.inbound = func(int) string { return `"protocol":"hysteria","settings":{"version":2,"clients":[]}` + stream }
+		client["hysteriaSettings"] = map[string]any{"version": 2, "auth": auth}
+		tc.outbound = func(port int) map[string]any {
+			return map[string]any{"protocol": "hysteria", "settings": map[string]any{"version": 2, "address": "127.0.0.1", "port": port},
+				"streamSettings": client}
+		}
+	default:
+		return tc, fmt.Errorf("no canary builder for protocol %q", sc.Protocol)
+	}
+	return tc, nil
+}
+
+func manifestTransport(id string) *manifestLayer {
+	for i := range manifest.Transport {
+		if manifest.Transport[i].ID == id {
+			return &manifest.Transport[i]
+		}
+	}
+	return nil
 }
