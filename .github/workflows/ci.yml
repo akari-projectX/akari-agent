@@ -1,11 +1,21 @@
 name: ci
 
+# W37 tiered CI. Fast checks (go, govulncheck, check-proto, coverage) run
+# on every PR. Heavy jobs (smoke, systemd self-update, reproducible build)
+# run only when the `changes` job finds a path they cover
+# (scripts/ci-changes.sh); otherwise they are skipped by their job-level
+# `if:`, which reports success, so the required checks never wait.
+# Everything runs on pushes to main, nightly, on dispatch, from release.yml
+# (workflow_call, before anything is published), and on PRs labelled
+# `full-ci`.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
   schedule:
     - cron: "41 3 * * *" # nightly: new Go/xray advisories
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -16,6 +26,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    # Which heavy job groups this run needs (scripts/ci-changes.sh). A PR
+    # checkout is GitHub's merge commit: its first parent is the base
+    # branch head, so `HEAD^1 HEAD` is exactly what merging would change.
+    # Fail-safe: when this job fails, the gated jobs run (their `if:` only
+    # skips on an explicit "false").
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      smoke: ${{ steps.c.outputs.smoke }}
+      systemd: ${{ steps.c.outputs.systemd }}
+      reproducible: ${{ steps.c.outputs.reproducible }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - id: c
+        env:
+          FULL: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+        run: |
+          if [ "$FULL" = true ]; then scripts/ci-changes.sh full; else scripts/ci-changes.sh HEAD^1 HEAD; fi
+
   go:
     name: go (fmt, vet, test, build)
     runs-on: ubuntu-latest
@@ -35,7 +68,12 @@ jobs:
   reproducible:
     # Same commit -> byte-identical release binary (the Makefile's build
     # flags: no cgo, -trimpath, no VCS stamp, empty build id).
+    # W37: on PRs only when the build inputs change (go.mod/go.sum, the
+    # Makefile's flags): with those fixed, source edits cannot make the
+    # build non-deterministic. Always on main, nightly and before a release.
     name: reproducible build (linux/amd64)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.reproducible != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -116,7 +154,11 @@ jobs:
     # metrics readable under the shipped unit (unknown, not 0, under the
     # pre-W23 one), unit refresh with each update and its rollback, and the
     # pre-W23 updater unit (no refresh until one reinstall).
+    # W37: on PRs only when the updater, the units or what they exercise
+    # change (scripts/ci-changes.sh group `systemd`).
     name: systemd self-update (updater unit, noexec state dir)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.systemd != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -145,3 +187,58 @@ jobs:
       - if: always()
         run: |
           { echo '### Agent core statement coverage'; echo; echo '```'; tail -n 4 cover.txt 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  smoke:
+    # W37: the panel's cross-repo end-to-end (akari-panel smoke.sh) against
+    # this agent, when the agent binary's inputs change (non-test Go code,
+    # modules, the contract, units). The panel is its main branch: contract
+    # changes merge panel first (CLAUDE.md), so main already speaks the
+    # agent's protocol. Both repos side by side under the workspace dir
+    # (smoke needs ../akari-agent); the agent checkout keeps full history
+    # (smoke builds a pinned protocol-0 agent from it).
+    name: smoke (akari-panel main + this agent)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.smoke != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: akari-agent
+          fetch-depth: 0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: akari-projectX/akari-panel
+          ref: main
+          path: akari-panel
+      # rust-toolchain.toml pins the compiler (same as the panel's CI).
+      - run: rustup toolchain install --profile minimal
+        working-directory: akari-panel
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: akari-panel
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: akari-agent/go.mod
+          cache-dependency-path: akari-agent/go.sum
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: akari-panel/spa/package-lock.json
+      # The runner's own Postgres/Valkey would collide with compose's ports.
+      - run: sudo systemctl stop postgresql || true
+      # R22: the panel dials its main domain (install-link pin probe).
+      - run: echo '127.0.0.1 myapp.test' | sudo tee -a /etc/hosts
+      # This agent is the newest side: every agent-dependent section must
+      # run (a SKIP means the agent lacks what panel main expects).
+      - run: make smoke AGENT_DIR=../akari-agent
+        working-directory: akari-panel
+        env:
+          SMOKE_REQUIRE_AGENT: "1"
+      - if: failure()
+        run: |
+          tail -n 80 /tmp/akari-smoke/*.log || true
+      - if: always()
+        working-directory: akari-panel
+        run: docker compose down -v || true

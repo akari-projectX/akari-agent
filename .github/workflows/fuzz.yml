@@ -4,13 +4,23 @@ name: fuzz
 # The seeds already run as tests in every `make test`; this explores.
 # PRs/pushes: every target 15 s against the cached corpus; nightly: 5 min
 # per target, growing the corpus (the Go fuzz cache in GOCACHE/fuzz).
+# W37: on PRs only when Go code, modules or fuzz seeds change
+# (scripts/ci-changes.sh group `fuzz`) or with the `full-ci` label; always
+# on main, nightly, dispatch and from release.yml (workflow_call).
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
   schedule:
     - cron: "11 4 * * *"
+  workflow_call:
+    inputs:
+      fuzztime:
+        description: time per target (empty = the PR default)
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       fuzztime:
@@ -25,8 +35,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      fuzz: ${{ steps.c.outputs.fuzz }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - id: c
+        env:
+          FULL: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+        run: |
+          if [ "$FULL" = true ]; then scripts/ci-changes.sh full; else scripts/ci-changes.sh HEAD^1 HEAD; fi
+
   fuzz:
     name: fuzz (go native)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.fuzz != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
