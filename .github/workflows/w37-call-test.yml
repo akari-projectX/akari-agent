@@ -1,0 +1,25 @@
+name: w37-call-test
+# Throwaway: exercises ci.yml/fuzz.yml through workflow_call as release.yml does.
+on:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  ci:
+    name: full CI (pre-release)
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+  fuzz:
+    name: fuzz (pre-release)
+    uses: ./.github/workflows/fuzz.yml
+    permissions:
+      contents: read
+  release:
+    needs: [ci, fuzz]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo gated
