@@ -5,6 +5,11 @@ name: release
 # signatures (GitHub OIDC), GitHub Release. Verification recipe:
 # akari-panel docs/DEPLOY.md ("Verify a release").
 #
+# W37 pre-release gate: the full CI suite (ci.yml, every job regardless of
+# the changed paths, including the panel smoke against this agent) and
+# fuzz.yml run on the tagged commit first (workflow_call); the release job
+# (build, sign, publish) needs both.
+#
 # Third-party actions are pinned to commit SHAs (comment = tag).
 
 on:
@@ -19,7 +24,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  ci:
+    name: full CI (pre-release)
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  fuzz:
+    name: fuzz (pre-release)
+    uses: ./.github/workflows/fuzz.yml
+    permissions:
+      contents: read
+
   release:
+    needs: [ci, fuzz]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:

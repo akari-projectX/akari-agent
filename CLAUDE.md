@@ -42,7 +42,7 @@ Go 1.27 单包（`package main`，模块名 `akari/agent`），内嵌 xray-core 
 | `rt_matrix_test.go` | W8 协议矩阵金丝雀（canary 标签；W26：场景表 = 清单 `[[scenario]]`，由 `scenarioCase` 按协议/传输/安全层构建器组合，清单里没有构建器的场景直接失败）：17 种 协议×传输×安全 组合各用 xray 真实客户端握手、中继、断言用户计数、撤权后旧连接断开且新连接被拒（全部经 delta，SS2022 为墓碑）；W9：移除→同凭据重加（先带限速、再不限速）后**同一个客户端**能再连上（限速 ±5%/不限速），再次移除再被切断 |
 | `ss_tombstone_test.go` | W9 SS2022 墓碑（`-race`）：真实 SS2022 握手（sing-shadowsocks 客户端）在固定头之后拖住（服务端已解析出用户下标），期间 delta 移除部分用户 → 被删用户的握手被拒、其余用户以本人身份完成、已建立连接存活、每用户计数精确（无错记）、不重建；同凭据重加复活墓碑；并发版：随机拖延的握手 vs 反复移除/重加。换回 xray `RemoveUser` 时该测试以 index out of range panic 失败 |
 | `protocols_test.go` | SS2022 受管入站/拒绝项、`WouldShrinkUnsafe`（含墓碑生命周期、state hash 不含墓碑、Snapshot 压缩）、`TestTombstoneBound`、账号校验、gRPC 无 :authority 请求不致崩溃（R26 回归） |
-| `fuzz_test.go` / `release/fuzz_test.go` | W13 原生 Go fuzz（种子随 `make test` 当普通测试跑；`make fuzz FUZZTIME=…` 逐个探索，CI `fuzz.yml`：PR 每目标 15s、夜间 5m，语料存 Actions 缓存；新崩溃输入落在 `testdata/fuzz/<Target>/`，修复时一并提交作回归种子）：`FuzzBuildConfig`（面板下发的 inbounds → `buildConfig`；不变量：xray 视为带 `clients` 的 SS 入站绝不留作单用户服务端）、`FuzzRewriteCertPaths`（只改两条证书路径，数字精度/其他成员不变）、`FuzzBuildUser`、`FuzzInboundTCPPorts`、`FuzzACMEConfig`（域名可安全作目录名）、`FuzzProcParsers`、`FuzzStateHash`（编码无歧义、与顺序无关）、`FuzzLoadConfig`；release：`FuzzParseManifest`、`FuzzCompareVersions`（与独立 semver 参考实现差分）、`FuzzVerify`、`FuzzParseKeys` |
+| `fuzz_test.go` / `release/fuzz_test.go` | W13 原生 Go fuzz（种子随 `make test` 当普通测试跑；`make fuzz FUZZTIME=…` 逐个探索，CI `fuzz.yml`：每目标 15s（main、发版前、改了 Go 代码/模块/种子或带 `full-ci` 的 PR）、夜间 5m，语料存 Actions 缓存；新崩溃输入落在 `testdata/fuzz/<Target>/`，修复时一并提交作回归种子）：`FuzzBuildConfig`（面板下发的 inbounds → `buildConfig`；不变量：xray 视为带 `clients` 的 SS 入站绝不留作单用户服务端）、`FuzzRewriteCertPaths`（只改两条证书路径，数字精度/其他成员不变）、`FuzzBuildUser`、`FuzzInboundTCPPorts`、`FuzzACMEConfig`（域名可安全作目录名）、`FuzzProcParsers`、`FuzzStateHash`（编码无歧义、与顺序无关）、`FuzzLoadConfig`；release：`FuzzParseManifest`、`FuzzCompareVersions`（与独立 semver 参考实现差分）、`FuzzVerify`、`FuzzParseKeys` |
 | `fuzz_regress_test.go` | W13 fuzz 发现的回归测试（SS2022 键匹配、证书路径重写无损、/proc 解析拒绝/饱和；release 包的超长数字预发布标识在 `release_test.go`） |
 | `gate_unit_test.go` | gate 记账（轮换只断该 key 的活连接、Close、拒绝不触达内层 dispatcher）与限速边界（饱和、包装器错误透传）的单元测试 |
 | `scripts/cover-gate.sh` | `make cover`：`go test -tags canary -coverprofile` 后按文件统计 gate.go/ratelimit.go/core.go 语句覆盖率，低于 `COVER_MIN`（85）失败；CI job `coverage` |
@@ -75,6 +75,12 @@ make check-third-party  # CI：清单是否最新
 ./agent -licenses       # 本二进制的许可声明 + 全部第三方许可原文
 ```
 
+## CI 分级（W37）
+
+- **每个 PR 都跑（快速）**：`go (fmt, vet, test, build)`、`govulncheck`、`check-proto (vs akari-panel main)`、`coverage`。
+- **按改动范围**：`changes` job 跑 `scripts/ci-changes.sh`（PR 合并提交 `HEAD^1..HEAD` 的文件列表 → 分组），重型 job 用 job 级 `if:` 真跑或跳过（跳过 = 成功，必需检查不会卡在 waiting；`changes` 失败时一律真跑）：`smoke`（非测试 Go 代码、go.mod/sum、proto/pb、systemd/、Makefile → 面板 main + 本 agent 的 `smoke.sh`，`SMOKE_REQUIRE_AGENT=1`）、`systemd`（updater/units/release/机器指标/systemd-test → `systemd self-update`）、`reproducible`（go.mod/go.sum/Makefile：构建标志与依赖固定时源码改动不会破坏可复现性）、`fuzz`（Go 代码/模块/种子）。改 `.github/` 或该脚本 = 全部分组。
+- **全套**：push 到 main、每晚、`workflow_dispatch`、发版前（release.yml 调用）、带 **`full-ci` 标签**的 PR。
+
 ## 契约变更的合并顺序（面板先行）
 
 `proto/agent.proto` 的正本在面板。改契约（新字段/消息/能力）时：
@@ -87,7 +93,7 @@ make check-third-party  # CI：清单是否最新
 
 ## 发布
 
-tag `v*` 触发 `.github/workflows/release.yml`：fmt-check/vet/check-third-party/test → `make dist`（含 `check-release-keys`，附 `THIRD_PARTY_LICENSES.txt`；校验 `-licenses` 与其一致）→ 自更新 manifest 签名（仅当仓库 secret `AKARI_RELEASE_SIGNING_KEY` 存在，否则 warning 跳过；签后用 `release-keys.txt` 复验）→ CycloneDX SBOM → SHA256SUMS → cosign 无密钥签名（GitHub OIDC，`*.sigstore.json`）→ GitHub Release（发布说明开头是 R19 许可声明，`THIRD_PARTY_LICENSES.txt` 作为资产并入 SHA256SUMS 与 cosign 签名）。第三方 action 固定 commit SHA。验证方法见 `akari-panel/docs/DEPLOY.md`。systemd 单元正本在本仓库 `systemd/`（`akari-agent.service` + W18 更新器 `akari-agent-update.{path,service}`），编进二进制（W23）；面板 `deploy/systemd/` 是 `make check-units` 校验的副本。
+tag `v*` 触发 `.github/workflows/release.yml`：先以 workflow_call 跑全套 `ci.yml`（含面板 smoke）+ `fuzz.yml`，都通过才进入 release job：fmt-check/vet/check-third-party/test → `make dist`（含 `check-release-keys`，附 `THIRD_PARTY_LICENSES.txt`；校验 `-licenses` 与其一致）→ 自更新 manifest 签名（仅当仓库 secret `AKARI_RELEASE_SIGNING_KEY` 存在，否则 warning 跳过；签后用 `release-keys.txt` 复验）→ CycloneDX SBOM → SHA256SUMS → cosign 无密钥签名（GitHub OIDC，`*.sigstore.json`）→ GitHub Release（发布说明开头是 R19 许可声明，`THIRD_PARTY_LICENSES.txt` 作为资产并入 SHA256SUMS 与 cosign 签名）。第三方 action 固定 commit SHA。验证方法见 `akari-panel/docs/DEPLOY.md`。systemd 单元正本在本仓库 `systemd/`（`akari-agent.service` + W18 更新器 `akari-agent-update.{path,service}`），编进二进制（W23）；面板 `deploy/systemd/` 是 `make check-units` 校验的副本。
 
 ## 须知
 
