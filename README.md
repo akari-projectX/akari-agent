@@ -209,3 +209,4 @@ old one until the panel has accepted the new one. A bootstrap file with a new
 token re-enrolls the node once. v1 bootstrap files (`identity.cert_pem` +
 `identity.key_pem`) still work and move onto a local key at the first
 renewal. See `akari-panel/docs/DEPLOY.md`.
+
