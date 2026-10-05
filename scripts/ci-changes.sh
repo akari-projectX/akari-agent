@@ -12,12 +12,14 @@
 # themselves. Fail-safe: the jobs also run when this script fails.
 set -euo pipefail
 
-GROUPS_ALL="smoke systemd reproducible fuzz"
+GROUPS_ALL="smoke systemd openrc reproducible fuzz"
 
 # smoke: what the agent binary is made of (non-test Go code, modules, the
 #   contract, the units it embeds) -> the panel's cross-repo smoke.
 # systemd: the self-update hand-over (agent side, updater, units, release
 #   verification, machine metrics read under the unit) and its test.
+# openrc: the same hand-over on Alpine under OpenRC (W32): the updater, the
+#   OpenRC scripts and what they run, and its test.
 # reproducible: the build inputs that decide byte-identical output (toolchain
 #   and modules, build flags). Source code alone cannot make the build
 #   non-deterministic (no cgo, -trimpath, no VCS stamp); nightly and every
@@ -29,7 +31,7 @@ groups_of() {
   esac
   case "$1" in
     *_test.go) ;;
-    *.go | go.mod | go.sum | proto/* | pb/* | systemd/* | release-keys.txt | Makefile | \
+    *.go | go.mod | go.sum | proto/* | pb/* | systemd/* | openrc/* | release-keys.txt | Makefile | \
       THIRD_PARTY_LICENSES.txt)
       echo smoke ;;
   esac
@@ -38,6 +40,12 @@ groups_of() {
       sysstat*.go | statfs*.go | boottime*.go | main.go | release-keys.txt | systemd/* | \
       scripts/systemd-test/* | go.mod | go.sum | Makefile)
       echo systemd ;;
+  esac
+  case "$1" in
+    update*.go | units*.go | manifest*.go | releasekeys*.go | release/* | \
+      sysstat*.go | statfs*.go | boottime*.go | main.go | release-keys.txt | openrc/* | \
+      scripts/openrc-test/* | go.mod | go.sum | Makefile)
+      echo openrc ;;
   esac
   case "$1" in
     go.mod | go.sum | Makefile)

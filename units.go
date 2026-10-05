@@ -1,18 +1,21 @@
 package main
 
-// The systemd units of this release (W23). systemd/ is their canonical
-// copy: they are compiled into the binary, so a release always carries the
-// units it was built and tested with.
+// The service files of this release (W23; OpenRC since W32). systemd/ and
+// openrc/ are their canonical copies: they are compiled into the binary,
+// so a release always carries the units it was built and tested with.
 //   - `-print-unit NAME` prints one (the panel's installer installs the
-//     units of the release it installs this way);
+//     files of the release it installs this way: the systemd units, or on
+//     Alpine the OpenRC scripts);
 //   - `-print-units` prints all of them as JSON (the privileged updater
-//     reads the NEW release's units from the verified binary and installs
-//     them with it, updater_linux.go);
+//     reads the NEW release's files from the verified binary and installs
+//     those of its init system with it, updater_linux.go);
 //   - the agent compares the installed copies with its own at start and
 //     reports a mismatch (capability "stale-units"): the panel then asks
 //     for one reinstall.
-// akari-panel keeps a byte-identical copy (deploy/systemd/, the installer's
-// fallback for releases that predate -print-unit): `make check-units`.
+// akari-panel keeps a byte-identical copy of the systemd units
+// (deploy/systemd/, the installer's fallback for releases that predate
+// -print-unit): `make check-units`. The OpenRC scripts need no copy: a
+// release without them cannot run under OpenRC anyway.
 
 import (
 	"bytes"
@@ -21,23 +24,66 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"unicode/utf8"
 )
 
 //go:embed systemd/akari-agent.service systemd/akari-agent-update.service systemd/akari-agent-update.path
+//go:embed openrc/akari-agent openrc/akari-agent-update
 var unitFS embed.FS
 
-// unitNames: the units a release carries and the updater may replace, in
-// install order. Nothing else in the unit directory is ever touched.
-var unitNames = []string{"akari-agent.service", "akari-agent-update.service", "akari-agent-update.path"}
+// initSys is an init system the agent is installed under (-init).
+type initSys struct {
+	name string
+	// units: the files this release carries for it and the updater may
+	// replace, in install order (the agent's own first). Nothing else in
+	// dir is ever touched. Names are unique across init systems.
+	units []string
+	// dir: where they are installed; mode: their file mode there.
+	dir  string
+	mode fs.FileMode
+	// trigger: the updater's file; the agent refuses update offers while
+	// it is missing (-updater-unit).
+	trigger string
+	// service: the agent's service (-update-service).
+	service string
+}
 
-const (
-	defaultUnitDir = "/etc/systemd/system"
-	// maxUnitSize bounds one unit file (the shipped ones are ~5 KiB).
-	maxUnitSize = 64 << 10
+var (
+	systemdInit = &initSys{
+		name:    "systemd",
+		units:   []string{"akari-agent.service", "akari-agent-update.service", "akari-agent-update.path"},
+		dir:     "/etc/systemd/system",
+		mode:    0o644,
+		trigger: "/etc/systemd/system/akari-agent-update.path",
+		service: "akari-agent.service",
+	}
+	// openrcInit (W32, Alpine): init scripts are executables.
+	openrcInit = &initSys{
+		name:    "openrc",
+		units:   []string{"akari-agent", "akari-agent-update"},
+		dir:     "/etc/init.d",
+		mode:    0o755,
+		trigger: "/etc/init.d/akari-agent-update",
+		service: "akari-agent",
+	}
+	initSystems = []*initSys{systemdInit, openrcInit}
 )
+
+// initByName is main's -init.
+func initByName(name string) (*initSys, error) {
+	for _, s := range initSystems {
+		if s.name == name {
+			return s, nil
+		}
+	}
+	return nil, fmt.Errorf("unknown init system %q (systemd, openrc)", name)
+}
+
+// maxUnitSize bounds one unit file (the shipped ones are ~5 KiB).
+const maxUnitSize = 64 << 10
 
 // unitsDoc is the -print-units output.
 type unitsDoc struct {
@@ -45,20 +91,31 @@ type unitsDoc struct {
 }
 
 func embeddedUnit(name string) ([]byte, bool) {
-	for _, n := range unitNames {
-		if n == name {
-			b, err := unitFS.ReadFile("systemd/" + name)
-			return b, err == nil
+	for _, s := range initSystems {
+		for _, n := range s.units {
+			if n == name {
+				b, err := unitFS.ReadFile(s.name + "/" + name)
+				return b, err == nil
+			}
 		}
 	}
 	return nil, false
 }
 
-func embeddedUnits() map[string][]byte {
-	out := make(map[string][]byte, len(unitNames))
-	for _, n := range unitNames {
+// embeddedUnits: the files this release carries for s.
+func (s *initSys) embeddedUnits() map[string][]byte {
+	out := make(map[string][]byte, len(s.units))
+	for _, n := range s.units {
 		b, _ := embeddedUnit(n)
 		out[n] = b
+	}
+	return out
+}
+
+func allUnitNames() []string {
+	var out []string
+	for _, s := range initSystems {
+		out = append(out, s.units...)
 	}
 	return out
 }
@@ -67,30 +124,32 @@ func embeddedUnits() map[string][]byte {
 func printUnit(w io.Writer, name string) error {
 	b, ok := embeddedUnit(name)
 	if !ok {
-		return fmt.Errorf("unknown unit %q (this release carries: %v)", name, unitNames)
+		return fmt.Errorf("unknown unit %q (this release carries: %v)", name, allUnitNames())
 	}
 	_, err := w.Write(b)
 	return err
 }
 
-// printUnits is main's -print-units.
+// printUnits is main's -print-units: every init system's files (an updater
+// takes those of its own; older updaters ignore names they do not know).
 func printUnits(w io.Writer) error {
 	doc := unitsDoc{Units: map[string]string{}}
-	for n, b := range embeddedUnits() {
+	for _, n := range allUnitNames() {
+		b, _ := embeddedUnit(n)
 		doc.Units[n] = string(b)
 	}
 	return json.NewEncoder(w).Encode(&doc)
 }
 
 // parseUnits reads -print-units output (of another, verified release):
-// every known unit present, plausible text; unknown names are ignored.
-func parseUnits(b []byte) (map[string][]byte, error) {
+// every file of s present, plausible text; other names are ignored.
+func (s *initSys) parseUnits(b []byte) (map[string][]byte, error) {
 	var doc unitsDoc
 	if err := json.Unmarshal(b, &doc); err != nil {
 		return nil, fmt.Errorf("units: %w", err)
 	}
-	out := make(map[string][]byte, len(unitNames))
-	for _, n := range unitNames {
+	out := make(map[string][]byte, len(s.units))
+	for _, n := range s.units {
 		u, ok := doc.Units[n]
 		switch {
 		case !ok || u == "":
@@ -105,20 +164,21 @@ func parseUnits(b []byte) (map[string][]byte, error) {
 	return out, nil
 }
 
-// staleUnits: the installed units (in dir) that differ from this release's.
-// Only checked when the agent runs as the installed service (systemd sets
-// INVOCATION_ID, and dir holds akari-agent.service); a missing updater
-// unit counts (the "updater" capability covers it too), unreadable files
-// do not (nothing to report).
-func staleUnits(dir string) []string {
-	if os.Getenv("INVOCATION_ID") == "" {
+// staleUnits: the installed files (in dir) that differ from this
+// release's. Only checked when the agent runs as the installed service
+// (systemd sets INVOCATION_ID; only the OpenRC script passes -init openrc)
+// and dir holds the agent's own file; a missing updater file counts (the
+// "updater" capability covers it too), unreadable files do not (nothing
+// to report).
+func (s *initSys) staleUnits(dir string) []string {
+	if s == systemdInit && os.Getenv("INVOCATION_ID") == "" {
 		return nil
 	}
-	if _, err := os.Stat(filepath.Join(dir, unitNames[0])); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, s.units[0])); err != nil {
 		return nil
 	}
 	var stale []string
-	for _, n := range unitNames {
+	for _, n := range s.units {
 		want, _ := embeddedUnit(n)
 		got, err := os.ReadFile(filepath.Join(dir, n))
 		if errors.Is(err, os.ErrNotExist) || (err == nil && !bytes.Equal(got, want)) {
