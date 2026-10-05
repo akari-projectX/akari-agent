@@ -293,7 +293,9 @@ filter_req 2
 wait_fresult a2
 fresult | grep -q '"applied":false' || fail "hostile request applied: $(fresult)"
 table | grep -q 'tcp dport 20443' || fail "hostile request changed the table: $(table)"
-x 'nft list ruleset' | grep -q . || fail "ruleset flushed"
+# Not `x … | grep -q .`: grep stops at the first line and the docker exec
+# writer's EPIPE fails the pipeline (pipefail) now and then.
+[ -n "$(x 'nft list ruleset')" ] || fail "ruleset flushed"
 filter_req 3
 wait_fresult a3
 fresult | grep -q '"applied":true' || fail "removal failed: $(fresult)"
