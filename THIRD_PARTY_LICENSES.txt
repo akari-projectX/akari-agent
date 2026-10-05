@@ -26,7 +26,7 @@ LINKED MODULES (38 + Go standard library)
   github.com/google/uuid v1.6.0                                                 BSD-3-Clause
   github.com/gorilla/websocket v1.5.3                                           BSD-2-Clause
   github.com/juju/ratelimit v1.0.2                                              LGPL-3.0-only WITH LGPL-3.0-linking-exception
-  github.com/klauspost/compress v1.17.4                                         Apache-2.0 AND MIT AND BSD-3-Clause
+  github.com/klauspost/compress v1.18.7                                         Apache-2.0 AND MIT AND BSD-3-Clause
   github.com/klauspost/cpuid/v2 v2.3.0                                          MIT
   github.com/mholt/acmez/v3 v3.1.7                                              Apache-2.0
   github.com/miekg/dns v1.1.72                                                  BSD-3-Clause
@@ -1429,7 +1429,7 @@ permanent authorization for you to choose that version for the
 Library.
 
 ==============================================================================
-github.com/klauspost/compress v1.17.4: LICENSE
+github.com/klauspost/compress v1.18.7: LICENSE
 ------------------------------------------------------------------------------
 
 Copyright (c) 2012 The Go Authors. All rights reserved.
