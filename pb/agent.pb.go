@@ -1980,9 +1980,11 @@ type ConfigSnapshot struct {
 	// Source-IP allowlists (W28-a, capability "source-filter"): new
 	// connections to each listed port are accepted only from the listed
 	// networks (a relay entrance's derived inbound accepts only its relay's
-	// egress addresses). The agent enforces them in the kernel (nftables,
-	// its own table, replaced as a whole on every Snapshot, removed when the
-	// list is empty) and reports the outcome in Heartbeat.source_filter. Not
+	// egress addresses). They are enforced in the kernel (nftables, a table
+	// of their own, replaced as a whole when they change, removed when the
+	// list is empty) by the agent's root updater, to which the agent hands
+	// them (R44: the agent has no CAP_NET_ADMIN; applied within seconds),
+	// and the outcome is reported in Heartbeat.source_filter. Not
 	// part of the state hash: they change only with config_version. Agents
 	// without the capability ignore them (per-entrance credentials still
 	// isolate the entrances; the panel flags such nodes).
@@ -2134,9 +2136,11 @@ func (x *SourceFilter) GetCidrs() []string {
 
 // Whether the agent enforces ConfigSnapshot.source_filters (W28-a).
 type SourceFilterStatus struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Applied       bool                   `protobuf:"varint,1,opt,name=applied,proto3" json:"applied,omitempty"` // the kernel rules match the last Snapshot
-	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`      // why not ("nft: permission denied", ...); "" when applied
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Applied bool                   `protobuf:"varint,1,opt,name=applied,proto3" json:"applied,omitempty"` // the kernel rules match the last Snapshot
+	// Why not ("pending: ..." until the root updater answers, "nft: ...",
+	// the updater missing, ...); "" when applied.
+	Error         string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
