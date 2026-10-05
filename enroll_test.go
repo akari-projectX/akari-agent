@@ -613,7 +613,7 @@ func TestHeartbeatCarriesConnectionsAndUptime(t *testing.T) {
 		return nil
 	}, func() (time.Duration, bool) { return 0, false }, func() agentStats {
 		return agentStats{connections: 7, onlineUsers: 3, uptime: 42}
-	}, newSampler(), func() *pb.CertStatus { return &pb.CertStatus{Domain: "n.example.com"} })
+	}, newSampler(), func(hb *pb.Heartbeat) { hb.Cert = &pb.CertStatus{Domain: "n.example.com"} })
 	hb := <-got
 	if hb.Connections != 7 || hb.UptimeSeconds != 42 || hb.GetMetrics().GetOnlineUsers() != 3 ||
 		hb.GetMetrics().GetXrayVersion() == "" || hb.GetCert().GetDomain() != "n.example.com" {
