@@ -784,6 +784,9 @@ type Heartbeat struct {
 	Cert *CertStatus `protobuf:"bytes,10,opt,name=cert,proto3" json:"cert,omitempty"`
 	// Machine status (W11, capability "metrics"); unset from older agents.
 	Metrics *NodeMetrics `protobuf:"bytes,20,opt,name=metrics,proto3" json:"metrics,omitempty"`
+	// Block rule hit counters and the policy in force (W29, capability
+	// "block-rules"); unset from older agents.
+	Block *BlockStats `protobuf:"bytes,41,opt,name=block,proto3" json:"block,omitempty"`
 	// Source-IP allowlist state (W28-a, capability "source-filter"); unset
 	// while the held Snapshot has no source_filters.
 	SourceFilter  *SourceFilterStatus `protobuf:"bytes,30,opt,name=source_filter,json=sourceFilter,proto3" json:"source_filter,omitempty"`
@@ -873,6 +876,13 @@ func (x *Heartbeat) GetCert() *CertStatus {
 func (x *Heartbeat) GetMetrics() *NodeMetrics {
 	if x != nil {
 		return x.Metrics
+	}
+	return nil
+}
+
+func (x *Heartbeat) GetBlock() *BlockStats {
+	if x != nil {
+		return x.Block
 	}
 	return nil
 }
@@ -2759,6 +2769,7 @@ type PanelDown struct {
 	//	*PanelDown_Lease
 	//	*PanelDown_UpdateOffer
 	//	*PanelDown_LatencyProbe
+	//	*PanelDown_BlockPolicy
 	Msg           isPanelDown_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2855,6 +2866,15 @@ func (x *PanelDown) GetLatencyProbe() *LatencyProbeConfig {
 	return nil
 }
 
+func (x *PanelDown) GetBlockPolicy() *BlockPolicy {
+	if x != nil {
+		if x, ok := x.Msg.(*PanelDown_BlockPolicy); ok {
+			return x.BlockPolicy
+		}
+	}
+	return nil
+}
+
 type isPanelDown_Msg interface {
 	isPanelDown_Msg()
 }
@@ -2883,6 +2903,10 @@ type PanelDown_LatencyProbe struct {
 	LatencyProbe *LatencyProbeConfig `protobuf:"bytes,20,opt,name=latency_probe,json=latencyProbe,proto3,oneof"` // capability "latency" (W11)
 }
 
+type PanelDown_BlockPolicy struct {
+	BlockPolicy *BlockPolicy `protobuf:"bytes,40,opt,name=block_policy,json=blockPolicy,proto3,oneof"` // capability "block-rules" (W29)
+}
+
 func (*PanelDown_Snapshot) isPanelDown_Msg() {}
 
 func (*PanelDown_Delta) isPanelDown_Msg() {}
@@ -2894,6 +2918,270 @@ func (*PanelDown_Lease) isPanelDown_Msg() {}
 func (*PanelDown_UpdateOffer) isPanelDown_Msg() {}
 
 func (*PanelDown_LatencyProbe) isPanelDown_Msg() {}
+
+func (*PanelDown_BlockPolicy) isPanelDown_Msg() {}
+
+type BlockPolicy struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Inbounds the rules apply to (nodes with the switch on); empty = off.
+	InboundTags []string     `protobuf:"bytes,1,rep,name=inbound_tags,json=inboundTags,proto3" json:"inbound_tags,omitempty"`
+	Rules       []*BlockRule `protobuf:"bytes,2,rep,name=rules,proto3" json:"rules,omitempty"` // ignored when inbound_tags is empty
+	// Opaque content id of this policy (panel: hex SHA-256 prefix of the
+	// tags and rules); echoed in BlockStats.applied once in force.
+	Version       string `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlockPolicy) Reset() {
+	*x = BlockPolicy{}
+	mi := &file_agent_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlockPolicy) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlockPolicy) ProtoMessage() {}
+
+func (x *BlockPolicy) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlockPolicy.ProtoReflect.Descriptor instead.
+func (*BlockPolicy) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *BlockPolicy) GetInboundTags() []string {
+	if x != nil {
+		return x.InboundTags
+	}
+	return nil
+}
+
+func (x *BlockPolicy) GetRules() []*BlockRule {
+	if x != nil {
+		return x.Rules
+	}
+	return nil
+}
+
+func (x *BlockPolicy) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+type BlockRule struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    uint64                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"` // panel rule id; BlockStats counts per id
+	// xray domain matchers, lowercase: "domain:<suffix>", "full:<name>",
+	// "keyword:<text>". Matched against the requested or sniffed name.
+	Domains []string `protobuf:"bytes,2,rep,name=domains,proto3" json:"domains,omitempty"`
+	// Destination networks ("192.0.2.0/24", "2001:db8::/32", single IPs as
+	// /32 or /128). Matched against destinations given as addresses only
+	// (no DNS resolution for domain requests).
+	Cidrs []string `protobuf:"bytes,3,rep,name=cidrs,proto3" json:"cidrs,omitempty"`
+	// Sniffed protocols: "bittorrent", "http", "tls", "quic".
+	Protocols     []string `protobuf:"bytes,4,rep,name=protocols,proto3" json:"protocols,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlockRule) Reset() {
+	*x = BlockRule{}
+	mi := &file_agent_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlockRule) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlockRule) ProtoMessage() {}
+
+func (x *BlockRule) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlockRule.ProtoReflect.Descriptor instead.
+func (*BlockRule) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *BlockRule) GetId() uint64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *BlockRule) GetDomains() []string {
+	if x != nil {
+		return x.Domains
+	}
+	return nil
+}
+
+func (x *BlockRule) GetCidrs() []string {
+	if x != nil {
+		return x.Cidrs
+	}
+	return nil
+}
+
+func (x *BlockRule) GetProtocols() []string {
+	if x != nil {
+		return x.Protocols
+	}
+	return nil
+}
+
+type BlockStats struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Identifies the agent process the counters belong to (fresh per start).
+	Epoch string `protobuf:"bytes,1,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	// Cumulative blocked connections per rule within the epoch (rules that
+	// blocked nothing may be omitted).
+	Hits []*BlockHits `protobuf:"bytes,2,rep,name=hits,proto3" json:"hits,omitempty"`
+	// BlockPolicy.version in force; "" = no policy (off).
+	Applied string `protobuf:"bytes,3,opt,name=applied,proto3" json:"applied,omitempty"`
+	// Why the last received policy could not be applied ("" = it was).
+	Error         string `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlockStats) Reset() {
+	*x = BlockStats{}
+	mi := &file_agent_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlockStats) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlockStats) ProtoMessage() {}
+
+func (x *BlockStats) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlockStats.ProtoReflect.Descriptor instead.
+func (*BlockStats) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *BlockStats) GetEpoch() string {
+	if x != nil {
+		return x.Epoch
+	}
+	return ""
+}
+
+func (x *BlockStats) GetHits() []*BlockHits {
+	if x != nil {
+		return x.Hits
+	}
+	return nil
+}
+
+func (x *BlockStats) GetApplied() string {
+	if x != nil {
+		return x.Applied
+	}
+	return ""
+}
+
+func (x *BlockStats) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+type BlockHits struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RuleId        uint64                 `protobuf:"varint,1,opt,name=rule_id,json=ruleId,proto3" json:"rule_id,omitempty"`
+	Hits          uint64                 `protobuf:"varint,2,opt,name=hits,proto3" json:"hits,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlockHits) Reset() {
+	*x = BlockHits{}
+	mi := &file_agent_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlockHits) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlockHits) ProtoMessage() {}
+
+func (x *BlockHits) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlockHits.ProtoReflect.Descriptor instead.
+func (*BlockHits) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *BlockHits) GetRuleId() uint64 {
+	if x != nil {
+		return x.RuleId
+	}
+	return 0
+}
+
+func (x *BlockHits) GetHits() uint64 {
+	if x != nil {
+		return x.Hits
+	}
+	return 0
+}
 
 var File_agent_proto protoreflect.FileDescriptor
 
@@ -2922,7 +3210,7 @@ const file_agent_proto_rawDesc = "" +
 	"\x10protocol_version\x18\x05 \x01(\rR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +
 	"state_hash\x18\x06 \x01(\tR\tstateHash\x12\"\n" +
-	"\fcapabilities\x18\x14 \x03(\tR\fcapabilities\"\x80\x04\n" +
+	"\fcapabilities\x18\x14 \x03(\tR\fcapabilities\"\xac\x04\n" +
 	"\tHeartbeat\x12$\n" +
 	"\vcpu_percent\x18\x01 \x01(\x01H\x00R\n" +
 	"cpuPercent\x88\x01\x01\x12)\n" +
@@ -2933,7 +3221,8 @@ const file_agent_proto_rawDesc = "" +
 	"\x17lease_remaining_seconds\x18\x06 \x01(\x04H\x03R\x15leaseRemainingSeconds\x88\x01\x01\x12(\n" +
 	"\x04cert\x18\n" +
 	" \x01(\v2\x14.akari.v1.CertStatusR\x04cert\x12/\n" +
-	"\ametrics\x18\x14 \x01(\v2\x15.akari.v1.NodeMetricsR\ametrics\x12A\n" +
+	"\ametrics\x18\x14 \x01(\v2\x15.akari.v1.NodeMetricsR\ametrics\x12*\n" +
+	"\x05block\x18) \x01(\v2\x14.akari.v1.BlockStatsR\x05block\x12A\n" +
 	"\rsource_filter\x18\x1e \x01(\v2\x1c.akari.v1.SourceFilterStatusR\fsourceFilterB\x0e\n" +
 	"\f_cpu_percentB\x11\n" +
 	"\x0f_mem_used_bytesB\x12\n" +
@@ -3136,15 +3425,34 @@ const file_agent_proto_rawDesc = "" +
 	"\fSTATE_FAILED\x10\x03\x12\x14\n" +
 	"\x10STATE_RESTARTING\x10\x04\x12\x15\n" +
 	"\x11STATE_ROLLED_BACK\x10\x05\x12\x13\n" +
-	"\x0fSTATE_CONFIRMED\x10\x06\"\xcc\x02\n" +
+	"\x0fSTATE_CONFIRMED\x10\x06\"\x88\x03\n" +
 	"\tPanelDown\x126\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x18.akari.v1.ConfigSnapshotH\x00R\bsnapshot\x12+\n" +
 	"\x05delta\x18\x02 \x01(\v2\x13.akari.v1.UserDeltaH\x00R\x05delta\x12$\n" +
 	"\x04noop\x18\x03 \x01(\v2\x0e.akari.v1.NoopH\x00R\x04noop\x12,\n" +
 	"\x05lease\x18\x04 \x01(\v2\x14.akari.v1.LeaseGrantH\x00R\x05lease\x12:\n" +
 	"\fupdate_offer\x18\x05 \x01(\v2\x15.akari.v1.UpdateOfferH\x00R\vupdateOffer\x12C\n" +
-	"\rlatency_probe\x18\x14 \x01(\v2\x1c.akari.v1.LatencyProbeConfigH\x00R\flatencyProbeB\x05\n" +
-	"\x03msg*;\n" +
+	"\rlatency_probe\x18\x14 \x01(\v2\x1c.akari.v1.LatencyProbeConfigH\x00R\flatencyProbe\x12:\n" +
+	"\fblock_policy\x18( \x01(\v2\x15.akari.v1.BlockPolicyH\x00R\vblockPolicyB\x05\n" +
+	"\x03msg\"u\n" +
+	"\vBlockPolicy\x12!\n" +
+	"\finbound_tags\x18\x01 \x03(\tR\vinboundTags\x12)\n" +
+	"\x05rules\x18\x02 \x03(\v2\x13.akari.v1.BlockRuleR\x05rules\x12\x18\n" +
+	"\aversion\x18\x03 \x01(\tR\aversion\"i\n" +
+	"\tBlockRule\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x18\n" +
+	"\adomains\x18\x02 \x03(\tR\adomains\x12\x14\n" +
+	"\x05cidrs\x18\x03 \x03(\tR\x05cidrs\x12\x1c\n" +
+	"\tprotocols\x18\x04 \x03(\tR\tprotocols\"{\n" +
+	"\n" +
+	"BlockStats\x12\x14\n" +
+	"\x05epoch\x18\x01 \x01(\tR\x05epoch\x12'\n" +
+	"\x04hits\x18\x02 \x03(\v2\x13.akari.v1.BlockHitsR\x04hits\x12\x18\n" +
+	"\aapplied\x18\x03 \x01(\tR\aapplied\x12\x14\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\"8\n" +
+	"\tBlockHits\x12\x17\n" +
+	"\arule_id\x18\x01 \x01(\x04R\x06ruleId\x12\x12\n" +
+	"\x04hits\x18\x02 \x01(\x04R\x04hits*;\n" +
 	"\n" +
 	"RemoveMode\x12\x14\n" +
 	"\x10REMOVE_MODE_GATE\x10\x00\x12\x17\n" +
@@ -3169,7 +3477,7 @@ func file_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
 var file_agent_proto_goTypes = []any{
 	(RemoveMode)(0),              // 0: akari.v1.RemoveMode
 	(CertStatus_State)(0),        // 1: akari.v1.CertStatus.State
@@ -3207,51 +3515,59 @@ var file_agent_proto_goTypes = []any{
 	(*ArtifactChunk)(nil),        // 33: akari.v1.ArtifactChunk
 	(*UpdateStatus)(nil),         // 34: akari.v1.UpdateStatus
 	(*PanelDown)(nil),            // 35: akari.v1.PanelDown
+	(*BlockPolicy)(nil),          // 36: akari.v1.BlockPolicy
+	(*BlockRule)(nil),            // 37: akari.v1.BlockRule
+	(*BlockStats)(nil),           // 38: akari.v1.BlockStats
+	(*BlockHits)(nil),            // 39: akari.v1.BlockHits
 }
 var file_agent_proto_depIdxs = []int32{
 	9,  // 0: akari.v1.Hello.info:type_name -> akari.v1.AgentInfo
 	12, // 1: akari.v1.Heartbeat.cert:type_name -> akari.v1.CertStatus
 	13, // 2: akari.v1.Heartbeat.metrics:type_name -> akari.v1.NodeMetrics
-	25, // 3: akari.v1.Heartbeat.source_filter:type_name -> akari.v1.SourceFilterStatus
-	1,  // 4: akari.v1.CertStatus.state:type_name -> akari.v1.CertStatus.State
-	2,  // 5: akari.v1.CertStatus.error_kind:type_name -> akari.v1.CertStatus.ErrorKind
-	14, // 6: akari.v1.TrafficReport.users:type_name -> akari.v1.UserTraffic
-	3,  // 7: akari.v1.Ack.reason:type_name -> akari.v1.Ack.Reason
-	10, // 8: akari.v1.AgentUp.hello:type_name -> akari.v1.Hello
-	11, // 9: akari.v1.AgentUp.heartbeat:type_name -> akari.v1.Heartbeat
-	15, // 10: akari.v1.AgentUp.traffic:type_name -> akari.v1.TrafficReport
-	16, // 11: akari.v1.AgentUp.ack:type_name -> akari.v1.Ack
-	34, // 12: akari.v1.AgentUp.update_status:type_name -> akari.v1.UpdateStatus
-	20, // 13: akari.v1.AgentUp.latency:type_name -> akari.v1.LatencyReport
-	19, // 14: akari.v1.LatencyReport.results:type_name -> akari.v1.UrlLatency
-	4,  // 15: akari.v1.UserOp.op:type_name -> akari.v1.UserOp.Op
-	21, // 16: akari.v1.UserOp.inbound_users:type_name -> akari.v1.InboundUser
-	22, // 17: akari.v1.ConfigSnapshot.users:type_name -> akari.v1.UserOp
-	26, // 18: akari.v1.ConfigSnapshot.acme:type_name -> akari.v1.AcmeConfig
-	24, // 19: akari.v1.ConfigSnapshot.source_filters:type_name -> akari.v1.SourceFilter
-	22, // 20: akari.v1.UserDelta.ops:type_name -> akari.v1.UserOp
-	0,  // 21: akari.v1.LeaseGrant.remove_mode:type_name -> akari.v1.RemoveMode
-	30, // 22: akari.v1.UpdateOffer.signatures:type_name -> akari.v1.ManifestSignature
-	5,  // 23: akari.v1.UpdateStatus.state:type_name -> akari.v1.UpdateStatus.State
-	23, // 24: akari.v1.PanelDown.snapshot:type_name -> akari.v1.ConfigSnapshot
-	27, // 25: akari.v1.PanelDown.delta:type_name -> akari.v1.UserDelta
-	29, // 26: akari.v1.PanelDown.noop:type_name -> akari.v1.Noop
-	28, // 27: akari.v1.PanelDown.lease:type_name -> akari.v1.LeaseGrant
-	31, // 28: akari.v1.PanelDown.update_offer:type_name -> akari.v1.UpdateOffer
-	18, // 29: akari.v1.PanelDown.latency_probe:type_name -> akari.v1.LatencyProbeConfig
-	17, // 30: akari.v1.AgentChannel.OpenChannel:input_type -> akari.v1.AgentUp
-	7,  // 31: akari.v1.AgentChannel.Renew:input_type -> akari.v1.RenewRequest
-	32, // 32: akari.v1.AgentChannel.FetchArtifact:input_type -> akari.v1.FetchArtifactRequest
-	6,  // 33: akari.v1.AgentEnrollment.Enroll:input_type -> akari.v1.EnrollRequest
-	35, // 34: akari.v1.AgentChannel.OpenChannel:output_type -> akari.v1.PanelDown
-	8,  // 35: akari.v1.AgentChannel.Renew:output_type -> akari.v1.IssuedCertificate
-	33, // 36: akari.v1.AgentChannel.FetchArtifact:output_type -> akari.v1.ArtifactChunk
-	8,  // 37: akari.v1.AgentEnrollment.Enroll:output_type -> akari.v1.IssuedCertificate
-	34, // [34:38] is the sub-list for method output_type
-	30, // [30:34] is the sub-list for method input_type
-	30, // [30:30] is the sub-list for extension type_name
-	30, // [30:30] is the sub-list for extension extendee
-	0,  // [0:30] is the sub-list for field type_name
+	38, // 3: akari.v1.Heartbeat.block:type_name -> akari.v1.BlockStats
+	25, // 4: akari.v1.Heartbeat.source_filter:type_name -> akari.v1.SourceFilterStatus
+	1,  // 5: akari.v1.CertStatus.state:type_name -> akari.v1.CertStatus.State
+	2,  // 6: akari.v1.CertStatus.error_kind:type_name -> akari.v1.CertStatus.ErrorKind
+	14, // 7: akari.v1.TrafficReport.users:type_name -> akari.v1.UserTraffic
+	3,  // 8: akari.v1.Ack.reason:type_name -> akari.v1.Ack.Reason
+	10, // 9: akari.v1.AgentUp.hello:type_name -> akari.v1.Hello
+	11, // 10: akari.v1.AgentUp.heartbeat:type_name -> akari.v1.Heartbeat
+	15, // 11: akari.v1.AgentUp.traffic:type_name -> akari.v1.TrafficReport
+	16, // 12: akari.v1.AgentUp.ack:type_name -> akari.v1.Ack
+	34, // 13: akari.v1.AgentUp.update_status:type_name -> akari.v1.UpdateStatus
+	20, // 14: akari.v1.AgentUp.latency:type_name -> akari.v1.LatencyReport
+	19, // 15: akari.v1.LatencyReport.results:type_name -> akari.v1.UrlLatency
+	4,  // 16: akari.v1.UserOp.op:type_name -> akari.v1.UserOp.Op
+	21, // 17: akari.v1.UserOp.inbound_users:type_name -> akari.v1.InboundUser
+	22, // 18: akari.v1.ConfigSnapshot.users:type_name -> akari.v1.UserOp
+	26, // 19: akari.v1.ConfigSnapshot.acme:type_name -> akari.v1.AcmeConfig
+	24, // 20: akari.v1.ConfigSnapshot.source_filters:type_name -> akari.v1.SourceFilter
+	22, // 21: akari.v1.UserDelta.ops:type_name -> akari.v1.UserOp
+	0,  // 22: akari.v1.LeaseGrant.remove_mode:type_name -> akari.v1.RemoveMode
+	30, // 23: akari.v1.UpdateOffer.signatures:type_name -> akari.v1.ManifestSignature
+	5,  // 24: akari.v1.UpdateStatus.state:type_name -> akari.v1.UpdateStatus.State
+	23, // 25: akari.v1.PanelDown.snapshot:type_name -> akari.v1.ConfigSnapshot
+	27, // 26: akari.v1.PanelDown.delta:type_name -> akari.v1.UserDelta
+	29, // 27: akari.v1.PanelDown.noop:type_name -> akari.v1.Noop
+	28, // 28: akari.v1.PanelDown.lease:type_name -> akari.v1.LeaseGrant
+	31, // 29: akari.v1.PanelDown.update_offer:type_name -> akari.v1.UpdateOffer
+	18, // 30: akari.v1.PanelDown.latency_probe:type_name -> akari.v1.LatencyProbeConfig
+	36, // 31: akari.v1.PanelDown.block_policy:type_name -> akari.v1.BlockPolicy
+	37, // 32: akari.v1.BlockPolicy.rules:type_name -> akari.v1.BlockRule
+	39, // 33: akari.v1.BlockStats.hits:type_name -> akari.v1.BlockHits
+	17, // 34: akari.v1.AgentChannel.OpenChannel:input_type -> akari.v1.AgentUp
+	7,  // 35: akari.v1.AgentChannel.Renew:input_type -> akari.v1.RenewRequest
+	32, // 36: akari.v1.AgentChannel.FetchArtifact:input_type -> akari.v1.FetchArtifactRequest
+	6,  // 37: akari.v1.AgentEnrollment.Enroll:input_type -> akari.v1.EnrollRequest
+	35, // 38: akari.v1.AgentChannel.OpenChannel:output_type -> akari.v1.PanelDown
+	8,  // 39: akari.v1.AgentChannel.Renew:output_type -> akari.v1.IssuedCertificate
+	33, // 40: akari.v1.AgentChannel.FetchArtifact:output_type -> akari.v1.ArtifactChunk
+	8,  // 41: akari.v1.AgentEnrollment.Enroll:output_type -> akari.v1.IssuedCertificate
+	38, // [38:42] is the sub-list for method output_type
+	34, // [34:38] is the sub-list for method input_type
+	34, // [34:34] is the sub-list for extension type_name
+	34, // [34:34] is the sub-list for extension extendee
+	0,  // [0:34] is the sub-list for field type_name
 }
 
 func init() { file_agent_proto_init() }
@@ -3276,6 +3592,7 @@ func file_agent_proto_init() {
 		(*PanelDown_Lease)(nil),
 		(*PanelDown_UpdateOffer)(nil),
 		(*PanelDown_LatencyProbe)(nil),
+		(*PanelDown_BlockPolicy)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -3283,7 +3600,7 @@ func file_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_proto_rawDesc), len(file_agent_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   30,
+			NumMessages:   34,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

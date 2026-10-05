@@ -71,7 +71,10 @@ make third-party      # regenerate THIRD_PARTY_LICENSES.txt (after go.mod change
 Releases (tag `v*`) are built, SBOM'd and cosign-signed by `.github/workflows/release.yml`;
 install as a hardened systemd service with the units in `systemd/` (compiled into the binary:
 `./agent -print-unit akari-agent.service`; the panel's installer installs the units of the
-release it installs, and every self-update installs the new release's units).
+release it installs, and every self-update installs the new release's units). On Alpine Linux
+(W32) the same static binary runs under OpenRC with the scripts in `openrc/` (also compiled in:
+`./agent -print-unit akari-agent`; the agent and the updater take `-init openrc`); differences
+from the systemd setup and the known gaps are in akari-panel `docs/DEPLOY.md` §3h.
 
 Sibling checkout convention: akari-panel and akari-agent live side by side
 (`../akari-panel` / `../akari-agent`), same as the panel's smoke test expects.

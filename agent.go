@@ -38,9 +38,10 @@ const agentProtocol = 7
 // by the privileged updater unit (W18, updater_linux.go), never by
 // executing from the noexec state directory, "metrics-presence" (W23) = an
 // unset numeric heartbeat value means "could not be read", not 0,
+// "block-rules" (W29) = PanelDown.block_policy / Heartbeat.block.
 // "source-filter" (W28-a) = ConfigSnapshot.source_filters enforced with
 // nftables, Heartbeat.source_filter (sourcefilter.go).
-var agentCapabilities = []string{"metrics", "latency", "updater", "metrics-presence", "source-filter"}
+var agentCapabilities = []string{"metrics", "latency", "updater", "metrics-presence", "block-rules", "source-filter"}
 
 // capStaleUnits (W23): a status flag added to the capabilities when the
 // installed systemd units differ from this release's (units.go).
@@ -600,7 +601,7 @@ func (a *Agent) session(parent context.Context) (err error) {
 	}()
 	go func() {
 		defer wg.Done()
-		heartbeatLoop(ctx, a.heartbeatEvery, send, a.lease.remaining, a.stats, a.sampler, a.certStatus, a.sourceFilterStatus)
+		heartbeatLoop(ctx, a.heartbeatEvery, send, a.lease.remaining, a.stats, a.sampler, a.fillHeartbeat)
 	}()
 	go func() {
 		defer wg.Done()
@@ -741,6 +742,13 @@ func (a *Agent) handleDown(ctx context.Context, gen uint64, send func(*pb.AgentU
 		return a.onUpdateOffer(ctx, gen, send, msg.UpdateOffer)
 	case *pb.PanelDown_LatencyProbe:
 		a.prober.configure(msg.LatencyProbe)
+		return nil
+	case *pb.PanelDown_BlockPolicy:
+		if cur, _ := a.current(); cur != gen {
+			slog.Warn("ignoring block policy from a stale stream")
+			return nil
+		}
+		a.applyBlockPolicyLocked(send, msg.BlockPolicy)
 		return nil
 	case *pb.PanelDown_Noop:
 		return nil
@@ -963,6 +971,30 @@ func (a *Agent) onCertIssued() {
 	if _, send := a.current(); send != nil {
 		_ = send(a.helloLocked())
 	}
+}
+
+// applyBlockPolicyLocked installs a W29 block policy (blockrules.go). A
+// failed handler swap leaves the instance partly updated: like a failed
+// certificate swap, the agent then claims nothing (0,0) so the panel sends
+// a Snapshot, and the rebuild installs the policy cleanly.
+func (a *Agent) applyBlockPolicyLocked(send func(*pb.AgentUp) error, p *pb.BlockPolicy) {
+	err := a.core.SetBlockPolicy(p)
+	if err == nil {
+		slog.Info("block policy applied", "version", p.GetVersion(), "inbounds", len(p.GetInboundTags()), "rules", len(p.GetRules()))
+		return
+	}
+	slog.Error("could not swap inbounds for the block policy; asking the panel for a snapshot", "error", err)
+	a.setVersions(0, 0)
+	a.setDirty(true)
+	_ = send(a.helloLocked())
+}
+
+// fillHeartbeat: Heartbeat.cert (W10), Heartbeat.block (W29) and
+// Heartbeat.source_filter (W28-a).
+func (a *Agent) fillHeartbeat(hb *pb.Heartbeat) {
+	hb.Cert = a.certStatus()
+	hb.Block = a.core.BlockStats()
+	hb.SourceFilter = a.sourceFilterStatus()
 }
 
 // sourceFilterStatus: Heartbeat.source_filter (nil when disabled or

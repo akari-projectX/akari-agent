@@ -69,6 +69,9 @@ type liveConn struct {
 // them) pass through untouched.
 type gateDispatcher struct {
 	inner *dispatcher.DefaultDispatcher
+	// blocks: W29 block rules, the routing.Router the inner dispatcher
+	// consults (blockrules.go); nil until the instance initialises the gate.
+	blocks *blockRouter
 
 	mu      sync.Mutex
 	allowed map[gateKey]*protocol.MemoryUser
@@ -96,7 +99,8 @@ func init() {
 	common.Must(common.RegisterConfig((*pb.GateDispatcherConfig)(nil), func(ctx context.Context, _ interface{}) (interface{}, error) {
 		g := newGate()
 		err := core.RequireFeatures(ctx, func(om outbound.Manager, router routing.Router, pm policy.Manager, sm stats.Manager) error {
-			return g.inner.Init(&dispatcher.Config{}, om, router, pm, sm)
+			g.blocks = newBlockRouter(router)
+			return g.inner.Init(&dispatcher.Config{}, om, g.blocks, pm, sm)
 		})
 		if err != nil {
 			return nil, err

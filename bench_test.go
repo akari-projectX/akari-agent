@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"runtime"
@@ -291,4 +292,59 @@ func BenchmarkLimitedWrite8k(b *testing.B) {
 			}
 		}
 	})
+}
+
+// benchEcho: a local TCP echo server for benchmarks.
+func benchEcho(tb testing.TB) int {
+	tb.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		tb.Fatal(err)
+	}
+	tb.Cleanup(func() { _ = l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() { defer c.Close(); _, _ = io.Copy(c, c) }()
+		}
+	}()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+// benchConnectCore: one VLESS user on two raw TCP inbounds.
+func benchConnectCore(b *testing.B) (m *CoreManager, port int) {
+	m = NewCoreManager()
+	b.Cleanup(func() { m.Teardown() })
+	port = benchPort(b)
+	if _, err := m.Rebuild(twoInbounds(port, benchPort(b)), []*pb.UserOp{vlessUser(benchUserID(1), "in-a", benchUserID(1))}); err != nil {
+		b.Fatal(err)
+	}
+	return m, port
+}
+
+// benchConnectEcho: per-connection cost through the agent's xray (handshake,
+// dispatch through the gate and router, one 64-byte round trip, close).
+func benchConnectEcho(b *testing.B, port int) {
+	echo := benchEcho(b)
+	msg := string(make([]byte, 64))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		c, err := vlessDial(port, benchUserID(1), echo)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := c.echo(msg); err != nil {
+			b.Fatal(err)
+		}
+		c.Close()
+	}
+}
+
+// A new connection: VLESS handshake + one round trip.
+func BenchmarkConnectEcho(b *testing.B) {
+	_, port := benchConnectCore(b)
+	benchConnectEcho(b, port)
 }

@@ -1,0 +1,122 @@
+#!/sbin/openrc-run
+# akari node agent, OpenRC service (Alpine Linux; W32). The systemd
+# equivalent is systemd/akari-agent.service (see akari-panel docs/DEPLOY.md,
+# "Add a node").
+#
+# The canonical copy of this file (and of openrc/akari-agent-update) lives
+# in the akari-agent repository and is compiled into every release:
+# `akari-agent -print-unit akari-agent` prints exactly the script that
+# release was built and tested with. The panel's one-line installer
+# installs the scripts of the release it installs, and every self-update
+# installs the new release's scripts with its binary: do not edit the
+# installed files, put local settings in /etc/conf.d/akari-agent (never
+# touched by the installer or the updater), e.g.
+#   AKARI_AGENT_ARGS="-heartbeat-interval 30s"
+#   respawn_max=5 respawn_period=60    # give up after a crash loop
+# By hand:
+#
+#   addgroup -S akari-agent && adduser -S -D -H -h /var/lib/akari-agent \
+#     -s /sbin/nologin -G akari-agent akari-agent
+#   install -m 0755 agent /usr/local/bin/akari-agent
+#   install -d -m 0700 /etc/akari-agent
+#   install -m 0600 <node>-bootstrap.toml /etc/akari-agent/bootstrap.toml
+#   for s in akari-agent akari-agent-update; do
+#     akari-agent -print-unit $s >/etc/init.d/$s && chmod 0755 /etc/init.d/$s; done
+#   rc-update add akari-agent default && rc-update add akari-agent-update default
+#   rc-service akari-agent start && rc-service akari-agent-update start
+#
+# What systemd does for the agent, done here:
+#   - a dedicated system user (akari-agent) instead of DynamicUser, with
+#     only CAP_NET_BIND_SERVICE (inbounds on 443) and no_new_privs;
+#   - credentials: the root-only /etc/akari-agent/bootstrap.toml (and, for
+#     TLS inbounds with a certificate of your own, /etc/akari-agent/tls/
+#     fullchain.pem + privkey.pem) are copied to /run/credentials/
+#     akari-agent.service/ (tmpfs, agent-readable 0400, removed on stop),
+#     the paths the agent uses under systemd's LoadCredential=;
+#   - the StateDirectory: /var/lib/akari-agent (0700, the agent's key,
+#     certificates and update staging; back it up or the node re-enrolls),
+#     bind-mounted onto itself noexec,nosuid,nodev (W^X, as systemd's
+#     idmapped StateDirectory: nothing the agent can write is ever
+#     executed). Where mounting is not allowed (some containers) the
+#     service starts anyway and says so;
+#   - Restart=always: supervise-daemon respawns it (3 s apart, unlimited
+#     unless conf.d sets respawn_max);
+#   - logs: /var/log/akari-agent/agent.log (rotated to agent.log.1 at a
+#     start when larger than 16 MiB).
+# Not reproduced (no OpenRC equivalent): the filesystem/kernel/syscall
+# sandbox of the systemd unit (ProtectSystem=strict, ProtectProc=invisible,
+# SystemCallFilter=, RestrictAddressFamilies=, MemoryDenyWriteExecute=, ...).
+#
+# Self-update (M6): the agent stages a verified download in its state
+# directory and asks the privileged updater (akari-agent-update, installed
+# by the same installer), which re-verifies it, replaces /usr/local/bin/
+# akari-agent (keeping akari-agent.prev) and these scripts (from the new
+# release), restarts this service and rolls back both if the new binary
+# does not pass its self-check.
+
+description="Akari node agent (xray-core)"
+
+AKARI_STATE=/var/lib/akari-agent
+AKARI_CRED=/run/credentials/akari-agent.service
+AKARI_LOG=/var/log/akari-agent
+
+supervisor=supervise-daemon
+command=/usr/local/bin/akari-agent
+command_args="-init openrc -config $AKARI_CRED/bootstrap.toml -state-dir $AKARI_STATE ${AKARI_AGENT_ARGS:-}"
+command_user="akari-agent:akari-agent"
+capabilities="^cap_net_bind_service"
+no_new_privs="yes"
+umask="0077"
+directory="/"
+respawn_delay="${respawn_delay:-3}"
+respawn_max="${respawn_max:-0}"
+rc_ulimit="${rc_ulimit:--n 1048576}"
+retry="TERM/20/KILL/5"
+output_log="$AKARI_LOG/agent.log"
+error_log="$AKARI_LOG/agent.log"
+
+depend() {
+	want net
+	after firewall
+}
+
+# akari_noexec: the state directory mounted noexec,nosuid,nodev (a bind
+# mount onto itself, made once per boot).
+akari_noexec() {
+	opts=$(awk -v d="$AKARI_STATE" '$5 == d { o = $6 } END { print o }' /proc/self/mountinfo)
+	case ",$opts," in
+	*,noexec,*) return 0 ;;
+	esac
+	if [ -z "$opts" ]; then
+		mount --bind "$AKARI_STATE" "$AKARI_STATE" || return 1
+	fi
+	mount -o remount,bind,noexec,nosuid,nodev "$AKARI_STATE"
+}
+
+start_pre() {
+	[ -f /etc/akari-agent/bootstrap.toml ] || {
+		eerror "/etc/akari-agent/bootstrap.toml is missing (run the panel's install command)"
+		return 1
+	}
+	checkpath -d -m 0700 -o akari-agent:akari-agent "$AKARI_STATE" "$AKARI_LOG" || return 1
+	akari_noexec 2>/dev/null ||
+		ewarn "cannot mount $AKARI_STATE noexec here (no mount permission?): the agent runs without it"
+	rm -rf "$AKARI_CRED"
+	checkpath -d -m 0755 /run/credentials || return 1
+	install -d -m 0500 -o akari-agent -g akari-agent "$AKARI_CRED" || return 1
+	install -m 0400 -o akari-agent -g akari-agent /etc/akari-agent/bootstrap.toml "$AKARI_CRED/bootstrap.toml" ||
+		return 1
+	for f in fullchain.pem privkey.pem; do
+		if [ -f "/etc/akari-agent/tls/$f" ]; then
+			install -m 0400 -o akari-agent -g akari-agent "/etc/akari-agent/tls/$f" "$AKARI_CRED/tls_$f" || return 1
+		fi
+	done
+	if [ -f "$AKARI_LOG/agent.log" ] && [ "$(wc -c <"$AKARI_LOG/agent.log")" -gt 16777216 ]; then
+		mv -f "$AKARI_LOG/agent.log" "$AKARI_LOG/agent.log.1"
+	fi
+	return 0
+}
+
+stop_post() {
+	rm -rf "$AKARI_CRED"
+}

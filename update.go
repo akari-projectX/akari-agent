@@ -60,9 +60,6 @@ const (
 	resultName      = "apply-result.json"
 	confirmedName   = "confirmed"
 
-	// defaultUpdaterUnit: the agent hands updates to the updater only when
-	// its trigger unit is installed (the installer writes it).
-	defaultUpdaterUnit = "/etc/systemd/system/akari-agent-update.path"
 	// errUpdaterMissing is shown in the panel (rollout and node view).
 	errUpdaterMissing = "updater unit missing (akari-agent-update.path): run the panel's install command (重装命令) once on this node"
 
@@ -168,7 +165,7 @@ func newUpdater(stateDir, version string, keys []release.PublicKey) (*updater, e
 		dir:         filepath.Join(stateDir, updateDirName),
 		keys:        keys,
 		version:     version,
-		unit:        defaultUpdaterUnit,
+		unit:        systemdInit.trigger,
 		selfCheck:   defaultSelfCheck,
 		applyWait:   defaultApplyWait,
 		restartWait: defaultRestartWait,

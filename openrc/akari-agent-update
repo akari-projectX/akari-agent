@@ -1,0 +1,65 @@
+#!/sbin/openrc-run
+# The akari node agent's privileged updater, OpenRC service (Alpine Linux;
+# W32). The systemd equivalent is akari-agent-update.path + .service.
+# Installed by the panel's one-line installer (see openrc/akari-agent for
+# installing by hand; canonical copy: akari-agent repository, openrc/,
+# compiled into the binary; `akari-agent -print-unit akari-agent-update`).
+#
+# OpenRC has no path units: this service is a small root shell loop that
+# looks for the agent's apply request once a second (the agent waits 90 s
+# for the verdict) and then runs the INSTALLED, trusted binary in
+# -apply-update mode, one request at a time, exactly as the systemd path
+# unit starts akari-agent-update.service. The updater treats the agent's
+# directory as untrusted (no symlinks followed, regular single-link files
+# owned by the agent only), copies the staged binary into a root-only file
+# next to /usr/local/bin/akari-agent, verifies that copy against the
+# release keys compiled into ITSELF (signature, platform, no downgrade,
+# versions this node rolled back from), keeps the running binary as
+# akari-agent.prev, renames the new one into place, installs the OpenRC
+# scripts the NEW release carries (only /etc/init.d/akari-agent and
+# /etc/init.d/akari-agent-update; read from the verified binary; the
+# previous ones are kept for a rollback), restarts akari-agent and watches
+# the new binary's self-check: supervise-daemon's respawn count reaching
+# -update-max-boots, the service giving up (respawn_max in conf.d), or no
+# confirmation in time = put .prev and the previous scripts back and
+# restart. A refreshed copy of THIS script takes effect at its next start.
+#
+# Its own record (rolled-back versions, the binary on probation, the
+# previous scripts) is in /var/lib/akari-agent-update (root, 0700); its log
+# is /var/log/akari-agent-update.log. Local settings: /etc/conf.d/
+# akari-agent-update, e.g. AKARI_UPDATER_ARGS="-update-self-check 10m"
+# (-update-self-check / -update-max-boots: when you change them for the
+# agent, pass the same values here).
+#
+# Not reproduced (no OpenRC equivalent): the systemd unit's sandbox
+# (capability bounding set, ProtectSystem=strict, PrivateNetwork=, syscall
+# filter). This updater runs as plain root: restarting the agent through
+# OpenRC needs what starting a service needs.
+
+description="Akari node agent updater (verifies and installs a staged self-update)"
+
+AKARI_REQUEST=/var/lib/akari-agent/update/apply-request.json
+AKARI_UPDATER="/usr/local/bin/akari-agent -init openrc -apply-update /var/lib/akari-agent -updater-state /var/lib/akari-agent-update ${AKARI_UPDATER_ARGS:-}"
+
+supervisor=supervise-daemon
+command=/bin/sh
+command_args="-c 'while :; do if [ -e $AKARI_REQUEST ] || [ -L $AKARI_REQUEST ]; then $AKARI_UPDATER || sleep 10; fi; sleep 1; done'"
+no_new_privs="yes"
+umask="0077"
+directory="/"
+respawn_delay=3
+respawn_max=0
+output_log=/var/log/akari-agent-update.log
+error_log=/var/log/akari-agent-update.log
+
+depend() {
+	after akari-agent
+}
+
+start_pre() {
+	checkpath -d -m 0700 /var/lib/akari-agent-update || return 1
+	if [ -f /var/log/akari-agent-update.log ] && [ "$(wc -c </var/log/akari-agent-update.log)" -gt 16777216 ]; then
+		mv -f /var/log/akari-agent-update.log /var/log/akari-agent-update.log.1
+	fi
+	return 0
+}
