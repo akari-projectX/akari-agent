@@ -37,7 +37,7 @@ const agentProtocol = 6
 // executing from the noexec state directory, "metrics-presence" (W23) = an
 // unset numeric heartbeat value means "could not be read", not 0,
 // "block-rules" (W29) = PanelDown.block_policy / Heartbeat.block.
-var agentCapabilities = []string{"metrics", "latency", "updater", "metrics-presence", capBlockRules}
+var agentCapabilities = []string{"metrics", "latency", "updater", "metrics-presence", "block-rules"}
 
 // capStaleUnits (W23): a status flag added to the capabilities when the
 // installed systemd units differ from this release's (units.go).
