@@ -14,9 +14,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,6 +61,44 @@ type xrayView struct {
 // keys) is a multi-user SS2022 server — never the stock single-user server
 // keyed by the shared PSK, which no gate could revoke; managed kinds
 // carry a key length exactly for SS.
+// FuzzNftScript: panel-sent source allowlists (W28-a) become an nft
+// transaction. Invariants: either refused, or every line of the script is
+// one of the fixed shapes with numbers and canonical networks only — no
+// panel text reaches nft verbatim — and the networks are exactly the
+// accepted ones.
+func FuzzNftScript(f *testing.F) {
+	f.Add(uint32(20443), true, false, "203.0.113.7/32,2001:db8::/48")
+	f.Add(uint32(1), false, true, "0.0.0.0/0")
+	f.Add(uint32(80), true, true, "1.2.3.4/32 } ; flush ruleset")
+	f.Add(uint32(70000), true, false, "::/0")
+	shapes := regexp.MustCompile(`^(table inet akari_sources( \{)?|delete table inet akari_sources|` +
+		`  set s0_[46] \{|    type ipv[46]_addr|    flags interval|    auto-merge|` +
+		`    elements = \{ [0-9a-f.:/, ]+ \}|  \}|\}|  chain input \{|` +
+		`    type filter hook input priority filter; policy accept;|` +
+		`    meta nfproto ipv[46] (tcp|udp) dport [0-9]{1,5} ct state new( ip6? saddr != @s0_[46])? drop)$`)
+	f.Fuzz(func(t *testing.T, port uint32, tcp, udp bool, cidrs string) {
+		filter := &pb.SourceFilter{Port: port, Tcp: tcp, Udp: udp, Cidrs: strings.Split(cidrs, ",")}
+		script, err := nftScript([]*pb.SourceFilter{filter})
+		if err != nil {
+			return
+		}
+		for _, line := range strings.Split(strings.TrimSuffix(script, "\n"), "\n") {
+			if !shapes.MatchString(line) {
+				t.Fatalf("unexpected line %q in\n%s", line, script)
+			}
+		}
+		for _, c := range filter.Cidrs {
+			p, perr := netip.ParsePrefix(c)
+			if perr != nil {
+				t.Fatalf("accepted %q", c)
+			}
+			if !strings.Contains(script, p.Masked().String()) {
+				t.Fatalf("%q missing from\n%s", c, script)
+			}
+		}
+	})
+}
+
 func FuzzBuildConfig(f *testing.F) {
 	for _, s := range fuzzInboundSeeds {
 		f.Add([]byte(s), false)

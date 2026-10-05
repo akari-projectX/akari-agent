@@ -27,16 +27,20 @@ import (
 // 4 = per-user speed limits (UserOp.speed_limit_bytes_per_sec, ratelimit.go);
 // 5 = Shadowsocks 2022 removals apply in place as tombstones (W9: the panel
 // sends them as deltas; WouldShrinkUnsafe); 6 = automatic node certificate
-// over ACME (ConfigSnapshot.acme, Heartbeat.cert; acme.go).
-const agentProtocol = 6
+// over ACME (ConfigSnapshot.acme, Heartbeat.cert; acme.go); 7 (W28-a) =
+// UserOp.user_id "<account>#<n>" per relay entrance: speed limits and the
+// online-user count are per account (gate.go accountOf).
+const agentProtocol = 7
 
 // agentCapabilities: optional features independent of agentProtocol
 // (Hello.capabilities, W11): "metrics" = Heartbeat.metrics, "latency" =
 // LatencyProbeConfig / LatencyReport, "updater" = self-updates are applied
 // by the privileged updater unit (W18, updater_linux.go), never by
 // executing from the noexec state directory, "metrics-presence" (W23) = an
-// unset numeric heartbeat value means "could not be read", not 0.
-var agentCapabilities = []string{"metrics", "latency", "updater", "metrics-presence"}
+// unset numeric heartbeat value means "could not be read", not 0,
+// "source-filter" (W28-a) = ConfigSnapshot.source_filters enforced with
+// nftables, Heartbeat.source_filter (sourcefilter.go).
+var agentCapabilities = []string{"metrics", "latency", "updater", "metrics-presence", "source-filter"}
 
 // capStaleUnits (W23): a status flag added to the capabilities when the
 // installed systemd units differ from this release's (units.go).
@@ -90,6 +94,9 @@ type Agent struct {
 	// certs: automatic node certificate (protocol 6); nil = disabled
 	// (tests). Its loop runs for the whole process.
 	certs *certManager
+	// filters: relay entrances' source allowlists (W28-a); nil = disabled
+	// (tests).
+	filters *sourceFilters
 
 	// Self-update (M6): nil when unavailable. trial is set when this
 	// process runs a binary on probation.
@@ -593,7 +600,7 @@ func (a *Agent) session(parent context.Context) (err error) {
 	}()
 	go func() {
 		defer wg.Done()
-		heartbeatLoop(ctx, a.heartbeatEvery, send, a.lease.remaining, a.stats, a.sampler, a.certStatus)
+		heartbeatLoop(ctx, a.heartbeatEvery, send, a.lease.remaining, a.stats, a.sampler, a.certStatus, a.sourceFilterStatus)
 	}()
 	go func() {
 		defer wg.Done()
@@ -751,6 +758,11 @@ func (a *Agent) applySnapshotLocked(ctx context.Context, gen uint64, send func(*
 		"user_version", snap.UserVersion,
 		"users", len(snap.Users))
 	a.configureCert(snap)
+	// The allowlists first: a new derived inbound is never open to every
+	// address, not even for the moment between rebuild and filter.
+	if a.filters != nil {
+		a.filters.Apply(ctx, snap.GetSourceFilters())
+	}
 	final, err := a.core.Rebuild(snap.InboundsJson, snap.Users)
 	// The old instance's last counters (old session) are owed to the
 	// panel whatever happens next: queue them (resent on reconnect).
@@ -951,6 +963,15 @@ func (a *Agent) onCertIssued() {
 	if _, send := a.current(); send != nil {
 		_ = send(a.helloLocked())
 	}
+}
+
+// sourceFilterStatus: Heartbeat.source_filter (nil when disabled or
+// nothing was asked for).
+func (a *Agent) sourceFilterStatus() *pb.SourceFilterStatus {
+	if a.filters == nil {
+		return nil
+	}
+	return a.filters.Status()
 }
 
 // certStatus: Heartbeat.cert (nil without ACME).

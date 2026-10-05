@@ -240,3 +240,63 @@ func TestLimitedWrappersErrors(t *testing.T) {
 		t.Fatal("Close not passed through")
 	}
 }
+
+// W28-a (protocol 7): a user on two entrances ("u" on the direct inbound,
+// "u#1" on a relay's derived inbound) is one account: one shared limit
+// that stays while either op carries it, one online user; a limit that
+// appears closes the live dispatches of both; another account is separate.
+func TestAccountSharesLimitAndOnlineCount(t *testing.T) {
+	if accountOf("u#1") != "u" || accountOf("u") != "u" || accountOf("u#1#2") != "u" {
+		t.Fatal("accountOf")
+	}
+	g := newBareGate()
+	d := gateKey{tag: "direct", email: "u"}
+	r := gateKey{tag: "e1", email: "u#1"}
+	o := gateKey{tag: "direct", email: "v"}
+	ud, ur, uo := &protocol.MemoryUser{Email: "u"}, &protocol.MemoryUser{Email: "u#1"}, &protocol.MemoryUser{Email: "v"}
+	g.Allow(d, ud)
+	g.Allow(r, ur)
+	g.Allow(o, uo)
+	_, doneD, _ := liveFor(t, g, d, ud)
+	_, doneR, _ := liveFor(t, g, r, ur)
+	_, doneO, _ := liveFor(t, g, o, uo)
+	if c, u := g.LiveStats(); c != 3 || u != 2 {
+		t.Fatalf("stats %d conns %d users, want 3 / 2 (u counted once)", c, u)
+	}
+	// A limit appears on one op: both of the account's dispatches close
+	// (they were admitted unthrottled), the other account's do not.
+	if n := g.SetLimit("u#1", 1000); n != 2 {
+		t.Fatalf("closed %d, want 2", n)
+	}
+	if !cancelled(doneD) || !cancelled(doneR) {
+		t.Fatal("the account's live dispatches survived the new limit")
+	}
+	select {
+	case <-doneO:
+		t.Fatal("another account was cut")
+	default:
+	}
+	if g.Limit("u") != 1000 || g.Limit("u#1") != 1000 || g.Limit("v") != 0 {
+		t.Fatal("the limit is not the account's")
+	}
+	// The second op carries the same limit: shared, nothing closed.
+	if n := g.SetLimit("u", 1000); n != 0 {
+		t.Fatalf("closed %d", n)
+	}
+	lim1, ok := g.admit(d, ud, &liveConn{cancel: func() {}})
+	lim2, ok2 := g.admit(r, ur, &liveConn{cancel: func() {}})
+	if !ok || !ok2 || lim1 == nil || lim1 != lim2 {
+		t.Fatal("the two entrances do not share one limiter")
+	}
+	// One op drops it (REMOVE of the relay): the other still carries it.
+	g.SetLimit("u#1", 0)
+	if g.Limit("u") != 1000 {
+		t.Fatal("removing one entrance dropped the account's limit")
+	}
+	g.SetLimit("u", 0)
+	if g.Limit("u") != 0 || len(g.limits) != 0 || len(g.limited) != 0 {
+		t.Fatal("the last op left a limit behind")
+	}
+	// Dropping a limit nobody carried is a no-op.
+	g.SetLimit("w", 0)
+}

@@ -84,6 +84,56 @@ func BenchmarkRebuild10k(b *testing.B) {
 	}
 }
 
+// W28-a: the same 20k credentials as per-entrance users: 10k users each on
+// the direct inbound ("<id>") and on one relay's derived inbound
+// ("<id>#1"), one UserOp each (what the panel sends from protocol 7 on).
+func benchEntranceOps(n int) []*pb.UserOp {
+	ops := make([]*pb.UserOp, 0, 2*n)
+	for i := 0; i < n; i++ {
+		acct := func(tag string) string {
+			return fmt.Sprintf(`{"flow":"","id":"%08d-%04d-4000-8000-%012d"}`, 0, len(tag), i)
+		}
+		ops = append(ops,
+			&pb.UserOp{Op: pb.UserOp_ADD, UserId: benchUserID(i), InboundUsers: []*pb.InboundUser{
+				{InboundTag: "in-a", Protocol: "vless", AccountJson: acct("in-a")}}},
+			&pb.UserOp{Op: pb.UserOp_ADD, UserId: benchUserID(i) + "#1", InboundUsers: []*pb.InboundUser{
+				{InboundTag: "in-b", Protocol: "vless", AccountJson: acct("in-bb")}}})
+	}
+	return ops
+}
+
+func BenchmarkRebuild10kEntrances(b *testing.B) {
+	m := NewCoreManager()
+	defer m.Teardown()
+	inb := twoInbounds(benchPort(b), benchPort(b))
+	users := benchEntranceOps(benchUsersN)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := m.Rebuild(inb, users); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// W28-a: the source allowlist transaction for 16 relays of 64 networks
+// each (rendered on every Snapshot; nft runs only when it changes).
+func BenchmarkNftScript16x64(b *testing.B) {
+	filters := make([]*pb.SourceFilter, 16)
+	for i := range filters {
+		cidrs := make([]string, 64)
+		for j := range cidrs {
+			cidrs[j] = fmt.Sprintf("10.%d.%d.0/24", i, j)
+		}
+		filters[i] = &pb.SourceFilter{Port: uint32(20000 + i), Tcp: true, Udp: true, Cidrs: cidrs}
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := nftScript(filters); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // Heap held by a running 10k-user instance (reported as heap-MB).
 func BenchmarkInstanceHeap10k(b *testing.B) {
 	for i := 0; i < b.N; i++ {

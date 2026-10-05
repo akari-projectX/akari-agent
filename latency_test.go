@@ -237,7 +237,7 @@ func TestProberCoalescedRequestSurvivesReschedule(t *testing.T) {
 func TestAgentLatencyCapabilityAndConfig(t *testing.T) {
 	a := NewAgent(&Config{}, "test", nil)
 	h := a.helloLocked().GetHello()
-	if !slices.Equal(h.Capabilities, []string{"metrics", "latency", "updater", "metrics-presence"}) {
+	if !slices.Equal(h.Capabilities, []string{"metrics", "latency", "updater", "metrics-presence", "source-filter"}) {
 		t.Fatalf("capabilities %v", h.Capabilities)
 	}
 	// W23: stale units add the status flag.

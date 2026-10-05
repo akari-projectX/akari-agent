@@ -148,6 +148,7 @@ func main() {
 
 	a := NewAgent(cfg, agentVersion, ids)
 	a.heartbeatEvery = min(max(*heartbeat, time.Second), 5*time.Minute)
+	a.filters = newSourceFilters()
 	a.certs = newCertManager(dir)
 	a.certs.ua = "akari-agent/" + agentVersion
 	a.certs.httpPort, a.certs.tlsPort = *acmeHTTPPort, *acmeTLSPort

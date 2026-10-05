@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -27,8 +28,21 @@ import (
 // (or replaced) on that inbound.
 var errRevoked = errors.New("akari: user access revoked")
 
-// gateKey names one user on one inbound (xray email == panel user id).
+// gateKey names one user on one inbound (xray email == UserOp.user_id:
+// the panel user id, or "<panel user id>#<n>" on a relay entrance's
+// inbound, protocol 7).
 type gateKey struct{ tag, email string }
+
+// accountOf is the panel account an xray user belongs to (protocol 7): the
+// part of the email before '#'. Speed limits and the online-user count
+// are per account, so a user on several entrances of the node shares one
+// limit and counts once.
+func accountOf(email string) string {
+	if i := strings.IndexByte(email, '#'); i >= 0 {
+		return email[:i]
+	}
+	return email
+}
 
 // liveConn is one admitted dispatch: cancelling its context stops the
 // outbound side; interrupting its link stops the inbound side.
@@ -59,14 +73,18 @@ type gateDispatcher struct {
 	mu      sync.Mutex
 	allowed map[gateKey]*protocol.MemoryUser
 	live    map[gateKey]map[*liveConn]struct{}
-	// liveKeys: email -> how many keys (inbounds) in live it has.
+	// liveKeys: account -> how many keys (inbounds, entrances) in live it
+	// has.
 	liveKeys map[string]int
-	// limits: per-user rate limits by email (ratelimit.go); absent = none.
-	limits map[string]*userLimit
+	// limits: per-account rate limits (ratelimit.go); absent = none.
+	// limited: the emails whose ops installed the account's limit (it goes
+	// when the last of them drops it).
+	limits  map[string]*userLimit
+	limited map[string]map[string]struct{}
 
 	// W7: the heartbeat's counts, kept up to date under mu (a key's 0<->1
 	// transitions) and read without it: the number of tracked dispatches
-	// and of distinct emails among them.
+	// and of distinct accounts among them.
 	liveConns atomic.Int64
 	liveUsers atomic.Int64
 }
@@ -94,6 +112,7 @@ func newGate() *gateDispatcher {
 		live:     make(map[gateKey]map[*liveConn]struct{}),
 		liveKeys: make(map[string]int),
 		limits:   make(map[string]*userLimit),
+		limited:  make(map[string]map[string]struct{}),
 	}
 }
 
@@ -176,10 +195,11 @@ func (g *gateDispatcher) takeLocked(key gateKey) []*liveConn {
 // dropKeyLocked removes key from live (it had at least one dispatch).
 func (g *gateDispatcher) dropKeyLocked(key gateKey) {
 	delete(g.live, key)
-	if n := g.liveKeys[key.email] - 1; n > 0 {
-		g.liveKeys[key.email] = n
+	acc := accountOf(key.email)
+	if n := g.liveKeys[acc] - 1; n > 0 {
+		g.liveKeys[acc] = n
 	} else {
-		delete(g.liveKeys, key.email)
+		delete(g.liveKeys, acc)
 		g.liveUsers.Add(-1)
 	}
 }
@@ -191,7 +211,7 @@ func (g *gateDispatcher) LiveTotal() int {
 }
 
 // LiveStats returns the tracked dispatches and how many distinct users
-// (emails) they belong to (Heartbeat.metrics.online_users). Lock-free and
+// (accounts) they belong to (Heartbeat.metrics.online_users). Lock-free and
 // O(1) (W7): the two values are read separately, so they may straddle a
 // concurrent admit or release.
 func (g *gateDispatcher) LiveStats() (conns, users int) {
@@ -225,13 +245,17 @@ func (g *gateDispatcher) admit(key gateKey, user *protocol.MemoryUser, c *liveCo
 	if conns == nil {
 		conns = make(map[*liveConn]struct{})
 		g.live[key] = conns
-		if g.liveKeys[key.email]++; g.liveKeys[key.email] == 1 {
+		acc := accountOf(key.email)
+		if g.liveKeys[acc]++; g.liveKeys[acc] == 1 {
 			g.liveUsers.Add(1)
 		}
 	}
 	conns[c] = struct{}{}
 	g.liveConns.Add(1)
-	return g.limits[key.email], true
+	if len(g.limits) == 0 {
+		return nil, true // the common case: nobody limited, no lookup
+	}
+	return g.limits[accountOf(key.email)], true
 }
 
 func (g *gateDispatcher) release(key gateKey, c *liveConn) {
