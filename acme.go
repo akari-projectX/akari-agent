@@ -142,9 +142,6 @@ type certState struct {
 	// avoid: challenge the last order failed with (connection class); the
 	// next order prefers the other one.
 	avoid string
-	// noReplace: the last order with an ARI "replaces" was refused; order
-	// without it.
-	noReplace bool
 }
 
 func newCertManager(stateDir string) *certManager {
@@ -446,7 +443,7 @@ func (m *certManager) step(ctx context.Context) time.Duration {
 	ports := m.tcpPorts
 	avoid := m.st.avoid
 	var replaces *x509.Certificate
-	if valid && !m.st.noReplace {
+	if valid {
 		replaces = leaf
 	}
 	m.mu.Unlock()
@@ -474,11 +471,6 @@ func (m *certManager) step(ctx context.Context) time.Duration {
 	now = m.now()
 	if err != nil {
 		kind := classifyACME(err)
-		var p acme.Problem
-		if replaces != nil && errors.As(err, &p) &&
-			(p.Type == acme.ProblemTypeAlreadyReplaced || p.Type == acme.ProblemTypeMalformed) {
-			m.st.noReplace = true
-		}
 		m.st.failures++
 		m.st.lastErr = truncate(err.Error(), 512)
 		m.st.lastKind = kind
@@ -662,6 +654,14 @@ func (m *certManager) order(ctx context.Context, cfg *acmeCfg, ports portSet, av
 	// the CA may exempt from rate limits.
 	params.Replaces = replaces
 	certs, err := client.ObtainCertificate(ctx, params)
+	if err != nil && replaces != nil && ariRefused(err) {
+		// ARI is a courtesy, never a reason not to renew: a CA that
+		// refuses the "replaces" (pebble cannot find a serial whose DER
+		// encoding has a leading zero byte) gets the plain order at once.
+		slog.Warn("the CA refused the ARI renewal order; ordering without it", "domain", cfg.domain, "error", err)
+		params.Replaces = nil
+		certs, err = client.ObtainCertificate(ctx, params)
+	}
 	if err != nil {
 		return nil, nil, chal, err
 	}
@@ -683,6 +683,21 @@ func (m *certManager) order(ctx context.Context, cfg *acmeCfg, ports portSet, av
 		return nil, nil, chal, fmt.Errorf("issued certificate does not cover %s", cfg.domain)
 	}
 	return certs[0].ChainPEM, keyPEM, chal, nil
+}
+
+// ariRefused: the CA refused the order's "replaces" itself (alreadyReplaced
+// past acmez's own retry, malformed or unknown certificate ID, or a CA
+// error looking it up), not the identifier, the account or the challenge.
+func ariRefused(err error) bool {
+	var p acme.Problem
+	if !errors.As(err, &p) {
+		return false
+	}
+	switch p.Type {
+	case acme.ProblemTypeAlreadyReplaced, acme.ProblemTypeMalformed, acme.ProblemTypeServerInternal:
+		return true
+	}
+	return false
 }
 
 // accountKey loads (or creates) the account key for a directory.
