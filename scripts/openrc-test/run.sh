@@ -19,7 +19,9 @@
 #      (root 0755), confirmed; the updater service itself is not restarted;
 #   5. a hostile request (staged file a symlink to a root file): refused;
 #   6. a broken release while conf.d sets respawn_max (supervise-daemon
-#      gives up, the service ends stopped/failed): rolled back fast.
+#      gives up, the service ends stopped/failed): rolled back fast;
+#   7. R44: the relay source allowlists are applied by the updater loop
+#      (nft), a hostile request refused, removal.
 #
 # The full flow with a panel (installer, offer, download, rollout) is
 # akari-panel's smoke (Alpine section).
@@ -92,6 +94,15 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=t
   -keyout /dev/null -out "$W/ca.pem" 2>/dev/null
 { printf 'panel_addr = "127.0.0.1:1"\nserver_name = "panel.invalid"\nenrollment_token = "unused"\n[identity]\nca_pem = """\n'
   cat "$W/ca.pem"; printf '"""\n'; } >"$W/bootstrap.toml"
+cat >"$W/filter1.json" <<'J'
+{"schema":1,"id":"a1","filters":[{"port":20443,"tcp":true,"cidrs":["203.0.113.0/24","2001:db8::/48"]}]}
+J
+cat >"$W/filter2.json" <<'J'
+{"schema":1,"id":"a2","filters":[{"port":20443,"tcp":true,"cidrs":["203.0.113.0/24 } ; flush ruleset"]}]}
+J
+cat >"$W/filter3.json" <<'J'
+{"schema":1,"id":"a3","filters":[]}
+J
 chmod -R a+rX "$W"
 
 docker build -q -t akari-agent-openrc-test:alpine3.22 scripts/openrc-test >/dev/null
@@ -257,4 +268,35 @@ sleep 4
 x 'rc-service akari-agent status' >/dev/null 2>&1 || fail "restored agent did not stay up"
 wait_alog '"agent_version":"v900.0.3"'
 units_are 3 || fail "scripts changed"
+echo "== 7. R44 source allowlists: applied by the root updater with nft, never by the agent"
+# The agent's side is played (its request, as sourcefilter.go writes it):
+# 1 = a relay allowlist, 2 = hostile (nft syntax in a network: refused
+# without running nft, the table untouched), 3 = no filters (table removed).
+filter_req() { # N
+  x "own=akari-agent:akari-agent
+     install -o \${own%:*} -g \${own#*:} -m 0600 /w/filter$1.json $U/.f && mv $U/.f $U/source-filter-request.json"
+}
+fresult() { x "cat $U/source-filter-result.json 2>/dev/null" || true; }
+wait_fresult() { # id
+  for _ in $(seq 1 20); do fresult | grep -q "\"id\":\"$1\"" && return 0; sleep 0.5; done
+  fail "no source filter result for $1 (have: $(fresult); updater: $(ulog | tail -3))"
+}
+table() { x 'nft list table inet akari_sources 2>/dev/null' || true; }
+filter_req 1
+wait_fresult a1
+fresult | grep -q '"applied":true' || fail "allowlist not applied: $(fresult)"
+table | grep -q 'tcp dport 20443 ct state new ip saddr != @s0_4 drop' || fail "nft table: $(table)"
+table | grep -q '203.0.113.0/24' && table | grep -q '2001:db8::/48' || fail "nft sets: $(table)"
+[ "$(x "stat -c %u $U/source-filter-result.json")" = "$(x "stat -c %u $U")" ] || fail "filter result not handed to the agent"
+x "test ! -e $U/source-filter-request.json" || fail "filter request not consumed"
+filter_req 2
+wait_fresult a2
+fresult | grep -q '"applied":false' || fail "hostile request applied: $(fresult)"
+table | grep -q 'tcp dport 20443' || fail "hostile request changed the table: $(table)"
+x 'nft list ruleset' | grep -q . || fail "ruleset flushed"
+filter_req 3
+wait_fresult a3
+fresult | grep -q '"applied":true' || fail "removal failed: $(fresult)"
+[ -z "$(table)" ] || fail "table not removed: $(table)"
+x 'rc-service akari-agent-update status' >/dev/null 2>&1 || fail "updater service not running"
 echo "openrc self-update test: ok"

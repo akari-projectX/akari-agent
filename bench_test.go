@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -127,9 +128,33 @@ func BenchmarkNftScript16x64(b *testing.B) {
 		}
 		filters[i] = &pb.SourceFilter{Port: uint32(20000 + i), Tcp: true, Udp: true, Cidrs: cidrs}
 	}
+	specs := specsOf(filters)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		if _, err := nftScript(filters); err != nil {
+		if _, err := nftScript(specs); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// R44: the agent's per-Snapshot cost of the same filters: normalize, ID
+// and the request handed to the root updater (the file write excluded).
+func BenchmarkSourceFilterRequest16x64(b *testing.B) {
+	filters := make([]*pb.SourceFilter, 16)
+	for i := range filters {
+		cidrs := make([]string, 64)
+		for j := range cidrs {
+			cidrs[j] = fmt.Sprintf("10.%d.%d.0/24", i, j)
+		}
+		filters[i] = &pb.SourceFilter{Port: uint32(20000 + i), Tcp: true, Udp: true, Cidrs: cidrs}
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		specs, err := normalizeFilters(specsOf(filters))
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := json.Marshal(&filterRequest{Schema: filterSchema, ID: filterID(specs), Filters: specs}); err != nil {
 			b.Fatal(err)
 		}
 	}

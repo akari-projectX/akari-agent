@@ -78,7 +78,7 @@ func FuzzNftScript(f *testing.F) {
 		`    meta nfproto ipv[46] (tcp|udp) dport [0-9]{1,5} ct state new( ip6? saddr != @s0_[46])? drop)$`)
 	f.Fuzz(func(t *testing.T, port uint32, tcp, udp bool, cidrs string) {
 		filter := &pb.SourceFilter{Port: port, Tcp: tcp, Udp: udp, Cidrs: strings.Split(cidrs, ",")}
-		script, err := nftScript([]*pb.SourceFilter{filter})
+		script, err := nftScript(specsOf([]*pb.SourceFilter{filter}))
 		if err != nil {
 			return
 		}

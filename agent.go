@@ -766,10 +766,11 @@ func (a *Agent) applySnapshotLocked(ctx context.Context, gen uint64, send func(*
 		"user_version", snap.UserVersion,
 		"users", len(snap.Users))
 	a.configureCert(snap)
-	// The allowlists first: a new derived inbound is never open to every
-	// address, not even for the moment between rebuild and filter.
+	// The allowlists go to the root updater first (R44: applied within
+	// about a second; until then a new derived inbound relies on its
+	// per-entrance credentials alone).
 	if a.filters != nil {
-		a.filters.Apply(ctx, snap.GetSourceFilters())
+		a.filters.Apply(snap.GetSourceFilters())
 	}
 	final, err := a.core.Rebuild(snap.InboundsJson, snap.Users)
 	// The old instance's last counters (old session) are owed to the

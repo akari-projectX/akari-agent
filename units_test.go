@@ -90,6 +90,8 @@ func TestOpenRCScripts(t *testing.T) {
 	for _, l := range []string{
 		"#!/sbin/openrc-run\n",
 		"AKARI_REQUEST=/var/lib/akari-agent/" + updateDirName + "/" + requestName + "\n",
+		"AKARI_FILTER_REQUEST=/var/lib/akari-agent/" + updateDirName + "/" + filterRequestName + "\n",
+		"[ -e $AKARI_FILTER_REQUEST ] || [ -L $AKARI_FILTER_REQUEST ]",
 		"/usr/local/bin/akari-agent -init openrc -apply-update /var/lib/akari-agent -updater-state /var/lib/akari-agent-update",
 		`no_new_privs="yes"` + "\n",
 	} {
@@ -125,10 +127,27 @@ func TestUnitSandbox(t *testing.T) {
 	}) {
 		t.Fatal("agent unit: ProtectProc=invisible without ProcSubset (it hides /proc/stat, meminfo, net)")
 	}
-	for _, l := range []string{"ReadWritePaths=/etc/systemd/system", "ProtectSystem=strict", "PrivateNetwork=yes",
-		"RestrictAddressFamilies=AF_UNIX", "ReadWritePaths=/usr/local/bin -/var/lib/private/akari-agent"} {
+	for _, l := range []string{"ReadWritePaths=/etc/systemd/system", "ProtectSystem=strict", "IPAddressDeny=any",
+		"RestrictAddressFamilies=AF_UNIX AF_NETLINK", "ReadWritePaths=/usr/local/bin -/var/lib/private/akari-agent"} {
 		if !slices.Contains(upd, l) {
 			t.Fatalf("updater unit lacks %q", l)
+		}
+	}
+	// R44: the agent never gets CAP_NET_ADMIN; the root updater applies
+	// the source allowlists in the host's network namespace.
+	if slices.ContainsFunc(agent, func(l string) bool { return strings.Contains(l, "CAP_NET_ADMIN") }) {
+		t.Fatal("agent unit grants CAP_NET_ADMIN")
+	}
+	if !slices.ContainsFunc(upd, func(l string) bool {
+		return strings.HasPrefix(l, "CapabilityBoundingSet=") && strings.Contains(l, "CAP_NET_ADMIN")
+	}) || slices.ContainsFunc(upd, func(l string) bool { return strings.HasPrefix(l, "PrivateNetwork") }) {
+		t.Fatal("updater unit cannot apply the source allowlists")
+	}
+	path := lines("akari-agent-update.path")
+	for _, l := range []string{"PathExists=/var/lib/private/akari-agent/update/" + requestName,
+		"PathExists=/var/lib/private/akari-agent/update/" + filterRequestName} {
+		if !slices.Contains(path, l) {
+			t.Fatalf("trigger unit lacks %q", l)
 		}
 	}
 	for _, u := range [][]string{agent, upd} {

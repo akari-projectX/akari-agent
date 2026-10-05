@@ -24,6 +24,12 @@
 # confirmation in time = put .prev and the previous scripts back and
 # restart. A refreshed copy of THIS script takes effect at its next start.
 #
+# R44: the loop also picks up the agent's source-filter request
+# (update/source-filter-request.json; the agent has no CAP_NET_ADMIN): the
+# updater re-validates it and applies it with `nft -f -` to the table
+# inet akari_sources, then hands the outcome back. Needs nftables
+# (apk add nftables).
+#
 # Its own record (rolled-back versions, the binary on probation, the
 # previous scripts) is in /var/lib/akari-agent-update (root, 0700); its log
 # is /var/log/akari-agent-update.log. Local settings: /etc/conf.d/
@@ -39,11 +45,12 @@
 description="Akari node agent updater (verifies and installs a staged self-update)"
 
 AKARI_REQUEST=/var/lib/akari-agent/update/apply-request.json
+AKARI_FILTER_REQUEST=/var/lib/akari-agent/update/source-filter-request.json
 AKARI_UPDATER="/usr/local/bin/akari-agent -init openrc -apply-update /var/lib/akari-agent -updater-state /var/lib/akari-agent-update ${AKARI_UPDATER_ARGS:-}"
 
 supervisor=supervise-daemon
 command=/bin/sh
-command_args="-c 'while :; do if [ -e $AKARI_REQUEST ] || [ -L $AKARI_REQUEST ]; then $AKARI_UPDATER || sleep 10; fi; sleep 1; done'"
+command_args="-c 'while :; do if [ -e $AKARI_REQUEST ] || [ -L $AKARI_REQUEST ] || [ -e $AKARI_FILTER_REQUEST ] || [ -L $AKARI_FILTER_REQUEST ]; then $AKARI_UPDATER || sleep 10; fi; sleep 1; done'"
 no_new_privs="yes"
 umask="0077"
 directory="/"
