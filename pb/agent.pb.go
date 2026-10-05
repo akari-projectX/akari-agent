@@ -390,7 +390,7 @@ func (x UpdateStatus_State) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use UpdateStatus_State.Descriptor instead.
 func (UpdateStatus_State) EnumDescriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{26, 0}
+	return file_agent_proto_rawDescGZIP(), []int{28, 0}
 }
 
 type EnrollRequest struct {
@@ -645,6 +645,13 @@ type Hello struct {
 	//       (ConfigSnapshot.acme) and reports it (Heartbeat.cert). Older
 	//       agents ignore both: they keep reading the node certificate files
 	//       the admin installs by hand (the panel flags such nodes).
+	//   7 = (W28-a) one user may be several UserOps: UserOp.user_id is
+	//       "<account>" or "<account>#<n>" (one per entrance the user may use
+	//       on this node; see UserOp). The agent treats every user_id as its
+	//       own xray user and traffic key, but shares the speed limit and the
+	//       online-user count per account (the part before '#'). Older agents
+	//       limit and count each user_id on its own (a user on two entrances
+	//       may get twice the limit; the panel flags such nodes).
 	ProtocolVersion uint32 `protobuf:"varint,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	// State hash of what the agent actually runs (see "State hash" below),
 	// for config_version + the applied user set. Empty for protocol 0.
@@ -668,6 +675,8 @@ type Hello struct {
 	//       whose units were installed by an older installer or updater (or
 	//       edited by hand instead of with a drop-in) keeps the old ones until
 	//       the panel's install command is run once (the panel says so).
+	//   "source-filter" = (W28-a) enforces ConfigSnapshot.source_filters and
+	//       reports Heartbeat.source_filter.
 	// The panel only sends LatencyProbeConfig to agents that list "latency".
 	Capabilities  []string `protobuf:"bytes,20,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -777,7 +786,10 @@ type Heartbeat struct {
 	Metrics *NodeMetrics `protobuf:"bytes,20,opt,name=metrics,proto3" json:"metrics,omitempty"`
 	// Block rule hit counters and the policy in force (W29, capability
 	// "block-rules"); unset from older agents.
-	Block         *BlockStats `protobuf:"bytes,41,opt,name=block,proto3" json:"block,omitempty"`
+	Block *BlockStats `protobuf:"bytes,41,opt,name=block,proto3" json:"block,omitempty"`
+	// Source-IP allowlist state (W28-a, capability "source-filter"); unset
+	// while the held Snapshot has no source_filters.
+	SourceFilter  *SourceFilterStatus `protobuf:"bytes,30,opt,name=source_filter,json=sourceFilter,proto3" json:"source_filter,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -871,6 +883,13 @@ func (x *Heartbeat) GetMetrics() *NodeMetrics {
 func (x *Heartbeat) GetBlock() *BlockStats {
 	if x != nil {
 		return x.Block
+	}
+	return nil
+}
+
+func (x *Heartbeat) GetSourceFilter() *SourceFilterStatus {
+	if x != nil {
+		return x.SourceFilter
 	}
 	return nil
 }
@@ -1190,7 +1209,7 @@ func (x *NodeMetrics) GetXrayVersion() string {
 
 type UserTraffic struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`     // panel user id; also the xray user "email" field
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`     // UserOp.user_id; also the xray user "email" field
 	UpBytes       uint64                 `protobuf:"varint,2,opt,name=up_bytes,json=upBytes,proto3" json:"up_bytes,omitempty"` // cumulative within the current session
 	DownBytes     uint64                 `protobuf:"varint,3,opt,name=down_bytes,json=downBytes,proto3" json:"down_bytes,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1863,13 +1882,19 @@ func (x *InboundUser) GetProtocol() string {
 // from every inbound and closes their live connections. Both are
 // idempotent.
 type UserOp struct {
-	state        protoimpl.MessageState `protogen:"open.v1"`
-	Op           UserOp_Op              `protobuf:"varint,1,opt,name=op,proto3,enum=akari.v1.UserOp_Op" json:"op,omitempty"`
-	UserId       string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	InboundUsers []*InboundUser         `protobuf:"bytes,3,rep,name=inbound_users,json=inboundUsers,proto3" json:"inbound_users,omitempty"` // ignored for REMOVE
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Op    UserOp_Op              `protobuf:"varint,1,opt,name=op,proto3,enum=akari.v1.UserOp_Op" json:"op,omitempty"`
+	// The xray user ("email") and traffic key; opaque to the agent apart from
+	// the account rule of protocol 7: "<panel user id>" on the node's direct
+	// inbound, "<panel user id>#<n>" on a relay entrance's derived inbound
+	// (n = the entrance's number on the node, 1..32767). Never longer than
+	// 64 bytes.
+	UserId       string         `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	InboundUsers []*InboundUser `protobuf:"bytes,3,rep,name=inbound_users,json=inboundUsers,proto3" json:"inbound_users,omitempty"` // ignored for REMOVE
 	// Per-user rate limit (protocol >= 4), bytes per second, applied to each
 	// direction separately and shared by ALL of the user's connections on
-	// this node (every inbound). 0 = unlimited. Ignored for REMOVE (a removed
+	// this node (every inbound; protocol >= 7: every UserOp of the account,
+	// which all carry the same limit). 0 = unlimited. Ignored for REMOVE (a removed
 	// user has no limit). Part of the op like the credentials: a version the
 	// agent holds always carries that version's limits, so it is not part of
 	// the state hash. A limit that appears where there was none closes the
@@ -1951,7 +1976,17 @@ type ConfigSnapshot struct {
 	// part of the state hash: a change of the domain bumps config_version, so
 	// it always arrives with a Snapshot. Unset = no automatic certificate
 	// (inbounds read the files the admin installs, as before).
-	Acme          *AcmeConfig `protobuf:"bytes,10,opt,name=acme,proto3" json:"acme,omitempty"`
+	Acme *AcmeConfig `protobuf:"bytes,10,opt,name=acme,proto3" json:"acme,omitempty"`
+	// Source-IP allowlists (W28-a, capability "source-filter"): new
+	// connections to each listed port are accepted only from the listed
+	// networks (a relay entrance's derived inbound accepts only its relay's
+	// egress addresses). The agent enforces them in the kernel (nftables,
+	// its own table, replaced as a whole on every Snapshot, removed when the
+	// list is empty) and reports the outcome in Heartbeat.source_filter. Not
+	// part of the state hash: they change only with config_version. Agents
+	// without the capability ignore them (per-entrance credentials still
+	// isolate the entrances; the panel flags such nodes).
+	SourceFilters []*SourceFilter `protobuf:"bytes,30,rep,name=source_filters,json=sourceFilters,proto3" json:"source_filters,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2021,6 +2056,135 @@ func (x *ConfigSnapshot) GetAcme() *AcmeConfig {
 	return nil
 }
 
+func (x *ConfigSnapshot) GetSourceFilters() []*SourceFilter {
+	if x != nil {
+		return x.SourceFilters
+	}
+	return nil
+}
+
+// One port's source allowlist (W28-a).
+type SourceFilter struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Port          uint32                 `protobuf:"varint,1,opt,name=port,proto3" json:"port,omitempty"`
+	Tcp           bool                   `protobuf:"varint,2,opt,name=tcp,proto3" json:"tcp,omitempty"`    // filter TCP connections to port
+	Udp           bool                   `protobuf:"varint,3,opt,name=udp,proto3" json:"udp,omitempty"`    // filter UDP (QUIC) to port
+	Cidrs         []string               `protobuf:"bytes,4,rep,name=cidrs,proto3" json:"cidrs,omitempty"` // "203.0.113.7/32", "2001:db8::/48"; never empty
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SourceFilter) Reset() {
+	*x = SourceFilter{}
+	mi := &file_agent_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SourceFilter) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SourceFilter) ProtoMessage() {}
+
+func (x *SourceFilter) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SourceFilter.ProtoReflect.Descriptor instead.
+func (*SourceFilter) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *SourceFilter) GetPort() uint32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
+func (x *SourceFilter) GetTcp() bool {
+	if x != nil {
+		return x.Tcp
+	}
+	return false
+}
+
+func (x *SourceFilter) GetUdp() bool {
+	if x != nil {
+		return x.Udp
+	}
+	return false
+}
+
+func (x *SourceFilter) GetCidrs() []string {
+	if x != nil {
+		return x.Cidrs
+	}
+	return nil
+}
+
+// Whether the agent enforces ConfigSnapshot.source_filters (W28-a).
+type SourceFilterStatus struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Applied       bool                   `protobuf:"varint,1,opt,name=applied,proto3" json:"applied,omitempty"` // the kernel rules match the last Snapshot
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`      // why not ("nft: permission denied", ...); "" when applied
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SourceFilterStatus) Reset() {
+	*x = SourceFilterStatus{}
+	mi := &file_agent_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SourceFilterStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SourceFilterStatus) ProtoMessage() {}
+
+func (x *SourceFilterStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SourceFilterStatus.ProtoReflect.Descriptor instead.
+func (*SourceFilterStatus) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *SourceFilterStatus) GetApplied() bool {
+	if x != nil {
+		return x.Applied
+	}
+	return false
+}
+
+func (x *SourceFilterStatus) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
 // ACME (RFC 8555) certificate the agent obtains and renews itself (protocol
 // >= 6). Every TLS certificate entry in inbounds_json whose certificateFile
 // and keyFile are the node certificate files
@@ -2045,7 +2209,7 @@ type AcmeConfig struct {
 
 func (x *AcmeConfig) Reset() {
 	*x = AcmeConfig{}
-	mi := &file_agent_proto_msgTypes[18]
+	mi := &file_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2057,7 +2221,7 @@ func (x *AcmeConfig) String() string {
 func (*AcmeConfig) ProtoMessage() {}
 
 func (x *AcmeConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[18]
+	mi := &file_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2070,7 +2234,7 @@ func (x *AcmeConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcmeConfig.ProtoReflect.Descriptor instead.
 func (*AcmeConfig) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{18}
+	return file_agent_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *AcmeConfig) GetDomain() string {
@@ -2116,7 +2280,7 @@ type UserDelta struct {
 
 func (x *UserDelta) Reset() {
 	*x = UserDelta{}
-	mi := &file_agent_proto_msgTypes[19]
+	mi := &file_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2128,7 +2292,7 @@ func (x *UserDelta) String() string {
 func (*UserDelta) ProtoMessage() {}
 
 func (x *UserDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[19]
+	mi := &file_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2141,7 +2305,7 @@ func (x *UserDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserDelta.ProtoReflect.Descriptor instead.
 func (*UserDelta) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{19}
+	return file_agent_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *UserDelta) GetUserVersion() uint64 {
@@ -2199,7 +2363,7 @@ type LeaseGrant struct {
 
 func (x *LeaseGrant) Reset() {
 	*x = LeaseGrant{}
-	mi := &file_agent_proto_msgTypes[20]
+	mi := &file_agent_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2211,7 +2375,7 @@ func (x *LeaseGrant) String() string {
 func (*LeaseGrant) ProtoMessage() {}
 
 func (x *LeaseGrant) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[20]
+	mi := &file_agent_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2224,7 +2388,7 @@ func (x *LeaseGrant) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LeaseGrant.ProtoReflect.Descriptor instead.
 func (*LeaseGrant) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{20}
+	return file_agent_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *LeaseGrant) GetDurationSeconds() uint64 {
@@ -2249,7 +2413,7 @@ type Noop struct {
 
 func (x *Noop) Reset() {
 	*x = Noop{}
-	mi := &file_agent_proto_msgTypes[21]
+	mi := &file_agent_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2261,7 +2425,7 @@ func (x *Noop) String() string {
 func (*Noop) ProtoMessage() {}
 
 func (x *Noop) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[21]
+	mi := &file_agent_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2274,7 +2438,7 @@ func (x *Noop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Noop.ProtoReflect.Descriptor instead.
 func (*Noop) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{21}
+	return file_agent_proto_rawDescGZIP(), []int{23}
 }
 
 // --- Agent self-update (protocol >= 3, M6) --------------------------------
@@ -2310,7 +2474,7 @@ type ManifestSignature struct {
 
 func (x *ManifestSignature) Reset() {
 	*x = ManifestSignature{}
-	mi := &file_agent_proto_msgTypes[22]
+	mi := &file_agent_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2322,7 +2486,7 @@ func (x *ManifestSignature) String() string {
 func (*ManifestSignature) ProtoMessage() {}
 
 func (x *ManifestSignature) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[22]
+	mi := &file_agent_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2335,7 +2499,7 @@ func (x *ManifestSignature) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ManifestSignature.ProtoReflect.Descriptor instead.
 func (*ManifestSignature) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{22}
+	return file_agent_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ManifestSignature) GetKeyId() string {
@@ -2371,7 +2535,7 @@ type UpdateOffer struct {
 
 func (x *UpdateOffer) Reset() {
 	*x = UpdateOffer{}
-	mi := &file_agent_proto_msgTypes[23]
+	mi := &file_agent_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2383,7 +2547,7 @@ func (x *UpdateOffer) String() string {
 func (*UpdateOffer) ProtoMessage() {}
 
 func (x *UpdateOffer) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[23]
+	mi := &file_agent_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2396,7 +2560,7 @@ func (x *UpdateOffer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateOffer.ProtoReflect.Descriptor instead.
 func (*UpdateOffer) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{23}
+	return file_agent_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *UpdateOffer) GetRolloutId() string {
@@ -2437,7 +2601,7 @@ type FetchArtifactRequest struct {
 
 func (x *FetchArtifactRequest) Reset() {
 	*x = FetchArtifactRequest{}
-	mi := &file_agent_proto_msgTypes[24]
+	mi := &file_agent_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2449,7 +2613,7 @@ func (x *FetchArtifactRequest) String() string {
 func (*FetchArtifactRequest) ProtoMessage() {}
 
 func (x *FetchArtifactRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[24]
+	mi := &file_agent_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2462,7 +2626,7 @@ func (x *FetchArtifactRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FetchArtifactRequest.ProtoReflect.Descriptor instead.
 func (*FetchArtifactRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{24}
+	return file_agent_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *FetchArtifactRequest) GetSha256() string {
@@ -2488,7 +2652,7 @@ type ArtifactChunk struct {
 
 func (x *ArtifactChunk) Reset() {
 	*x = ArtifactChunk{}
-	mi := &file_agent_proto_msgTypes[25]
+	mi := &file_agent_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2500,7 +2664,7 @@ func (x *ArtifactChunk) String() string {
 func (*ArtifactChunk) ProtoMessage() {}
 
 func (x *ArtifactChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[25]
+	mi := &file_agent_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2513,7 +2677,7 @@ func (x *ArtifactChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactChunk.ProtoReflect.Descriptor instead.
 func (*ArtifactChunk) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{25}
+	return file_agent_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ArtifactChunk) GetData() []byte {
@@ -2539,7 +2703,7 @@ type UpdateStatus struct {
 
 func (x *UpdateStatus) Reset() {
 	*x = UpdateStatus{}
-	mi := &file_agent_proto_msgTypes[26]
+	mi := &file_agent_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2551,7 +2715,7 @@ func (x *UpdateStatus) String() string {
 func (*UpdateStatus) ProtoMessage() {}
 
 func (x *UpdateStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[26]
+	mi := &file_agent_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2564,7 +2728,7 @@ func (x *UpdateStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateStatus.ProtoReflect.Descriptor instead.
 func (*UpdateStatus) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{26}
+	return file_agent_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *UpdateStatus) GetRolloutId() string {
@@ -2613,7 +2777,7 @@ type PanelDown struct {
 
 func (x *PanelDown) Reset() {
 	*x = PanelDown{}
-	mi := &file_agent_proto_msgTypes[27]
+	mi := &file_agent_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2625,7 +2789,7 @@ func (x *PanelDown) String() string {
 func (*PanelDown) ProtoMessage() {}
 
 func (x *PanelDown) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[27]
+	mi := &file_agent_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2638,7 +2802,7 @@ func (x *PanelDown) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PanelDown.ProtoReflect.Descriptor instead.
 func (*PanelDown) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{27}
+	return file_agent_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *PanelDown) GetMsg() isPanelDown_Msg {
@@ -2771,7 +2935,7 @@ type BlockPolicy struct {
 
 func (x *BlockPolicy) Reset() {
 	*x = BlockPolicy{}
-	mi := &file_agent_proto_msgTypes[28]
+	mi := &file_agent_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2783,7 +2947,7 @@ func (x *BlockPolicy) String() string {
 func (*BlockPolicy) ProtoMessage() {}
 
 func (x *BlockPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[28]
+	mi := &file_agent_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2796,7 +2960,7 @@ func (x *BlockPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlockPolicy.ProtoReflect.Descriptor instead.
 func (*BlockPolicy) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{28}
+	return file_agent_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *BlockPolicy) GetInboundTags() []string {
@@ -2838,7 +3002,7 @@ type BlockRule struct {
 
 func (x *BlockRule) Reset() {
 	*x = BlockRule{}
-	mi := &file_agent_proto_msgTypes[29]
+	mi := &file_agent_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2850,7 +3014,7 @@ func (x *BlockRule) String() string {
 func (*BlockRule) ProtoMessage() {}
 
 func (x *BlockRule) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[29]
+	mi := &file_agent_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2863,7 +3027,7 @@ func (x *BlockRule) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlockRule.ProtoReflect.Descriptor instead.
 func (*BlockRule) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{29}
+	return file_agent_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *BlockRule) GetId() uint64 {
@@ -2911,7 +3075,7 @@ type BlockStats struct {
 
 func (x *BlockStats) Reset() {
 	*x = BlockStats{}
-	mi := &file_agent_proto_msgTypes[30]
+	mi := &file_agent_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2923,7 +3087,7 @@ func (x *BlockStats) String() string {
 func (*BlockStats) ProtoMessage() {}
 
 func (x *BlockStats) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[30]
+	mi := &file_agent_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2936,7 +3100,7 @@ func (x *BlockStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlockStats.ProtoReflect.Descriptor instead.
 func (*BlockStats) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{30}
+	return file_agent_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *BlockStats) GetEpoch() string {
@@ -2977,7 +3141,7 @@ type BlockHits struct {
 
 func (x *BlockHits) Reset() {
 	*x = BlockHits{}
-	mi := &file_agent_proto_msgTypes[31]
+	mi := &file_agent_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2989,7 +3153,7 @@ func (x *BlockHits) String() string {
 func (*BlockHits) ProtoMessage() {}
 
 func (x *BlockHits) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[31]
+	mi := &file_agent_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3002,7 +3166,7 @@ func (x *BlockHits) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlockHits.ProtoReflect.Descriptor instead.
 func (*BlockHits) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{31}
+	return file_agent_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *BlockHits) GetRuleId() uint64 {
@@ -3046,7 +3210,7 @@ const file_agent_proto_rawDesc = "" +
 	"\x10protocol_version\x18\x05 \x01(\rR\x0fprotocolVersion\x12\x1d\n" +
 	"\n" +
 	"state_hash\x18\x06 \x01(\tR\tstateHash\x12\"\n" +
-	"\fcapabilities\x18\x14 \x03(\tR\fcapabilities\"\xe9\x03\n" +
+	"\fcapabilities\x18\x14 \x03(\tR\fcapabilities\"\xac\x04\n" +
 	"\tHeartbeat\x12$\n" +
 	"\vcpu_percent\x18\x01 \x01(\x01H\x00R\n" +
 	"cpuPercent\x88\x01\x01\x12)\n" +
@@ -3058,7 +3222,8 @@ const file_agent_proto_rawDesc = "" +
 	"\x04cert\x18\n" +
 	" \x01(\v2\x14.akari.v1.CertStatusR\x04cert\x12/\n" +
 	"\ametrics\x18\x14 \x01(\v2\x15.akari.v1.NodeMetricsR\ametrics\x12*\n" +
-	"\x05block\x18) \x01(\v2\x14.akari.v1.BlockStatsR\x05blockB\x0e\n" +
+	"\x05block\x18) \x01(\v2\x14.akari.v1.BlockStatsR\x05block\x12A\n" +
+	"\rsource_filter\x18\x1e \x01(\v2\x1c.akari.v1.SourceFilterStatusR\fsourceFilterB\x0e\n" +
 	"\f_cpu_percentB\x11\n" +
 	"\x0f_mem_used_bytesB\x12\n" +
 	"\x10_mem_total_bytesB\x1a\n" +
@@ -3197,14 +3362,23 @@ const file_agent_proto_rawDesc = "" +
 	"\x02Op\x12\a\n" +
 	"\x03ADD\x10\x00\x12\n" +
 	"\n" +
-	"\x06REMOVE\x10\x01\"\xd1\x01\n" +
+	"\x06REMOVE\x10\x01\"\x90\x02\n" +
 	"\x0eConfigSnapshot\x12%\n" +
 	"\x0econfig_version\x18\x01 \x01(\x04R\rconfigVersion\x12#\n" +
 	"\rinbounds_json\x18\x02 \x01(\tR\finboundsJson\x12!\n" +
 	"\fuser_version\x18\x03 \x01(\x04R\vuserVersion\x12&\n" +
 	"\x05users\x18\x04 \x03(\v2\x10.akari.v1.UserOpR\x05users\x12(\n" +
 	"\x04acme\x18\n" +
-	" \x01(\v2\x14.akari.v1.AcmeConfigR\x04acme\"_\n" +
+	" \x01(\v2\x14.akari.v1.AcmeConfigR\x04acme\x12=\n" +
+	"\x0esource_filters\x18\x1e \x03(\v2\x16.akari.v1.SourceFilterR\rsourceFilters\"\\\n" +
+	"\fSourceFilter\x12\x12\n" +
+	"\x04port\x18\x01 \x01(\rR\x04port\x12\x10\n" +
+	"\x03tcp\x18\x02 \x01(\bR\x03tcp\x12\x10\n" +
+	"\x03udp\x18\x03 \x01(\bR\x03udp\x12\x14\n" +
+	"\x05cidrs\x18\x04 \x03(\tR\x05cidrs\"D\n" +
+	"\x12SourceFilterStatus\x12\x18\n" +
+	"\aapplied\x18\x01 \x01(\bR\aapplied\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\"_\n" +
 	"\n" +
 	"AcmeConfig\x12\x16\n" +
 	"\x06domain\x18\x01 \x01(\tR\x06domain\x12#\n" +
@@ -3303,7 +3477,7 @@ func file_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
+var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
 var file_agent_proto_goTypes = []any{
 	(RemoveMode)(0),              // 0: akari.v1.RemoveMode
 	(CertStatus_State)(0),        // 1: akari.v1.CertStatus.State
@@ -3329,67 +3503,71 @@ var file_agent_proto_goTypes = []any{
 	(*InboundUser)(nil),          // 21: akari.v1.InboundUser
 	(*UserOp)(nil),               // 22: akari.v1.UserOp
 	(*ConfigSnapshot)(nil),       // 23: akari.v1.ConfigSnapshot
-	(*AcmeConfig)(nil),           // 24: akari.v1.AcmeConfig
-	(*UserDelta)(nil),            // 25: akari.v1.UserDelta
-	(*LeaseGrant)(nil),           // 26: akari.v1.LeaseGrant
-	(*Noop)(nil),                 // 27: akari.v1.Noop
-	(*ManifestSignature)(nil),    // 28: akari.v1.ManifestSignature
-	(*UpdateOffer)(nil),          // 29: akari.v1.UpdateOffer
-	(*FetchArtifactRequest)(nil), // 30: akari.v1.FetchArtifactRequest
-	(*ArtifactChunk)(nil),        // 31: akari.v1.ArtifactChunk
-	(*UpdateStatus)(nil),         // 32: akari.v1.UpdateStatus
-	(*PanelDown)(nil),            // 33: akari.v1.PanelDown
-	(*BlockPolicy)(nil),          // 34: akari.v1.BlockPolicy
-	(*BlockRule)(nil),            // 35: akari.v1.BlockRule
-	(*BlockStats)(nil),           // 36: akari.v1.BlockStats
-	(*BlockHits)(nil),            // 37: akari.v1.BlockHits
+	(*SourceFilter)(nil),         // 24: akari.v1.SourceFilter
+	(*SourceFilterStatus)(nil),   // 25: akari.v1.SourceFilterStatus
+	(*AcmeConfig)(nil),           // 26: akari.v1.AcmeConfig
+	(*UserDelta)(nil),            // 27: akari.v1.UserDelta
+	(*LeaseGrant)(nil),           // 28: akari.v1.LeaseGrant
+	(*Noop)(nil),                 // 29: akari.v1.Noop
+	(*ManifestSignature)(nil),    // 30: akari.v1.ManifestSignature
+	(*UpdateOffer)(nil),          // 31: akari.v1.UpdateOffer
+	(*FetchArtifactRequest)(nil), // 32: akari.v1.FetchArtifactRequest
+	(*ArtifactChunk)(nil),        // 33: akari.v1.ArtifactChunk
+	(*UpdateStatus)(nil),         // 34: akari.v1.UpdateStatus
+	(*PanelDown)(nil),            // 35: akari.v1.PanelDown
+	(*BlockPolicy)(nil),          // 36: akari.v1.BlockPolicy
+	(*BlockRule)(nil),            // 37: akari.v1.BlockRule
+	(*BlockStats)(nil),           // 38: akari.v1.BlockStats
+	(*BlockHits)(nil),            // 39: akari.v1.BlockHits
 }
 var file_agent_proto_depIdxs = []int32{
 	9,  // 0: akari.v1.Hello.info:type_name -> akari.v1.AgentInfo
 	12, // 1: akari.v1.Heartbeat.cert:type_name -> akari.v1.CertStatus
 	13, // 2: akari.v1.Heartbeat.metrics:type_name -> akari.v1.NodeMetrics
-	36, // 3: akari.v1.Heartbeat.block:type_name -> akari.v1.BlockStats
-	1,  // 4: akari.v1.CertStatus.state:type_name -> akari.v1.CertStatus.State
-	2,  // 5: akari.v1.CertStatus.error_kind:type_name -> akari.v1.CertStatus.ErrorKind
-	14, // 6: akari.v1.TrafficReport.users:type_name -> akari.v1.UserTraffic
-	3,  // 7: akari.v1.Ack.reason:type_name -> akari.v1.Ack.Reason
-	10, // 8: akari.v1.AgentUp.hello:type_name -> akari.v1.Hello
-	11, // 9: akari.v1.AgentUp.heartbeat:type_name -> akari.v1.Heartbeat
-	15, // 10: akari.v1.AgentUp.traffic:type_name -> akari.v1.TrafficReport
-	16, // 11: akari.v1.AgentUp.ack:type_name -> akari.v1.Ack
-	32, // 12: akari.v1.AgentUp.update_status:type_name -> akari.v1.UpdateStatus
-	20, // 13: akari.v1.AgentUp.latency:type_name -> akari.v1.LatencyReport
-	19, // 14: akari.v1.LatencyReport.results:type_name -> akari.v1.UrlLatency
-	4,  // 15: akari.v1.UserOp.op:type_name -> akari.v1.UserOp.Op
-	21, // 16: akari.v1.UserOp.inbound_users:type_name -> akari.v1.InboundUser
-	22, // 17: akari.v1.ConfigSnapshot.users:type_name -> akari.v1.UserOp
-	24, // 18: akari.v1.ConfigSnapshot.acme:type_name -> akari.v1.AcmeConfig
-	22, // 19: akari.v1.UserDelta.ops:type_name -> akari.v1.UserOp
-	0,  // 20: akari.v1.LeaseGrant.remove_mode:type_name -> akari.v1.RemoveMode
-	28, // 21: akari.v1.UpdateOffer.signatures:type_name -> akari.v1.ManifestSignature
-	5,  // 22: akari.v1.UpdateStatus.state:type_name -> akari.v1.UpdateStatus.State
-	23, // 23: akari.v1.PanelDown.snapshot:type_name -> akari.v1.ConfigSnapshot
-	25, // 24: akari.v1.PanelDown.delta:type_name -> akari.v1.UserDelta
-	27, // 25: akari.v1.PanelDown.noop:type_name -> akari.v1.Noop
-	26, // 26: akari.v1.PanelDown.lease:type_name -> akari.v1.LeaseGrant
-	29, // 27: akari.v1.PanelDown.update_offer:type_name -> akari.v1.UpdateOffer
-	18, // 28: akari.v1.PanelDown.latency_probe:type_name -> akari.v1.LatencyProbeConfig
-	34, // 29: akari.v1.PanelDown.block_policy:type_name -> akari.v1.BlockPolicy
-	35, // 30: akari.v1.BlockPolicy.rules:type_name -> akari.v1.BlockRule
-	37, // 31: akari.v1.BlockStats.hits:type_name -> akari.v1.BlockHits
-	17, // 32: akari.v1.AgentChannel.OpenChannel:input_type -> akari.v1.AgentUp
-	7,  // 33: akari.v1.AgentChannel.Renew:input_type -> akari.v1.RenewRequest
-	30, // 34: akari.v1.AgentChannel.FetchArtifact:input_type -> akari.v1.FetchArtifactRequest
-	6,  // 35: akari.v1.AgentEnrollment.Enroll:input_type -> akari.v1.EnrollRequest
-	33, // 36: akari.v1.AgentChannel.OpenChannel:output_type -> akari.v1.PanelDown
-	8,  // 37: akari.v1.AgentChannel.Renew:output_type -> akari.v1.IssuedCertificate
-	31, // 38: akari.v1.AgentChannel.FetchArtifact:output_type -> akari.v1.ArtifactChunk
-	8,  // 39: akari.v1.AgentEnrollment.Enroll:output_type -> akari.v1.IssuedCertificate
-	36, // [36:40] is the sub-list for method output_type
-	32, // [32:36] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	38, // 3: akari.v1.Heartbeat.block:type_name -> akari.v1.BlockStats
+	25, // 4: akari.v1.Heartbeat.source_filter:type_name -> akari.v1.SourceFilterStatus
+	1,  // 5: akari.v1.CertStatus.state:type_name -> akari.v1.CertStatus.State
+	2,  // 6: akari.v1.CertStatus.error_kind:type_name -> akari.v1.CertStatus.ErrorKind
+	14, // 7: akari.v1.TrafficReport.users:type_name -> akari.v1.UserTraffic
+	3,  // 8: akari.v1.Ack.reason:type_name -> akari.v1.Ack.Reason
+	10, // 9: akari.v1.AgentUp.hello:type_name -> akari.v1.Hello
+	11, // 10: akari.v1.AgentUp.heartbeat:type_name -> akari.v1.Heartbeat
+	15, // 11: akari.v1.AgentUp.traffic:type_name -> akari.v1.TrafficReport
+	16, // 12: akari.v1.AgentUp.ack:type_name -> akari.v1.Ack
+	34, // 13: akari.v1.AgentUp.update_status:type_name -> akari.v1.UpdateStatus
+	20, // 14: akari.v1.AgentUp.latency:type_name -> akari.v1.LatencyReport
+	19, // 15: akari.v1.LatencyReport.results:type_name -> akari.v1.UrlLatency
+	4,  // 16: akari.v1.UserOp.op:type_name -> akari.v1.UserOp.Op
+	21, // 17: akari.v1.UserOp.inbound_users:type_name -> akari.v1.InboundUser
+	22, // 18: akari.v1.ConfigSnapshot.users:type_name -> akari.v1.UserOp
+	26, // 19: akari.v1.ConfigSnapshot.acme:type_name -> akari.v1.AcmeConfig
+	24, // 20: akari.v1.ConfigSnapshot.source_filters:type_name -> akari.v1.SourceFilter
+	22, // 21: akari.v1.UserDelta.ops:type_name -> akari.v1.UserOp
+	0,  // 22: akari.v1.LeaseGrant.remove_mode:type_name -> akari.v1.RemoveMode
+	30, // 23: akari.v1.UpdateOffer.signatures:type_name -> akari.v1.ManifestSignature
+	5,  // 24: akari.v1.UpdateStatus.state:type_name -> akari.v1.UpdateStatus.State
+	23, // 25: akari.v1.PanelDown.snapshot:type_name -> akari.v1.ConfigSnapshot
+	27, // 26: akari.v1.PanelDown.delta:type_name -> akari.v1.UserDelta
+	29, // 27: akari.v1.PanelDown.noop:type_name -> akari.v1.Noop
+	28, // 28: akari.v1.PanelDown.lease:type_name -> akari.v1.LeaseGrant
+	31, // 29: akari.v1.PanelDown.update_offer:type_name -> akari.v1.UpdateOffer
+	18, // 30: akari.v1.PanelDown.latency_probe:type_name -> akari.v1.LatencyProbeConfig
+	36, // 31: akari.v1.PanelDown.block_policy:type_name -> akari.v1.BlockPolicy
+	37, // 32: akari.v1.BlockPolicy.rules:type_name -> akari.v1.BlockRule
+	39, // 33: akari.v1.BlockStats.hits:type_name -> akari.v1.BlockHits
+	17, // 34: akari.v1.AgentChannel.OpenChannel:input_type -> akari.v1.AgentUp
+	7,  // 35: akari.v1.AgentChannel.Renew:input_type -> akari.v1.RenewRequest
+	32, // 36: akari.v1.AgentChannel.FetchArtifact:input_type -> akari.v1.FetchArtifactRequest
+	6,  // 37: akari.v1.AgentEnrollment.Enroll:input_type -> akari.v1.EnrollRequest
+	35, // 38: akari.v1.AgentChannel.OpenChannel:output_type -> akari.v1.PanelDown
+	8,  // 39: akari.v1.AgentChannel.Renew:output_type -> akari.v1.IssuedCertificate
+	33, // 40: akari.v1.AgentChannel.FetchArtifact:output_type -> akari.v1.ArtifactChunk
+	8,  // 41: akari.v1.AgentEnrollment.Enroll:output_type -> akari.v1.IssuedCertificate
+	38, // [38:42] is the sub-list for method output_type
+	34, // [34:38] is the sub-list for method input_type
+	34, // [34:34] is the sub-list for extension type_name
+	34, // [34:34] is the sub-list for extension extendee
+	0,  // [0:34] is the sub-list for field type_name
 }
 
 func init() { file_agent_proto_init() }
@@ -3407,7 +3585,7 @@ func file_agent_proto_init() {
 		(*AgentUp_UpdateStatus)(nil),
 		(*AgentUp_Latency)(nil),
 	}
-	file_agent_proto_msgTypes[27].OneofWrappers = []any{
+	file_agent_proto_msgTypes[29].OneofWrappers = []any{
 		(*PanelDown_Snapshot)(nil),
 		(*PanelDown_Delta)(nil),
 		(*PanelDown_Noop)(nil),
@@ -3422,7 +3600,7 @@ func file_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_proto_rawDesc), len(file_agent_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   32,
+			NumMessages:   34,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

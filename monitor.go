@@ -24,7 +24,8 @@ type agentStats struct {
 // connection and user counts, uptime, the lease, and the machine status
 // (W11, Heartbeat.metrics; smp keeps the previous readings for rates and
 // belongs to this loop while it runs). fill adds the rest (W10
-// Heartbeat.cert, W29 Heartbeat.block; nil = nothing).
+// Heartbeat.cert, W29 Heartbeat.block, W28-a Heartbeat.source_filter;
+// nil = nothing).
 func heartbeatLoop(ctx context.Context, every time.Duration, send func(*pb.AgentUp) error, lease func() (time.Duration, bool), stats func() agentStats, smp *sampler, fill func(*pb.Heartbeat)) {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
