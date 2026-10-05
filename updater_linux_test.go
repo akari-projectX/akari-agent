@@ -820,38 +820,81 @@ func TestOpenRCUnitState(t *testing.T) {
 			return code, err
 		}
 	}
-	u, err := openrcUnitState(dir, "akari-agent", st(rcStarted, nil))
+	alive := func(int) bool { return true }
+	u, err := openrcUnitState(dir, "akari-agent", st(rcStarted, nil), alive)
 	if err != nil || u.Restarts != -1 || u.gaveUp() {
 		t.Fatalf("no counter: %+v %v", u, err)
 	}
 	if err := os.WriteFile(filepath.Join(opts, "start_count"), []byte("2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if u, err = openrcUnitState(dir, "akari-agent", st(rcStarted, nil)); err != nil || u.Restarts != 2 || u.gaveUp() {
+	if u, err = openrcUnitState(dir, "akari-agent", st(rcStarted, nil), alive); err != nil || u.Restarts != 2 || u.gaveUp() {
 		t.Fatalf("started: %+v %v", u, err)
 	}
 	// Stopped by hand: not a give-up.
-	if u, err = openrcUnitState(dir, "akari-agent", st(rcStopped, nil)); err != nil || u.gaveUp() {
+	if u, err = openrcUnitState(dir, "akari-agent", st(rcStopped, nil), alive); err != nil || u.gaveUp() {
 		t.Fatalf("stopped: %+v %v", u, err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "failed", "akari-agent"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if u, err = openrcUnitState(dir, "akari-agent", st(rcStopped, nil)); err != nil || !u.gaveUp() {
+	if u, err = openrcUnitState(dir, "akari-agent", st(rcStopped, nil), alive); err != nil || !u.gaveUp() {
 		t.Fatalf("respawn_max reached: %+v %v", u, err)
 	}
 	for _, c := range []int{rcCrashed, rcUnsupervised} {
-		if u, err = openrcUnitState(dir, "akari-agent", st(c, nil)); err != nil || !u.gaveUp() {
+		if u, err = openrcUnitState(dir, "akari-agent", st(c, nil), alive); err != nil || !u.gaveUp() {
 			t.Fatalf("status %d: %+v %v", c, u, err)
 		}
 	}
-	if _, err = openrcUnitState(dir, "akari-agent", st(0, errors.New("no rc-service"))); err == nil {
+	if _, err = openrcUnitState(dir, "akari-agent", st(0, errors.New("no rc-service")), alive); err == nil {
 		t.Fatal("status error swallowed")
 	}
 	if err := os.WriteFile(filepath.Join(opts, "start_count"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = openrcUnitState(dir, "akari-agent", st(rcStarted, nil)); err == nil {
+	if _, err = openrcUnitState(dir, "akari-agent", st(rcStarted, nil), alive); err == nil {
 		t.Fatal("garbage counter accepted")
+	}
+}
+
+// W32: a child supervise-daemon lost track of (service "started", child
+// gone, nothing respawned) becomes a give-up after openrcStuckAfter.
+func TestOpenRCStuckSupervisor(t *testing.T) {
+	dir := t.TempDir()
+	opts := filepath.Join(dir, "options", "akari-agent")
+	if err := os.MkdirAll(opts, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(opts, "child_pid"), []byte("4242\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Unix(0, 0)
+	dead := true
+	w := &openrcWatch{svcDir: dir, service: "akari-agent",
+		status: func(string) (int, error) { return rcStarted, nil },
+		alive:  func(pid int) bool { return pid != 4242 || !dead },
+		now:    func() time.Time { return clock }}
+	for _, step := range []struct {
+		dt      time.Duration
+		dead    bool
+		gaveUp  bool
+		subWant string
+	}{
+		{0, true, false, "child-gone"},
+		{10 * time.Second, true, false, "child-gone"},
+		{2 * time.Second, false, false, "started"}, // respawned: the clock resets
+		{1 * time.Second, true, false, "child-gone"},
+		{14 * time.Second, true, false, "child-gone"},
+		{1 * time.Second, true, true, "child-gone"},
+	} {
+		clock = clock.Add(step.dt)
+		dead = step.dead
+		u, err := w.state()
+		if err != nil || u.gaveUp() != step.gaveUp || u.Sub != step.subWant {
+			t.Fatalf("after %v: %+v %v", clock, u, err)
+		}
+	}
+	if procAlive(os.Getpid()) != true || procAlive(1<<30) {
+		t.Fatal("procAlive")
 	}
 }

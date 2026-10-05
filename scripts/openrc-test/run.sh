@@ -51,10 +51,11 @@ build_variant() { # version out
   for u in "$W"/src/systemd/* "$W"/src/openrc/*; do printf '# openrc-test build %s\n' "$1" >>"$u"; done
   make -s -C "$W/src" build-testkeys VERSION="$1" OUT="$2" >/dev/null
 }
-# broken VERSION UNITS_JSON OUT: dies on every start, prints the given units.
+# broken VERSION UNITS_JSON OUT: dies on every start (after a second, as a
+# real binary that fails its start does), prints the given units.
 broken() {
   { printf '#!/bin/sh\nif [ "$1" = -print-units ]; then cat <<'"'"'EOF'"'"'\n'
-    cat "$2"; printf '\nEOF\nexit 0\nfi\necho "broken agent build %s" >&2\nexit 3\n' "$1"; } >"$3"
+    cat "$2"; printf '\nEOF\nexit 0\nfi\necho "broken agent build %s" >&2\nsleep 1\nexit 3\n' "$1"; } >"$3"
   chmod 0755 "$3"
 }
 make -s build-testkeys VERSION=v900.0.0 OUT="$W/v0" >/dev/null
@@ -191,7 +192,11 @@ rolled() { x 'cat /var/lib/akari-agent-update/updater.json 2>/dev/null' | grep -
 for _ in $(seq 1 60); do rolled v900.0.2 && break; sleep 1; done
 rolled v900.0.2 || fail "rolled-back version not recorded"
 x '/usr/local/bin/akari-agent -version' | grep -q 'akari-agent v900.0.1 ' || fail "not rolled back to v900.0.1"
-ulog | grep -q 'stopped 3 times' || fail "rollback reason"
+# Normally supervise-daemon's respawn counter; on a loaded host it can lose
+# a child that dies early (service "started", nothing respawned): the
+# updater then calls that a failed boot after openrcStuckAfter.
+ulog | grep -qE 'stopped 3 times|result child-gone' || fail "rollback reason: $(ulog | tail -3)"
+ulog | grep -q 'result child-gone' && echo "   (supervise-daemon lost the child: rolled back by the child-gone check)"
 ulog | grep -q 'installed the new release.s openrc units' || fail "v900.0.2's scripts were not installed"
 ulog | grep -q 'restored the previous openrc units' || fail "scripts not restored"
 units_are 1 || fail "scripts after the rollback are not v900.0.1's"

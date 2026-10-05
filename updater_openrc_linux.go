@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -31,6 +32,49 @@ const (
 	rcCrashed      = 32 // the supervisor is gone, the service still marked started
 	rcUnsupervised = 64 // supervise-daemon no longer answers
 )
+
+// openrcStuckAfter: how long the service may stay "started" while the
+// child supervise-daemon recorded is gone before the updater calls it a
+// failed boot. supervise-daemon respawns after respawn_delay (3 s), but a
+// child that dies at once can be missed by it (seen on loaded CI hosts:
+// the service stays "started", nothing is respawned): without this the
+// updater would only notice at the self-check timeout.
+const openrcStuckAfter = 15 * time.Second
+
+// openrcWatch reads the agent service's state for the watch, turning a
+// child that stays gone into a give-up.
+type openrcWatch struct {
+	svcDir, service string
+	status          func(string) (int, error)
+	alive           func(pid int) bool
+	now             func() time.Time
+	goneSince       time.Time
+}
+
+func (w *openrcWatch) state() (unitState, error) {
+	u, err := openrcUnitState(w.svcDir, w.service, w.status, w.alive)
+	if err != nil || u.Sub != "child-gone" {
+		w.goneSince = time.Time{}
+		return u, err
+	}
+	if w.goneSince.IsZero() {
+		w.goneSince = w.now()
+	} else if w.now().Sub(w.goneSince) >= openrcStuckAfter {
+		u.Active, u.Result = "failed", "child-gone"
+	}
+	return u, nil
+}
+
+// procAlive: pid exists and is not a zombie.
+func procAlive(pid int) bool {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false
+	}
+	// pid (comm) STATE ...: comm may hold spaces and parentheses.
+	i := bytes.LastIndexByte(b, ')')
+	return i < 0 || i+2 >= len(b) || b[i+2] != 'Z'
+}
 
 // openrcRestart restarts the agent service. A service whose supervisor is
 // gone refuses an orderly restart: it is reset to stopped (zap) and
@@ -66,8 +110,10 @@ func openrcStatus(service string) (int, error) {
 // Restarts = supervise-daemon's respawn counter (start_count, reset by
 // every start; -1 when this OpenRC does not keep one), Active "failed"
 // when supervise-daemon gave up (stopped and marked failed: respawn_max
-// reached) or is gone (crashed, unsupervised).
-func openrcUnitState(svcDir, service string, status func(string) (int, error)) (unitState, error) {
+// reached) or is gone (crashed, unsupervised); Sub "child-gone" when the
+// service is started but the child supervise-daemon recorded (child_pid)
+// is not alive (openrcWatch decides when that is a failure).
+func openrcUnitState(svcDir, service string, status func(string) (int, error), alive func(int) bool) (unitState, error) {
 	code, err := status(service)
 	if err != nil {
 		return unitState{}, fmt.Errorf("rc-service %s status: %w", service, err)
@@ -76,6 +122,11 @@ func openrcUnitState(svcDir, service string, status func(string) (int, error)) (
 	switch code {
 	case rcStarted:
 		u.Active, u.Sub = "active", "started"
+		if b, err := os.ReadFile(filepath.Join(svcDir, "options", service, "child_pid")); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 && !alive(pid) {
+				u.Sub = "child-gone"
+			}
+		}
 	case rcStopped:
 		u.Active, u.Sub = "inactive", "stopped"
 		if _, err := os.Stat(filepath.Join(svcDir, "failed", service)); err == nil {

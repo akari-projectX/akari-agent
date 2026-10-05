@@ -138,7 +138,9 @@ func newApplier(stateDir, rootDir, target string, init *initSys, service string,
 	}
 	if init == openrcInit {
 		p.restart = func() error { return openrcRestart(service) }
-		p.unit = func() (unitState, error) { return openrcUnitState(openrcSvcDir, service, openrcStatus) }
+		w := &openrcWatch{svcDir: openrcSvcDir, service: service, status: openrcStatus, alive: procAlive,
+			now: func() time.Time { return p.now() }}
+		p.unit = w.state
 		// OpenRC reads the scripts at each start (and refreshes its
 		// dependency cache when they are newer): nothing to reload.
 		p.reloadUnits = func() error { return nil }
