@@ -1,7 +1,7 @@
 name: ci
 
 # W37 tiered CI. Fast checks (go, govulncheck, check-proto, coverage) run
-# on every PR. Heavy jobs (smoke, systemd self-update, reproducible build)
+# on every PR. Heavy jobs (smoke, systemd/OpenRC self-update, reproducible build)
 # run only when the `changes` job finds a path they cover
 # (scripts/ci-changes.sh); otherwise they are skipped by their job-level
 # `if:`, which reports success, so the required checks never wait.
@@ -38,6 +38,7 @@ jobs:
     outputs:
       smoke: ${{ steps.c.outputs.smoke }}
       systemd: ${{ steps.c.outputs.systemd }}
+      openrc: ${{ steps.c.outputs.openrc }}
       reproducible: ${{ steps.c.outputs.reproducible }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -167,6 +168,28 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make systemd-test
+
+  openrc-update:
+    # W32: the same hand-over on Alpine 3.22 under OpenRC (container with
+    # OpenRC as its init system): the scripts this repository ships
+    # (openrc/, compiled into the binary), the agent under supervise-daemon
+    # as its own user with only CAP_NET_BIND_SERVICE and its state dir
+    # bind-mounted noexec; install -> update -> rollback of a broken
+    # release (respawn counter, and supervise-daemon giving up), scripts
+    # refreshed with each update and restored with its rollback, a hostile
+    # request refused. On PRs only when the updater, the scripts or what
+    # they exercise change (scripts/ci-changes.sh group `openrc`).
+    name: openrc self-update (Alpine, updater service, noexec state dir)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.openrc != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make openrc-test
 
   coverage:
     # ROADMAP §0: statement coverage of the revocation / rate-limit / user-op

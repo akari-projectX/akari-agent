@@ -10,16 +10,18 @@ import (
 	"testing"
 )
 
-// W23: the binary carries systemd/ byte for byte.
+// W23: the binary carries systemd/ (W32: and openrc/) byte for byte.
 func TestEmbeddedUnitsAreTheCanonicalFiles(t *testing.T) {
-	for _, n := range unitNames {
-		want, err := os.ReadFile(filepath.Join("systemd", n))
-		if err != nil {
-			t.Fatal(err)
-		}
-		var b bytes.Buffer
-		if err := printUnit(&b, n); err != nil || !bytes.Equal(b.Bytes(), want) {
-			t.Fatalf("%s: -print-unit differs (%v)", n, err)
+	for _, s := range initSystems {
+		for _, n := range s.units {
+			want, err := os.ReadFile(filepath.Join(s.name, n))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var b bytes.Buffer
+			if err := printUnit(&b, n); err != nil || !bytes.Equal(b.Bytes(), want) {
+				t.Fatalf("%s: -print-unit differs (%v)", n, err)
+			}
 		}
 	}
 	if err := printUnit(&bytes.Buffer{}, "sshd.service"); err == nil {
@@ -29,14 +31,79 @@ func TestEmbeddedUnitsAreTheCanonicalFiles(t *testing.T) {
 	if err := printUnits(&b); err != nil {
 		t.Fatal(err)
 	}
-	got, err := parseUnits(b.Bytes())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for n, u := range embeddedUnits() {
-		if !bytes.Equal(got[n], u) {
-			t.Fatalf("%s: -print-units round trip differs", n)
+	for _, s := range initSystems {
+		got, err := s.parseUnits(b.Bytes())
+		if err != nil {
+			t.Fatal(err)
 		}
+		if len(got) != len(s.units) {
+			t.Fatalf("%s: %d files", s.name, len(got))
+		}
+		for n, u := range s.embeddedUnits() {
+			if !bytes.Equal(got[n], u) {
+				t.Fatalf("%s: -print-units round trip differs", n)
+			}
+		}
+	}
+	// Names are unique across init systems (-print-unit takes a bare name).
+	seen := map[string]bool{}
+	for _, n := range allUnitNames() {
+		if seen[n] {
+			t.Fatalf("%s twice", n)
+		}
+		seen[n] = true
+	}
+	if s, err := initByName("openrc"); err != nil || s != openrcInit {
+		t.Fatal("initByName openrc")
+	}
+	if _, err := initByName("runit"); err == nil {
+		t.Fatal("unknown init accepted")
+	}
+}
+
+// W32: what the OpenRC scripts must keep (the OpenRC test runs them).
+func TestOpenRCScripts(t *testing.T) {
+	agent, _ := embeddedUnit("akari-agent")
+	upd, _ := embeddedUnit("akari-agent-update")
+	for _, l := range []string{
+		"#!/sbin/openrc-run\n",
+		"supervisor=supervise-daemon\n",
+		`command_user="akari-agent:akari-agent"` + "\n",
+		`capabilities="^cap_net_bind_service"` + "\n",
+		`no_new_privs="yes"` + "\n",
+		`umask="0077"` + "\n",
+		"mount -o remount,bind,noexec,nosuid,nodev",
+		// acme.go reads the node certificate where systemd's
+		// LoadCredential= puts it; the script copies it there.
+		"AKARI_CRED=" + filepath.Dir(nodeCertCredFile) + "\n",
+		`"$AKARI_CRED/tls_$f"`,
+		"-init openrc -config $AKARI_CRED/bootstrap.toml -state-dir $AKARI_STATE",
+		`respawn_max="${respawn_max:-0}"`,
+	} {
+		if !bytes.Contains(agent, []byte(l)) {
+			t.Fatalf("openrc/akari-agent lacks %q", l)
+		}
+	}
+	if filepath.Base(nodeCertCredFile) != "tls_fullchain.pem" || filepath.Base(nodeKeyCredFile) != "tls_privkey.pem" {
+		t.Fatal("credential names")
+	}
+	for _, l := range []string{
+		"#!/sbin/openrc-run\n",
+		"AKARI_REQUEST=/var/lib/akari-agent/" + updateDirName + "/" + requestName + "\n",
+		"/usr/local/bin/akari-agent -init openrc -apply-update /var/lib/akari-agent -updater-state /var/lib/akari-agent-update",
+		`no_new_privs="yes"` + "\n",
+	} {
+		if !bytes.Contains(upd, []byte(l)) {
+			t.Fatalf("openrc/akari-agent-update lacks %q", l)
+		}
+	}
+	// The updater must not restart with the agent (it restarts the agent
+	// itself): ordering only, no need/use.
+	if bytes.Contains(upd, []byte("need akari-agent")) || bytes.Contains(upd, []byte("use akari-agent")) {
+		t.Fatal("the updater depends on the agent")
+	}
+	if bytes.Contains(agent, []byte("need akari-agent-update")) {
+		t.Fatal("the agent depends on the updater")
 	}
 }
 
@@ -74,7 +141,7 @@ func TestUnitSandbox(t *testing.T) {
 func TestParseUnitsRefuses(t *testing.T) {
 	doc := func(mod func(map[string]string)) []byte {
 		u := map[string]string{}
-		for n, b := range embeddedUnits() {
+		for n, b := range systemdInit.embeddedUnits() {
 			u[n] = string(b)
 		}
 		mod(u)
@@ -89,13 +156,13 @@ func TestParseUnitsRefuses(t *testing.T) {
 		"NUL":        doc(func(u map[string]string) { u["akari-agent.service"] = "[Unit]\x00" }),
 		"empty list": []byte(`{"units":{}}`),
 	} {
-		if _, err := parseUnits(b); err == nil {
+		if _, err := systemdInit.parseUnits(b); err == nil {
 			t.Fatalf("%s accepted", name)
 		}
 	}
 	// Units a newer release adds are not installed by this updater.
-	got, err := parseUnits(doc(func(u map[string]string) { u["akari-agent-new.timer"] = "[Timer]\n" }))
-	if err != nil || len(got) != len(unitNames) {
+	got, err := systemdInit.parseUnits(doc(func(u map[string]string) { u["akari-agent-new.timer"] = "[Timer]\n" }))
+	if err != nil || len(got) != len(systemdInit.units) {
 		t.Fatalf("%v %v", got, err)
 	}
 }
@@ -103,19 +170,19 @@ func TestParseUnitsRefuses(t *testing.T) {
 func TestStaleUnits(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("INVOCATION_ID", "")
-	if s := staleUnits(dir); s != nil {
+	if s := systemdInit.staleUnits(dir); s != nil {
 		t.Fatalf("not under systemd: %v", s)
 	}
 	t.Setenv("INVOCATION_ID", "abc")
-	if s := staleUnits(dir); s != nil {
+	if s := systemdInit.staleUnits(dir); s != nil {
 		t.Fatalf("no installed agent unit (development run): %v", s)
 	}
-	for n, b := range embeddedUnits() {
+	for n, b := range systemdInit.embeddedUnits() {
 		if err := os.WriteFile(filepath.Join(dir, n), b, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if s := staleUnits(dir); len(s) != 0 {
+	if s := systemdInit.staleUnits(dir); len(s) != 0 {
 		t.Fatalf("current units reported stale: %v", s)
 	}
 	// The pre-W23 agent unit (ProcSubset=pid), and no updater trigger.
@@ -127,11 +194,40 @@ func TestStaleUnits(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "akari-agent-update.path")); err != nil {
 		t.Fatal(err)
 	}
-	if s := staleUnits(dir); !slices.Equal(s, []string{"akari-agent.service", "akari-agent-update.path"}) {
+	if s := systemdInit.staleUnits(dir); !slices.Equal(s, []string{"akari-agent.service", "akari-agent-update.path"}) {
 		t.Fatalf("stale %v", s)
 	}
 	a := &Agent{}
 	if !slices.Equal(a.helloCapabilities(), agentCapabilities) || !slices.Contains(agentCapabilities, "metrics-presence") {
 		t.Fatal("default capabilities")
+	}
+}
+
+func TestStaleUnitsOpenRC(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("INVOCATION_ID", "") // not systemd: -init openrc is the signal
+	if s := openrcInit.staleUnits(dir); s != nil {
+		t.Fatalf("no installed agent script (development run): %v", s)
+	}
+	for n, b := range openrcInit.embeddedUnits() {
+		if err := os.WriteFile(filepath.Join(dir, n), b, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s := openrcInit.staleUnits(dir); len(s) != 0 {
+		t.Fatalf("current scripts reported stale: %v", s)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "akari-agent"), []byte("#!/sbin/openrc-run\n# edited\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "akari-agent-update")); err != nil {
+		t.Fatal(err)
+	}
+	if s := openrcInit.staleUnits(dir); !slices.Equal(s, []string{"akari-agent", "akari-agent-update"}) {
+		t.Fatalf("stale %v", s)
+	}
+	// systemd units in the same directory are not looked at.
+	if s := systemdInit.staleUnits(dir); s != nil {
+		t.Fatalf("systemd: %v", s)
 	}
 }

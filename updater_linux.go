@@ -27,7 +27,7 @@ package main
 // Units (W23): the systemd units of the NEW release are installed with its
 // binary. They come only from the verified copy (`<copy> -print-units`,
 // run before anything is replaced), never from the agent's directory, and
-// only the known names (unitNames) that already exist in the unit
+// only the known names (initSys.units) that already exist in the unit
 // directory are replaced: written atomically (root, 0644), the previous
 // ones kept in <updater state>/units.prev/ and put back on a rollback;
 // `systemctl daemon-reload` before the restart. An updater unit from
@@ -35,6 +35,15 @@ package main
 // update then goes ahead without the units (EROFS, logged), and the agent
 // reports the stale units ("stale-units") until the install command is run
 // once.
+//
+// OpenRC (W32, -init openrc; Alpine): the same, with the init scripts
+// (/etc/init.d/akari-agent and akari-agent-update, root 0755; OpenRC reads
+// them at each start, nothing to reload), `rc-service akari-agent restart`,
+// and supervise-daemon's state for the watch: its respawn counter
+// (<RC_SVCDIR>/options/akari-agent/start_count) stands in for systemd's
+// NRestarts, the service stopped and marked failed (respawn_max reached)
+// or crashed (the supervisor gone) for systemd's start limit. The trigger
+// is the akari-agent-update service's loop (openrc/akari-agent-update).
 
 import (
 	"bytes"
@@ -107,43 +116,55 @@ type applier struct {
 	unit    func() (unitState, error)
 	now     func() time.Time
 	sleep   func(time.Duration)
-	// W23: where the units live, how a verified binary's units are read,
-	// and how systemd is told about new unit files.
+	// W23: the init system (its unit names and modes), where the units
+	// live, how a verified binary's units are read, and how the init
+	// system is told about new unit files.
+	init        *initSys
 	unitDir     string
 	unitsOf     func(binary string) (map[string][]byte, error)
 	reloadUnits func() error
 }
 
-func newApplier(stateDir, rootDir, target, service string, keys []release.PublicKey) *applier {
-	return &applier{
+func newApplier(stateDir, rootDir, target string, init *initSys, service string, keys []release.PublicKey) *applier {
+	p := &applier{
 		stateDir: stateDir, rootDir: rootDir, target: target, version: agentVersion, keys: keys,
 		goos: runtime.GOOS, goarch: runtime.GOARCH,
 		selfCheck: defaultSelfCheck, grace: updaterGrace, maxBoots: defaultMaxBoots, poll: time.Second,
-		restart: func() error {
-			// A unit that tripped its start limit (state failed) refuses
-			// every start until reset: clear it before each restart.
-			if out, err := exec.Command("systemctl", "reset-failed", service).CombinedOutput(); err != nil {
-				slog.Warn("systemctl reset-failed", "error", err, "output", string(bytes.TrimSpace(out)))
-			}
-			out, err := exec.Command("systemctl", "restart", service).CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("systemctl restart %s: %w: %s", service, err, bytes.TrimSpace(out))
-			}
-			return nil
-		},
-		unit: func() (unitState, error) {
-			out, err := exec.Command("systemctl", "show", "-p", "ActiveState,SubState,Result,NRestarts", service).Output()
-			if err != nil {
-				return unitState{}, err
-			}
-			return parseUnitState(string(out))
-		},
-		now:         time.Now,
-		sleep:       time.Sleep,
-		unitDir:     defaultUnitDir,
-		unitsOf:     execPrintUnits,
-		reloadUnits: daemonReload,
+		now:     time.Now,
+		sleep:   time.Sleep,
+		init:    init,
+		unitDir: init.dir,
+		unitsOf: func(binary string) (map[string][]byte, error) { return execPrintUnits(binary, init) },
 	}
+	if init == openrcInit {
+		p.restart = func() error { return openrcRestart(service) }
+		p.unit = func() (unitState, error) { return openrcUnitState(openrcSvcDir, service, openrcStatus) }
+		// OpenRC reads the scripts at each start (and refreshes its
+		// dependency cache when they are newer): nothing to reload.
+		p.reloadUnits = func() error { return nil }
+		return p
+	}
+	p.restart = func() error {
+		// A unit that tripped its start limit (state failed) refuses
+		// every start until reset: clear it before each restart.
+		if out, err := exec.Command("systemctl", "reset-failed", service).CombinedOutput(); err != nil {
+			slog.Warn("systemctl reset-failed", "error", err, "output", string(bytes.TrimSpace(out)))
+		}
+		out, err := exec.Command("systemctl", "restart", service).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("systemctl restart %s: %w: %s", service, err, bytes.TrimSpace(out))
+		}
+		return nil
+	}
+	p.unit = func() (unitState, error) {
+		out, err := exec.Command("systemctl", "show", "-p", "ActiveState,SubState,Result,NRestarts", service).Output()
+		if err != nil {
+			return unitState{}, err
+		}
+		return parseUnitState(string(out))
+	}
+	p.reloadUnits = daemonReload
+	return p
 }
 
 // unitState is what the updater reads of the agent service.
@@ -186,15 +207,16 @@ func parseUnitState(out string) (unitState, error) {
 }
 
 // execPrintUnits runs a verified binary with -print-units (bounded time
-// and output, empty environment) and parses what it prints.
-func execPrintUnits(binary string) (map[string][]byte, error) {
+// and output, empty environment) and parses what it prints (the files of
+// init).
+func execPrintUnits(binary string, init *initSys) (map[string][]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), printUnitsTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, "-print-units")
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 	cmd.Dir = "/"
 	var out limitedBuffer
-	out.limit = 4 * maxUnitSize * len(unitNames)
+	out.limit = 4 * maxUnitSize * len(allUnitNames())
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("%s -print-units: %w", filepath.Base(binary), err)
@@ -202,7 +224,7 @@ func execPrintUnits(binary string) (map[string][]byte, error) {
 	if out.over {
 		return nil, errors.New("-print-units: output too large")
 	}
-	return parseUnits(out.Bytes())
+	return init.parseUnits(out.Bytes())
 }
 
 // limitedBuffer keeps at most limit bytes (and notes when more came).
@@ -232,7 +254,7 @@ func daemonReload() error {
 }
 
 // runApplyUpdate is main's -apply-update mode.
-func runApplyUpdate(stateDir, rootDir, target, service, unitDir string, keys []release.PublicKey, selfCheck time.Duration, maxBoots int) error {
+func runApplyUpdate(stateDir, rootDir, target string, init *initSys, service, unitDir string, keys []release.PublicKey, selfCheck time.Duration, maxBoots int) error {
 	if rootDir == "" {
 		d := os.Getenv("STATE_DIRECTORY")
 		if d == "" {
@@ -250,7 +272,7 @@ func runApplyUpdate(stateDir, rootDir, target, service, unitDir string, keys []r
 		}
 		target = self
 	}
-	p := newApplier(stateDir, rootDir, target, service, keys)
+	p := newApplier(stateDir, rootDir, target, init, service, keys)
 	if unitDir != "" {
 		p.unitDir = unitDir
 	}
@@ -374,7 +396,7 @@ func (p *applier) apply(d *agentDir, st *rootState, req *applyRequest) error {
 	units, err := p.unitsOf(tmp)
 	if err != nil {
 		_ = os.Remove(tmp)
-		return reject(fmt.Errorf("the release's systemd units: %w", err))
+		return reject(fmt.Errorf("the release's %s units: %w", p.init.name, err))
 	}
 	st.Trial = &rootTrial{Version: m.Version, Previous: p.version, RolloutID: req.RolloutID, Started: p.now().UTC()}
 	if err := p.save(st); err != nil {
@@ -406,11 +428,10 @@ func (p *applier) apply(d *agentDir, st *rootState, req *applyRequest) error {
 	}
 	base := -1
 	st0, err := p.unit()
-	if err == nil {
+	if err == nil && st0.Restarts >= 0 {
 		base = st0.Restarts
 	} else {
 		slog.Warn("cannot read the agent's restart counter; relying on the self-check timeout", "error", err)
-		base = -1
 	}
 	if why := p.watch(d, m.Version, base); why != "" {
 		return p.rollback(d, st, m.Version, req.RolloutID, why)
@@ -528,7 +549,7 @@ func (p *applier) watch(d *agentDir, version string, base int) string {
 		}
 		if u, err := p.unit(); err == nil {
 			if u.gaveUp() {
-				return fmt.Sprintf("the new agent crash-looped into systemd's start limit (state %s/%s, result %s) without passing its self-check", u.Active, u.Sub, u.Result)
+				return fmt.Sprintf("the new agent crash-looped into %s's start limit (state %s/%s, result %s) without passing its self-check", p.init.name, u.Active, u.Sub, u.Result)
 			}
 			if base >= 0 && u.Restarts-base >= p.maxBoots {
 				return fmt.Sprintf("the new agent stopped %d times without passing its self-check", u.Restarts-base)
@@ -585,7 +606,7 @@ func (p *applier) installUnits(st *rootState, units map[string][]byte) error {
 		return err
 	}
 	var change []string
-	for _, n := range unitNames {
+	for _, n := range p.init.units {
 		cur, err := readUnit(filepath.Join(p.unitDir, n))
 		if errors.Is(err, os.ErrNotExist) {
 			continue // never create a unit the node does not have
@@ -609,9 +630,9 @@ func (p *applier) installUnits(st *rootState, units map[string][]byte) error {
 		return err
 	}
 	for i, n := range change {
-		err := writeUnitFile(p.unitDir, n, units[n])
+		err := writeUnitFile(p.unitDir, n, units[n], p.init.mode)
 		if i == 0 && errors.Is(err, unix.EROFS) {
-			slog.Warn("systemd units NOT refreshed: this node's updater unit predates unit refresh "+
+			slog.Warn(p.init.name+" units NOT refreshed: this node's updater unit predates unit refresh "+
 				"(its unit directory is read-only); run the panel's install command (重装命令) once",
 				"dir", p.unitDir)
 			st.Trial.Units = false
@@ -625,7 +646,7 @@ func (p *applier) installUnits(st *rootState, units map[string][]byte) error {
 	if err := p.reloadUnits(); err != nil {
 		return err
 	}
-	slog.Info("installed the new release's systemd units", "units", change)
+	slog.Info("installed the new release's "+p.init.name+" units", "units", change)
 	return nil
 }
 
@@ -637,16 +658,16 @@ func (p *applier) restoreUnits(st *rootState) {
 	}
 	prevDir := filepath.Join(p.rootDir, unitsPrevDir)
 	var restored []string
-	for _, n := range unitNames {
+	for _, n := range p.init.units {
 		b, err := readUnit(filepath.Join(prevDir, n))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err == nil {
-			err = writeUnitFile(p.unitDir, n, b)
+			err = writeUnitFile(p.unitDir, n, b, p.init.mode)
 		}
 		if err != nil {
-			slog.Error("cannot restore the previous systemd unit", "unit", n, "error", err)
+			slog.Error("cannot restore the previous "+p.init.name+" unit", "unit", n, "error", err)
 			continue
 		}
 		restored = append(restored, n)
@@ -657,9 +678,9 @@ func (p *applier) restoreUnits(st *rootState) {
 	}
 	syncDir(p.unitDir)
 	if err := p.reloadUnits(); err != nil {
-		slog.Error("systemd reload after restoring the units", "error", err)
+		slog.Error(p.init.name+" reload after restoring the units", "error", err)
 	}
-	slog.Info("restored the previous systemd units", "units", restored)
+	slog.Info("restored the previous "+p.init.name+" units", "units", restored)
 }
 
 // readUnit reads a unit file (no symlink followed, regular, bounded).
@@ -682,9 +703,9 @@ func readUnit(path string) ([]byte, error) {
 // writeUnitFile is writeUnit (tests simulate a read-only unit directory).
 var writeUnitFile = writeUnit
 
-// writeUnit atomically replaces dir/name: a new root-owned 0644 file
+// writeUnit atomically replaces dir/name: a new root-owned file of mode
 // (O_EXCL, no symlink followed), synced, renamed over the old one.
-func writeUnit(dir, name string, b []byte) error {
+func writeUnit(dir, name string, b []byte, mode os.FileMode) error {
 	tmp := filepath.Join(dir, "."+name+".akari-new")
 	_ = os.Remove(tmp)
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, 0o600)
@@ -693,7 +714,7 @@ func writeUnit(dir, name string, b []byte) error {
 	}
 	_, err = f.Write(b)
 	if err == nil {
-		err = f.Chmod(0o644) // explicit: the unit's UMask=0077 would make it 0600
+		err = f.Chmod(mode) // explicit: the unit's UMask=0077 would make it 0600
 	}
 	if err == nil {
 		err = f.Sync()

@@ -1,7 +1,7 @@
 FUZZ_MAIN = FuzzBuildConfig FuzzRewriteCertPaths FuzzBuildUser FuzzInboundTCPPorts FuzzACMEConfig FuzzProcParsers FuzzStateHash FuzzLoadConfig FuzzApplyRequest
 FUZZ_RELEASE = FuzzParseManifest FuzzCompareVersions FuzzVerify FuzzParseKeys
 
-.PHONY: fuzz cover third-party check-third-party bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb sync-units check-units vet fmt-check test test-canary vulncheck ci
+.PHONY: fuzz cover third-party check-third-party bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb sync-units check-units openrc-test vet fmt-check test test-canary vulncheck ci
 
 # Canonical contract lives in akari-panel/proto/agent.proto. This repo vendors
 # a copy: `make sync-proto` pulls the sibling checkout's version and
@@ -170,6 +170,10 @@ cover:
 # CI job `systemd-update`. WORK: scratch dir (default: mktemp).
 systemd-test:
 	scripts/systemd-test/run.sh
+
+# W32: the same on Alpine under OpenRC (openrc/ scripts, supervise-daemon).
+openrc-test:
+	scripts/openrc-test/run.sh
 
 # M2-6 overhead benchmarks at 10k users per node (bench_test.go; results in
 # akari-panel/docs/PERF.md).

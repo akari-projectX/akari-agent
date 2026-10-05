@@ -46,29 +46,50 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	showLicenses := flag.Bool("licenses", false, "print the licensing of this binary and the third-party licence texts, then exit")
 	showKeys := flag.Bool("release-keys", false, "print the pinned self-update release keys and exit")
-	showUnit := flag.String("print-unit", "", "print the systemd unit NAME this release carries and exit "+
-		"(akari-agent.service, akari-agent-update.service, akari-agent-update.path)")
-	showUnits := flag.Bool("print-units", false, "print the systemd units this release carries as JSON and exit (the updater reads them)")
-	unitDir := flag.String("unit-dir", defaultUnitDir, "where the systemd units are installed (the updater replaces them on an update; "+
-		"the agent reports when they differ from its own)")
+	showUnit := flag.String("print-unit", "", "print the service file NAME this release carries and exit "+
+		"(systemd: akari-agent.service, akari-agent-update.service, akari-agent-update.path; OpenRC: akari-agent, akari-agent-update)")
+	showUnits := flag.Bool("print-units", false, "print the service files this release carries as JSON and exit (the updater reads them)")
+	initName := flag.String("init", systemdInit.name, "the init system the agent is installed under: systemd or openrc "+
+		"(sets the defaults of -unit-dir, -updater-unit and -update-service)")
+	unitDir := flag.String("unit-dir", systemdInit.dir, "where the service files are installed (the updater replaces them on an update; "+
+		"the agent reports when they differ from its own; default by -init: /etc/systemd/system or /etc/init.d)")
 	selfCheck := flag.Duration("update-self-check", defaultSelfCheck,
 		"after a self-update: how long the new binary has to connect and apply the panel's state before it is rolled back")
 	maxBoots := flag.Int("update-max-boots", defaultMaxBoots,
 		"after a self-update: restarts of the new binary without a passed self-check before the updater rolls it back")
-	updaterUnit := flag.String("updater-unit", defaultUpdaterUnit,
-		"the updater's trigger unit; self-update is refused while it is missing (\"\" = do not check)")
+	updaterUnit := flag.String("updater-unit", systemdInit.trigger,
+		"the updater's trigger unit; self-update is refused while it is missing (\"\" = do not check; "+
+			"default by -init: /etc/systemd/system/akari-agent-update.path or /etc/init.d/akari-agent-update)")
 	applyUpdate := flag.String("apply-update", "",
 		"UPDATER MODE (root, akari-agent-update.service): verify and install the update the agent staged in this "+
 			"state directory, restart the agent and watch its self-check; then exit")
 	updaterState := flag.String("updater-state", "", "updater mode: its own state directory (default: $STATE_DIRECTORY)")
 	updateTarget := flag.String("update-target", "", "updater mode: the installed binary to replace (default: this executable)")
-	updateService := flag.String("update-service", "akari-agent.service", "updater mode: the agent's systemd service")
+	updateService := flag.String("update-service", systemdInit.service,
+		"updater mode: the agent's service (default by -init: akari-agent.service or akari-agent)")
 	heartbeat := flag.Duration("heartbeat-interval", 15*time.Second,
 		"how often the agent reports its machine status (heartbeat), 1s..5m")
 	acmeRoots := flag.String("acme-roots", "", "PEM file of extra CA roots trusted for the ACME directory (tests; default: system roots)")
 	acmeHTTPPort := flag.Int("acme-http-port", 80, "TCP port the HTTP-01 challenge is answered on (the CA always connects to 80; tests only)")
 	acmeTLSPort := flag.Int("acme-tls-port", 443, "TCP port the TLS-ALPN-01 challenge is answered on (the CA always connects to 443; tests only)")
 	flag.Parse()
+	initSys, err := initByName(*initName)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	// W32: the per-init defaults of the flags not given explicitly.
+	set := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if !set["unit-dir"] {
+		*unitDir = initSys.dir
+	}
+	if !set["updater-unit"] {
+		*updaterUnit = initSys.trigger
+	}
+	if !set["update-service"] {
+		*updateService = initSys.service
+	}
 	if *showVersion {
 		fmt.Println(versionString())
 		return
@@ -115,7 +136,7 @@ func main() {
 			slog.Error("updater", "error", keyErr)
 			os.Exit(1)
 		}
-		if err := runApplyUpdate(*applyUpdate, *updaterState, *updateTarget, *updateService, *unitDir, keys, *selfCheck, *maxBoots); err != nil {
+		if err := runApplyUpdate(*applyUpdate, *updaterState, *updateTarget, initSys, *updateService, *unitDir, keys, *selfCheck, *maxBoots); err != nil {
 			slog.Error("updater failed", "error", err)
 			os.Exit(1)
 		}
@@ -162,10 +183,10 @@ func main() {
 	a.upd = upd
 	a.trial = newTrialState(trial)
 	// W23: units installed by an older installer/updater (or edited).
-	if stale := staleUnits(*unitDir); len(stale) > 0 {
+	if stale := initSys.staleUnits(*unitDir); len(stale) > 0 {
 		a.capabilities = append(slices.Clone(agentCapabilities), capStaleUnits)
-		slog.Warn("the installed systemd units are not the ones this release carries; run the panel's install "+
-			"command (重装命令) once (local changes belong in a drop-in)", "units", stale, "dir", *unitDir)
+		slog.Warn("the installed "+initSys.name+" units are not the ones this release carries; run the panel's "+
+			"install command (重装命令) once (local changes belong in a drop-in or /etc/conf.d)", "units", stale, "dir", *unitDir)
 	}
 	logMetricsAvailability()
 	a.finalsStore = &finalsStore{dir: dir}

@@ -37,9 +37,11 @@ type updaterEnv struct {
 }
 
 // oldUnits: what the node runs before the update (W23).
-func oldUnits() map[string][]byte {
+func oldUnits() map[string][]byte { return oldUnitsOf(systemdInit) }
+
+func oldUnitsOf(s *initSys) map[string][]byte {
 	out := map[string][]byte{}
-	for _, n := range unitNames {
+	for _, n := range s.units {
 		out[n] = []byte("# old " + n + "\n[Unit]\n")
 	}
 	return out
@@ -53,7 +55,9 @@ func (e *updaterEnv) unit(name string) string {
 	return string(b)
 }
 
-func newUpdaterEnv(t *testing.T) *updaterEnv {
+func newUpdaterEnv(t *testing.T) *updaterEnv { t.Helper(); return newUpdaterEnvFor(t, systemdInit) }
+
+func newUpdaterEnvFor(t *testing.T, init *initSys) *updaterEnv {
 	t.Helper()
 	root := t.TempDir()
 	state := filepath.Join(root, "var/lib/private/akari-agent")
@@ -68,7 +72,7 @@ func newUpdaterEnv(t *testing.T) *updaterEnv {
 	if err := os.WriteFile(target, []byte("installed v1.0.0"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	p := newApplier(state, filepath.Join(root, "var/lib/akari-agent-update"), target, "akari-agent.service",
+	p := newApplier(state, filepath.Join(root, "var/lib/akari-agent-update"), target, init, init.service,
 		[]release.PublicKey{e.k.pub})
 	p.version = "v1.0.0"
 	p.goos, p.goarch = "linux", "amd64"
@@ -83,16 +87,16 @@ func newUpdaterEnv(t *testing.T) *updaterEnv {
 		return nil
 	}
 	p.unit = func() (unitState, error) { return unitState{Restarts: int(e.nRestart.Load()), Active: "active"}, nil }
-	e.unitDir = filepath.Join(root, "etc/systemd/system")
+	e.unitDir = filepath.Join(root, strings.TrimPrefix(init.dir, "/"))
 	if err := os.MkdirAll(e.unitDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for n, b := range oldUnits() {
-		if err := os.WriteFile(filepath.Join(e.unitDir, n), b, 0o644); err != nil {
+	for n, b := range oldUnitsOf(init) {
+		if err := os.WriteFile(filepath.Join(e.unitDir, n), b, init.mode); err != nil {
 			t.Fatal(err)
 		}
 	}
-	e.newUnits = embeddedUnits()
+	e.newUnits = init.embeddedUnits()
 	p.unitDir = e.unitDir
 	p.unitsOf = func(bin string) (map[string][]byte, error) {
 		// Read from the verified root-only copy, never the staged file.
@@ -203,7 +207,7 @@ func TestApplyInstallsVerifiedCopyAndConfirms(t *testing.T) {
 	}
 	// W23: the new release's units are installed (root 0644), systemd
 	// reloaded once; the replaced ones are kept.
-	for _, n := range unitNames {
+	for _, n := range systemdInit.units {
 		if e.unit(n) != string(e.newUnits[n]) {
 			t.Fatalf("%s not refreshed: %q", n, e.unit(n))
 		}
@@ -272,7 +276,7 @@ func TestApplyUnits(t *testing.T) {
 	})
 	t.Run("pre-W23 updater unit (read-only unit dir): update without the units", func(t *testing.T) {
 		e := newUpdaterEnv(t)
-		writeUnitFile = func(string, string, []byte) error { return &os.PathError{Op: "open", Err: syscall.EROFS} }
+		writeUnitFile = func(string, string, []byte, os.FileMode) error { return &os.PathError{Op: "open", Err: syscall.EROFS} }
 		t.Cleanup(func() { writeUnitFile = writeUnit })
 		e.stage("v1.1.0", []byte("new agent v1.1.0"), nil)
 		e.onRestart = func(int32) { e.confirm("v1.1.0") }
@@ -289,11 +293,11 @@ func TestApplyUnits(t *testing.T) {
 	t.Run("a unit write failure refuses the update and restores", func(t *testing.T) {
 		e := newUpdaterEnv(t)
 		n := 0
-		writeUnitFile = func(dir, name string, b []byte) error {
+		writeUnitFile = func(dir, name string, b []byte, mode os.FileMode) error {
 			if n++; n == 2 {
 				return errors.New("disk full")
 			}
-			return writeUnit(dir, name, b)
+			return writeUnit(dir, name, b, mode)
 		}
 		t.Cleanup(func() { writeUnitFile = writeUnit })
 		e.stage("v1.1.0", []byte("new agent v1.1.0"), nil)
@@ -303,7 +307,7 @@ func TestApplyUnits(t *testing.T) {
 		if r := e.result(); r.State != resRejected || !strings.Contains(r.Error, "disk full") {
 			t.Fatalf("result %+v", r)
 		}
-		for _, u := range unitNames {
+		for _, u := range systemdInit.units {
 			if e.unit(u) != string(oldUnits()[u]) {
 				t.Fatalf("%s not restored: %q", u, e.unit(u))
 			}
@@ -343,7 +347,7 @@ func TestApplyUnits(t *testing.T) {
 		if e.installed() != "installed v1.0.0" || e.result().State != resRolledBack {
 			t.Fatalf("installed %q result %+v", e.installed(), e.result())
 		}
-		for _, u := range unitNames {
+		for _, u := range systemdInit.units {
 			if e.unit(u) != string(oldUnits()[u]) {
 				t.Fatalf("%s not restored: %q", u, e.unit(u))
 			}
@@ -363,9 +367,9 @@ func TestApplyInterruptedBeforeTheBinary(t *testing.T) {
 	e := newUpdaterEnv(t)
 	e.stage("v1.1.0", []byte("new agent v1.1.0"), nil)
 	n := 0
-	writeUnitFile = func(dir, name string, b []byte) error {
-		err := writeUnit(dir, name, b)
-		if n++; n == len(unitNames) {
+	writeUnitFile = func(dir, name string, b []byte, mode os.FileMode) error {
+		err := writeUnit(dir, name, b, mode)
+		if n++; n == len(systemdInit.units) {
 			panic(errStop) // the last unit written, then the process dies
 		}
 		return err
@@ -386,7 +390,7 @@ func TestApplyInterruptedBeforeTheBinary(t *testing.T) {
 	if err := e.p.run(); err != nil { // the next trigger (still the old binary)
 		t.Fatal(err)
 	}
-	for _, u := range unitNames {
+	for _, u := range systemdInit.units {
 		if e.unit(u) != string(oldUnits()[u]) {
 			t.Fatalf("%s not restored: %q", u, e.unit(u))
 		}
@@ -453,7 +457,7 @@ func TestApplyRollsBack(t *testing.T) {
 				t.Fatalf("restarts %d (install + rollback)", e.restarts.Load())
 			}
 			// W23: the previous units are back, systemd reloaded twice.
-			for _, u := range unitNames {
+			for _, u := range systemdInit.units {
 				if e.unit(u) != string(oldUnits()[u]) {
 					t.Fatalf("%s not restored: %q", u, e.unit(u))
 				}
@@ -724,5 +728,130 @@ func TestParseUnitState(t *testing.T) {
 	u, _ = parseUnitState("Result=success\nNRestarts=2\nActiveState=activating\nSubState=auto-restart\n")
 	if u.gaveUp() {
 		t.Fatalf("a restarting unit is not given up: %+v", u)
+	}
+}
+
+// W32: under OpenRC the updater installs the release's init scripts
+// (executable) and puts them back on a rollback, as it does the systemd
+// units.
+func TestApplyOpenRC(t *testing.T) {
+	t.Run("installed with the binary and confirmed", func(t *testing.T) {
+		e := newUpdaterEnvFor(t, openrcInit)
+		e.stage("v1.1.0", []byte("new agent v1.1.0"), nil)
+		e.onRestart = func(int32) { e.confirm("v1.1.0") }
+		if err := e.p.run(); err != nil {
+			t.Fatal(err)
+		}
+		if e.installed() != "new agent v1.1.0" || e.result().State != resConfirmed {
+			t.Fatalf("installed %q result %+v", e.installed(), e.result())
+		}
+		for _, n := range openrcInit.units {
+			if e.unit(n) != string(e.newUnits[n]) {
+				t.Fatalf("%s not refreshed: %q", n, e.unit(n))
+			}
+			if fi, _ := os.Stat(filepath.Join(e.unitDir, n)); fi.Mode().Perm() != 0o755 {
+				t.Fatalf("%s mode %v", n, fi.Mode().Perm())
+			}
+		}
+		for _, n := range systemdInit.units {
+			if _, err := os.Stat(filepath.Join(e.unitDir, n)); !os.IsNotExist(err) {
+				t.Fatalf("systemd unit %s written on an OpenRC node", n)
+			}
+		}
+	})
+	t.Run("respawn loop: binary and scripts rolled back", func(t *testing.T) {
+		e := newUpdaterEnvFor(t, openrcInit)
+		e.stage("v1.1.0", []byte("broken v1.1.0"), nil)
+		e.onRestart = func(n int32) {
+			if n == 1 {
+				e.p.unit = func() (unitState, error) {
+					return unitState{Restarts: int(e.nRestart.Add(1)), Active: "active", Sub: "started"}, nil
+				}
+			}
+		}
+		if err := e.p.run(); err != nil {
+			t.Fatal(err)
+		}
+		if e.installed() != "installed v1.0.0" || e.result().State != resRolledBack {
+			t.Fatalf("installed %q result %+v", e.installed(), e.result())
+		}
+		for _, n := range openrcInit.units {
+			if e.unit(n) != string(oldUnitsOf(openrcInit)[n]) {
+				t.Fatalf("%s not restored: %q", n, e.unit(n))
+			}
+			if fi, _ := os.Stat(filepath.Join(e.unitDir, n)); fi.Mode().Perm() != 0o755 {
+				t.Fatalf("%s mode %v after the restore", n, fi.Mode().Perm())
+			}
+		}
+	})
+	t.Run("supervise-daemon gave up: fast rollback", func(t *testing.T) {
+		e := newUpdaterEnvFor(t, openrcInit)
+		e.stage("v1.1.0", []byte("broken v1.1.0"), nil)
+		e.onRestart = func(n int32) {
+			if n == 1 {
+				e.p.unit = func() (unitState, error) {
+					return unitState{Restarts: 1, Active: "failed", Sub: "stopped", Result: "respawn-limit"}, nil
+				}
+			}
+		}
+		if err := e.p.run(); err != nil {
+			t.Fatal(err)
+		}
+		if r := e.result(); r.State != resRolledBack || !strings.Contains(r.Error, "openrc's start limit") {
+			t.Fatalf("result %+v", r)
+		}
+	})
+}
+
+func TestOpenRCUnitState(t *testing.T) {
+	dir := t.TempDir()
+	opts := filepath.Join(dir, "options", "akari-agent")
+	if err := os.MkdirAll(opts, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "failed"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st := func(code int, err error) func(string) (int, error) {
+		return func(svc string) (int, error) {
+			if svc != "akari-agent" {
+				t.Errorf("service %q", svc)
+			}
+			return code, err
+		}
+	}
+	u, err := openrcUnitState(dir, "akari-agent", st(rcStarted, nil))
+	if err != nil || u.Restarts != -1 || u.gaveUp() {
+		t.Fatalf("no counter: %+v %v", u, err)
+	}
+	if err := os.WriteFile(filepath.Join(opts, "start_count"), []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if u, err = openrcUnitState(dir, "akari-agent", st(rcStarted, nil)); err != nil || u.Restarts != 2 || u.gaveUp() {
+		t.Fatalf("started: %+v %v", u, err)
+	}
+	// Stopped by hand: not a give-up.
+	if u, err = openrcUnitState(dir, "akari-agent", st(rcStopped, nil)); err != nil || u.gaveUp() {
+		t.Fatalf("stopped: %+v %v", u, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "failed", "akari-agent"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if u, err = openrcUnitState(dir, "akari-agent", st(rcStopped, nil)); err != nil || !u.gaveUp() {
+		t.Fatalf("respawn_max reached: %+v %v", u, err)
+	}
+	for _, c := range []int{rcCrashed, rcUnsupervised} {
+		if u, err = openrcUnitState(dir, "akari-agent", st(c, nil)); err != nil || !u.gaveUp() {
+			t.Fatalf("status %d: %+v %v", c, u, err)
+		}
+	}
+	if _, err = openrcUnitState(dir, "akari-agent", st(0, errors.New("no rc-service"))); err == nil {
+		t.Fatal("status error swallowed")
+	}
+	if err := os.WriteFile(filepath.Join(opts, "start_count"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = openrcUnitState(dir, "akari-agent", st(rcStarted, nil)); err == nil {
+		t.Fatal("garbage counter accepted")
 	}
 }
