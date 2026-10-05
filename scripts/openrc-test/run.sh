@@ -35,7 +35,10 @@ trap cleanup EXIT
 x() { docker exec "$C" sh -c "$1"; }
 fail() {
   echo "FAIL: $*"
-  x 'tail -40 /var/log/akari-agent/agent.log; echo "-- updater"; tail -40 /var/log/akari-agent-update.log' || true
+  x 'tail -40 /var/log/akari-agent/agent.log; echo "-- updater"; tail -40 /var/log/akari-agent-update.log
+     echo "-- processes"; ps -o pid,ppid,user,args; echo "-- rc-status"; rc-status -a 2>&1 | grep -i akari
+     echo "-- supervise-daemon state"; for f in /run/openrc/options/akari-agent/*; do echo "$f=$(cat "$f")"; done
+     ls /run/openrc/failed /run/openrc/daemons/akari-agent 2>&1' || true
   exit 1
 }
 
