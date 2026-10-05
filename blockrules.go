@@ -57,9 +57,6 @@ import (
 	"akari/agent/pb"
 )
 
-// capBlockRules: the Hello capability for PanelDown.block_policy.
-const capBlockRules = "block-rules"
-
 // blockOutboundTag: the blackhole outbound every rule targets. The "akari-"
 // prefix is reserved by the panel (no admin inbound/outbound may use it).
 const blockOutboundTag = "akari-block"
