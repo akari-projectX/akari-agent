@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -277,6 +278,45 @@ func TestACMERenewalReplacesFilesAtomically(t *testing.T) {
 	ents, _ := os.ReadDir(filepath.Dir(f.cert))
 	if len(ents) != 2 {
 		t.Fatalf("store has %d entries", len(ents))
+	}
+}
+
+// A CA that refuses the ARI "replaces" must not block the renewal: pebble
+// keys issued serials by their minimal bytes while the ARI certificate ID
+// carries the DER bytes, so a serial with the high bit set (a leading zero
+// byte in DER) is "not found" (serverInternal). This made the canary flaky.
+func TestACMERenewalOrdersWithoutARIWhenRefused(t *testing.T) {
+	m, ca := newTestCertManager(t, 3600)
+	f, _, _ := m.Configure(acmeCfgFor(ca), "[]")
+	m.step(context.Background())
+	first := verifyIssued(t, ca, f)
+	refused := *first
+	refused.SerialNumber = new(big.Int).SetUint64(0x80_11_22_33_44_55_66)
+	certPEM, _, _, err := m.order(context.Background(), m.cfg, m.tcpPorts, "", &refused)
+	if err != nil {
+		t.Fatalf("renewal with a refused ARI certificate ID: %v", err)
+	}
+	if renewed, _, err := nextCert(certPEM); err != nil || renewed.SerialNumber.Cmp(first.SerialNumber) == 0 {
+		t.Fatalf("not renewed: %v", err)
+	}
+}
+
+func TestARIRefused(t *testing.T) {
+	for typ, want := range map[string]bool{
+		acme.ProblemTypeAlreadyReplaced: true,
+		acme.ProblemTypeMalformed:       true,
+		acme.ProblemTypeServerInternal:  true,
+		acme.ProblemTypeRateLimited:     false,
+		acme.ProblemTypeUnauthorized:    false,
+		acme.ProblemTypeConnection:      false,
+	} {
+		err := fmt.Errorf("creating new order: %w", acme.Problem{Type: typ})
+		if got := ariRefused(err); got != want {
+			t.Errorf("%s: %v", typ, got)
+		}
+	}
+	if ariRefused(errors.New("dial tcp: connection refused")) {
+		t.Error("a non-ACME error is not an ARI refusal")
 	}
 }
 
