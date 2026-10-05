@@ -129,13 +129,18 @@ type CoreManager struct {
 	// see ReloadInbounds).
 	acmeTags        []string
 	acmePlaceholder bool
+	// blocks: W29 block policy and counters (kept across instances);
+	// sniffed: inbounds of the running instance whose sniffing the policy
+	// turned on (blockrules.go).
+	blocks  *blockState
+	sniffed map[string]bool
 	// onStart is a test seam, called under mu right after a new instance
 	// is installed. Always nil in production.
 	onStart func(*core.Instance)
 }
 
 func NewCoreManager() *CoreManager {
-	m := &CoreManager{sessionID: newSessionID()}
+	m := &CoreManager{sessionID: newSessionID(), blocks: newBlockState()}
 	m.resetUsersLocked()
 	return m
 }
@@ -206,6 +211,7 @@ func (m *CoreManager) stopLocked() *pb.TrafficReport {
 		m.kinds = nil
 		m.acmeTags = nil
 		m.acmePlaceholder = false
+		m.sniffed = nil
 	}
 	m.inboundsJSON = ""
 	m.sessionID = newSessionID()
@@ -232,7 +238,7 @@ func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) (*pb.Traf
 
 	final := m.stopLocked()
 
-	b, err := newInstanceWith(inboundsJSON, m.nodeCert)
+	b, err := newInstanceFor(inboundsJSON, m.nodeCert, m.blocks.sniffTags())
 	if err != nil {
 		return final, err
 	}
@@ -245,6 +251,8 @@ func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) (*pb.Traf
 	m.acmeTags = b.acmeTags
 	m.acmePlaceholder = m.nodeCert != nil && m.nodeCert.placeholder && len(b.acmeTags) > 0
 	m.inboundsJSON = inboundsJSON
+	m.sniffed = tagSet(b.sniffed)
+	m.publishBlocksLocked()
 	if m.onStart != nil {
 		m.onStart(b.inst)
 	}
@@ -294,22 +302,43 @@ func (m *CoreManager) ReloadInbounds() error {
 	if m.instance == nil || len(m.acmeTags) == 0 {
 		return nil
 	}
-	var inbounds []json.RawMessage
-	if err := json.Unmarshal([]byte(m.inboundsJSON), &inbounds); err != nil {
-		return fmt.Errorf("parse inbounds: %w", err)
-	}
-	cfg, _, _, err := buildConfig(inbounds, m.nodeCert)
+	cfg, err := m.configLocked(m.blocks.sniffTags())
 	if err != nil {
 		return err
 	}
+	if err := m.reloadInboundsLocked(cfg.config.Inbound, m.acmeTags); err != nil {
+		return err
+	}
+	m.acmePlaceholder = false
+	return nil
+}
+
+// configLocked builds the running instance's config again (same inbounds,
+// node certificate, and the given sniffing set).
+func (m *CoreManager) configLocked(sniff map[string]bool) (*builtConfig, error) {
+	var inbounds []json.RawMessage
+	if err := json.Unmarshal([]byte(m.inboundsJSON), &inbounds); err != nil {
+		return nil, fmt.Errorf("parse inbounds: %w", err)
+	}
+	return buildConfigFor(inbounds, m.nodeCert, sniff)
+}
+
+// reloadInboundsLocked swaps the handlers of tags for fresh ones built from
+// handlers (a config of the running inbounds), re-adding each live user
+// with its existing *MemoryUser (same gate identity). Every other inbound,
+// the session, the counters and the gate stay. What survives on a swapped
+// inbound is the transport's business: connections a listener owns (QUIC,
+// UDP sessions, HTTP/2-based transports) close with it; accepted raw TCP
+// connections keep running (blockrules_test.go).
+func (m *CoreManager) reloadInboundsLocked(handlers []*core.InboundHandlerConfig, tags []string) error {
 	im, err := m.manager()
 	if err != nil {
 		return err
 	}
 	ctx := context.Background()
-	for _, tag := range m.acmeTags {
+	for _, tag := range tags {
 		var hc *core.InboundHandlerConfig
-		for _, in := range cfg.Inbound {
+		for _, in := range handlers {
 			if in.Tag == tag {
 				hc = in
 				break
@@ -337,8 +366,99 @@ func (m *CoreManager) ReloadInbounds() error {
 			}
 		}
 	}
-	m.acmePlaceholder = false
 	return nil
+}
+
+// SetBlockPolicy installs a W29 block policy (PanelDown.block_policy). The
+// rules are swapped atomically on the running instance (no rebuild, no
+// dropped connection); inbounds whose sniffing the change turns on or off
+// get new handlers (see reloadInboundsLocked). A policy that does not
+// validate or compile changes nothing and is reported in Heartbeat.block;
+// an error is returned only when swapping handlers failed (the instance is
+// then partly updated: the caller asks the panel for a Snapshot).
+func (m *CoreManager) SetBlockPolicy(p *pb.BlockPolicy) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := validateBlockPolicy(p); err != nil {
+		m.blocks.setError(err)
+		return nil
+	}
+	if _, _, err := compileBlockRules(p); err != nil {
+		m.blocks.setError(err)
+		return nil
+	}
+	m.blocks.mu.Lock()
+	m.blocks.policy = p
+	m.blocks.mu.Unlock()
+	if m.instance == nil {
+		m.blocks.setApplied("")
+		return nil
+	}
+	cfg, err := m.configLocked(policySniffTags(p))
+	if err != nil {
+		m.blocks.setError(err)
+		return err
+	}
+	want := tagSet(cfg.sniffed)
+	var changed []string
+	for _, tag := range m.tags {
+		if want[tag] != m.sniffed[tag] {
+			changed = append(changed, tag)
+		}
+	}
+	if len(changed) > 0 {
+		if err := m.reloadInboundsLocked(cfg.config.Inbound, changed); err != nil {
+			m.blocks.setError(err)
+			return err
+		}
+		m.sniffed = want
+	}
+	m.publishBlocksLocked()
+	return nil
+}
+
+// publishBlocksLocked puts the current policy's rules in force on the
+// running instance (or removes them, and the blackhole outbound, when off).
+func (m *CoreManager) publishBlocksLocked() {
+	if m.instance == nil || m.gate == nil || m.gate.blocks == nil {
+		return
+	}
+	m.blocks.mu.Lock()
+	p := m.blocks.policy
+	m.blocks.mu.Unlock()
+	if p == nil || len(p.InboundTags) == 0 {
+		m.gate.blocks.set.Store(nil)
+		removeBlockOutbound(m.instance)
+		m.blocks.setApplied("")
+		return
+	}
+	if err := ensureBlockOutbound(m.instance); err != nil {
+		m.blocks.setError(err)
+		return
+	}
+	m.blocks.mu.Lock()
+	set, err := newBlockSet(m.instance, m.gate, p, m.blocks.counter)
+	m.blocks.mu.Unlock()
+	if err != nil {
+		m.blocks.setError(err)
+		return
+	}
+	m.gate.blocks.set.Store(set)
+	m.blocks.setApplied(p.Version)
+}
+
+// BlockStats: Heartbeat.block (nil before any policy and any hit).
+func (m *CoreManager) BlockStats() *pb.BlockStats { return m.blocks.stats() }
+
+func tagSet(tags []string) map[string]bool {
+	if len(tags) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(tags))
+	for _, t := range tags {
+		out[t] = true
+	}
+	return out
 }
 
 // WouldDropCredential reports whether ops would remove or change a live
@@ -805,20 +925,41 @@ type built struct {
 	kinds map[string]inboundKind
 	// acmeTags: inbounds pointed at the ACME-managed node certificate.
 	acmeTags []string
+	// sniffed: inbounds whose sniffing the block policy turned on (W29).
+	sniffed []string
 }
 
 func newInstance(inboundsJSON string) (*built, error) {
 	return newInstanceWith(inboundsJSON, nil)
 }
 
+// builtConfig is xray's config for a set of inbounds and what building it
+// learned.
+type builtConfig struct {
+	config   *core.Config
+	kinds    map[string]inboundKind
+	acmeTags []string
+	sniffed  []string
+}
+
 // buildConfig turns the inbounds into xray's config (gate in place of the
 // dispatcher), with node certificate entries pointed at cert (if set).
 func buildConfig(inbounds []json.RawMessage, cert *certFiles) (*core.Config, map[string]inboundKind, []string, error) {
+	b, err := buildConfigFor(inbounds, cert, nil)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return b.config, b.kinds, b.acmeTags, nil
+}
+
+// buildConfigFor is buildConfig plus W29 sniffing on the inbounds in sniff
+// (nil: the config is exactly what buildConfig produced before W29).
+func buildConfigFor(inbounds []json.RawMessage, cert *certFiles, sniff map[string]bool) (*builtConfig, error) {
 	var acmeTags []string
 	if cert != nil {
 		var err error
 		if inbounds, acmeTags, err = rewriteCertPaths(inbounds, *cert); err != nil {
-			return nil, nil, nil, err
+			return nil, err
 		}
 	}
 	full := map[string]any{
@@ -846,26 +987,26 @@ func buildConfig(inbounds []json.RawMessage, cert *certFiles) (*core.Config, map
 	}
 	b, err := json.Marshal(full)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 
 	jsonConfig, err := confserial.DecodeJSONConfig(bytes.NewReader(b))
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("decode xray config: %w", err)
+		return nil, fmt.Errorf("decode xray config: %w", err)
 	}
 	pbConfig, err := jsonConfig.Build()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("build xray config: %w", err)
+		return nil, fmt.Errorf("build xray config: %w", err)
 	}
 	if err := refuseFakeDNS(pbConfig); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	if err := multiUserShadowsocks(inbounds, pbConfig); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	kinds, err := inboundKinds(pbConfig)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	// Swap xray's dispatcher for the gate (same slot in the app list, so
 	// every inbound resolves the gate when it is created).
@@ -878,12 +1019,21 @@ func buildConfig(inbounds []json.RawMessage, cert *certFiles) (*core.Config, map
 		}
 	}
 	if !swapped {
-		return nil, nil, nil, fmt.Errorf("xray config has no dispatcher to replace")
+		return nil, fmt.Errorf("xray config has no dispatcher to replace")
 	}
-	return pbConfig, kinds, acmeTags, nil
+	sniffed, err := addBlockSniffing(pbConfig, sniff)
+	if err != nil {
+		return nil, err
+	}
+	return &builtConfig{config: pbConfig, kinds: kinds, acmeTags: acmeTags, sniffed: sniffed}, nil
 }
 
 func newInstanceWith(inboundsJSON string, cert *certFiles) (*built, error) {
+	return newInstanceFor(inboundsJSON, cert, nil)
+}
+
+// newInstanceFor: newInstanceWith with W29 sniffing on the inbounds in sniff.
+func newInstanceFor(inboundsJSON string, cert *certFiles, sniff map[string]bool) (*built, error) {
 	var inbounds []json.RawMessage
 	if err := json.Unmarshal([]byte(inboundsJSON), &inbounds); err != nil {
 		return nil, fmt.Errorf("parse inbounds: %w", err)
@@ -891,11 +1041,11 @@ func newInstanceWith(inboundsJSON string, cert *certFiles) (*built, error) {
 	if len(inbounds) == 0 {
 		inbounds = []json.RawMessage{}
 	}
-	pbConfig, kinds, acmeTags, err := buildConfig(inbounds, cert)
+	bc, err := buildConfigFor(inbounds, cert, sniff)
 	if err != nil {
 		return nil, err
 	}
-	inst, err := core.New(pbConfig)
+	inst, err := core.New(bc.config)
 	if err != nil {
 		return nil, fmt.Errorf("build xray instance: %w", err)
 	}
@@ -918,5 +1068,5 @@ func newInstanceWith(inboundsJSON string, cert *certFiles) (*built, error) {
 			tags = append(tags, probe.Tag)
 		}
 	}
-	return &built{inst: inst, gate: gate, tags: tags, kinds: kinds, acmeTags: acmeTags}, nil
+	return &built{inst: inst, gate: gate, tags: tags, kinds: bc.kinds, acmeTags: bc.acmeTags, sniffed: bc.sniffed}, nil
 }
