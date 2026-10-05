@@ -123,6 +123,8 @@ type applier struct {
 	unitDir     string
 	unitsOf     func(binary string) (map[string][]byte, error)
 	reloadUnits func() error
+	// nft runs one nft transaction (R44 source filters; tests replace it).
+	nft func(ctx context.Context, script string) error
 }
 
 func newApplier(stateDir, rootDir, target string, init *initSys, service string, keys []release.PublicKey) *applier {
@@ -135,6 +137,7 @@ func newApplier(stateDir, rootDir, target string, init *initSys, service string,
 		init:    init,
 		unitDir: init.dir,
 		unitsOf: func(binary string) (map[string][]byte, error) { return execPrintUnits(binary, init) },
+		nft:     runNft,
 	}
 	if init == openrcInit {
 		p.restart = func() error { return openrcRestart(service) }
@@ -344,6 +347,9 @@ func (p *applier) run() error {
 		return err
 	}
 	defer d.close()
+	// R44: the source allowlists first (seconds matter there; an update
+	// may keep this run busy for minutes).
+	p.applySourceFilters(d)
 	if t := st.Trial; t != nil && d.confirmed(t.Version) {
 		// Passed while no updater watched (e.g. across a reboot).
 		slog.Info("agent update passed its self-check", "version", t.Version)
@@ -560,6 +566,8 @@ func (p *applier) watch(d *agentDir, version string, base int) string {
 		if p.now().After(deadline) {
 			return fmt.Sprintf("no connected, acknowledged apply within %s of the restart", p.selfCheck+p.grace)
 		}
+		// The agent on probation may ask for its source filters meanwhile.
+		p.applySourceFilters(d)
 		p.sleep(p.poll)
 	}
 }
@@ -874,7 +882,14 @@ func (d *agentDir) writeResult(r applyResult) error {
 	if err != nil {
 		return err
 	}
-	tmp := fmt.Sprintf(".%s.%d.tmp", resultName, os.Getpid())
+	return d.writeFile(resultName, b)
+}
+
+// writeFile creates name in the agent's directory with b: a new file
+// (O_EXCL, no symlink followed) chowned to the agent, renamed over the old
+// one.
+func (d *agentDir) writeFile(name string, b []byte) error {
+	tmp := fmt.Sprintf(".%s.%d.tmp", name, os.Getpid())
 	_ = unix.Unlinkat(d.fd, tmp, 0)
 	fd, err := unix.Openat(d.fd, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
@@ -892,7 +907,7 @@ func (d *agentDir) writeResult(r applyResult) error {
 		err = cerr
 	}
 	if err == nil {
-		err = unix.Renameat(d.fd, tmp, d.fd, resultName)
+		err = unix.Renameat(d.fd, tmp, d.fd, name)
 	}
 	if err != nil {
 		_ = unix.Unlinkat(d.fd, tmp, 0)

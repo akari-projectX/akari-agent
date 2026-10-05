@@ -112,6 +112,13 @@ message Hello {
   //       (ConfigSnapshot.acme) and reports it (Heartbeat.cert). Older
   //       agents ignore both: they keep reading the node certificate files
   //       the admin installs by hand (the panel flags such nodes).
+  //   7 = (W28-a) one user may be several UserOps: UserOp.user_id is
+  //       "<account>" or "<account>#<n>" (one per entrance the user may use
+  //       on this node; see UserOp). The agent treats every user_id as its
+  //       own xray user and traffic key, but shares the speed limit and the
+  //       online-user count per account (the part before '#'). Older agents
+  //       limit and count each user_id on its own (a user on two entrances
+  //       may get twice the limit; the panel flags such nodes).
   uint32 protocol_version = 5;
   // State hash of what the agent actually runs (see "State hash" below),
   // for config_version + the applied user set. Empty for protocol 0.
@@ -135,6 +142,8 @@ message Hello {
   //       whose units were installed by an older installer or updater (or
   //       edited by hand instead of with a drop-in) keeps the old ones until
   //       the panel's install command is run once (the panel says so).
+  //   "source-filter" = (W28-a) enforces ConfigSnapshot.source_filters and
+  //       reports Heartbeat.source_filter.
   // The panel only sends LatencyProbeConfig to agents that list "latency".
   repeated string capabilities = 20;
 }
@@ -183,6 +192,9 @@ message Heartbeat {
   // Block rule hit counters and the policy in force (W29, capability
   // "block-rules"); unset from older agents.
   BlockStats block = 41;
+  // Source-IP allowlist state (W28-a, capability "source-filter"); unset
+  // while the held Snapshot has no source_filters.
+  SourceFilterStatus source_filter = 30;
 }
 
 // The automatic certificate as the agent sees it (protocol >= 6). Sent on
@@ -277,7 +289,7 @@ message NodeMetrics {
 }
 
 message UserTraffic {
-  string user_id = 1;   // panel user id; also the xray user "email" field
+  string user_id = 1;   // UserOp.user_id; also the xray user "email" field
   uint64 up_bytes = 2;  // cumulative within the current session
   uint64 down_bytes = 3;
 }
@@ -401,11 +413,17 @@ message UserOp {
     REMOVE = 1;
   }
   Op op = 1;
+  // The xray user ("email") and traffic key; opaque to the agent apart from
+  // the account rule of protocol 7: "<panel user id>" on the node's direct
+  // inbound, "<panel user id>#<n>" on a relay entrance's derived inbound
+  // (n = the entrance's number on the node, 1..32767). Never longer than
+  // 64 bytes.
   string user_id = 2;
   repeated InboundUser inbound_users = 3; // ignored for REMOVE
   // Per-user rate limit (protocol >= 4), bytes per second, applied to each
   // direction separately and shared by ALL of the user's connections on
-  // this node (every inbound). 0 = unlimited. Ignored for REMOVE (a removed
+  // this node (every inbound; protocol >= 7: every UserOp of the account,
+  // which all carry the same limit). 0 = unlimited. Ignored for REMOVE (a removed
   // user has no limit). Part of the op like the credentials: a version the
   // agent holds always carries that version's limits, so it is not part of
   // the state hash. A limit that appears where there was none closes the
@@ -427,6 +445,34 @@ message ConfigSnapshot {
   // it always arrives with a Snapshot. Unset = no automatic certificate
   // (inbounds read the files the admin installs, as before).
   AcmeConfig acme = 10;
+  // Source-IP allowlists (W28-a, capability "source-filter"): new
+  // connections to each listed port are accepted only from the listed
+  // networks (a relay entrance's derived inbound accepts only its relay's
+  // egress addresses). They are enforced in the kernel (nftables, a table
+  // of their own, replaced as a whole when they change, removed when the
+  // list is empty) by the agent's root updater, to which the agent hands
+  // them (R44: the agent has no CAP_NET_ADMIN; applied within seconds),
+  // and the outcome is reported in Heartbeat.source_filter. Not
+  // part of the state hash: they change only with config_version. Agents
+  // without the capability ignore them (per-entrance credentials still
+  // isolate the entrances; the panel flags such nodes).
+  repeated SourceFilter source_filters = 30;
+}
+
+// One port's source allowlist (W28-a).
+message SourceFilter {
+  uint32 port = 1;
+  bool tcp = 2;               // filter TCP connections to port
+  bool udp = 3;               // filter UDP (QUIC) to port
+  repeated string cidrs = 4;  // "203.0.113.7/32", "2001:db8::/48"; never empty
+}
+
+// Whether the agent enforces ConfigSnapshot.source_filters (W28-a).
+message SourceFilterStatus {
+  bool applied = 1;  // the kernel rules match the last Snapshot
+  // Why not ("pending: ..." until the root updater answers, "nft: ...",
+  // the updater missing, ...); "" when applied.
+  string error = 2;
 }
 
 // ACME (RFC 8555) certificate the agent obtains and renews itself (protocol

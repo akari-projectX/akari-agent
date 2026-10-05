@@ -22,6 +22,14 @@
 # restart). The verdict goes back to the agent, which reports it to the
 # panel (rollout / node view) exactly as before.
 #
+# R44: it also applies the relay entrances' source allowlists the agent
+# requests (update/source-filter-request.json): re-validated as untrusted
+# input, rendered by this binary into one `nft -f -` transaction on the
+# table inet akari_sources (nothing else), the outcome handed back
+# (source-filter-result.json). That is why this unit, not the agent, has
+# CAP_NET_ADMIN and runs in the host's network namespace (netlink only:
+# still no IP traffic at all). Needs the nftables package (nft).
+#
 # Its own record (rolled-back versions, the binary on probation, the
 # previous units) is in /var/lib/akari-agent-update (root, 0700).
 [Unit]
@@ -43,8 +51,9 @@ TimeoutStartSec=30min
 # the agent's 0700 directory (DAC), hand it the verdict (CHOWN), replace
 # the binary in /usr/local/bin and the three units in /etc/systemd/system
 # (atomic rename needs the directory; daemon-reload and restart go to
-# systemd over its AF_UNIX socket). No network at all.
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER
+# systemd over its AF_UNIX socket), and nft's netlink socket for the
+# source allowlists (NET_ADMIN, R44). No IP traffic at all.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_NET_ADMIN
 NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/usr/local/bin -/var/lib/private/akari-agent
@@ -52,9 +61,9 @@ ReadWritePaths=/etc/systemd/system
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
-PrivateNetwork=yes
+# No PrivateNetwork=: nft must reach the host's network namespace (R44).
 IPAddressDeny=any
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes

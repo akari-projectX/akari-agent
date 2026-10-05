@@ -4,6 +4,9 @@
 # The agent (unprivileged, DynamicUser) stages a verified download and then
 # writes update/apply-request.json in its StateDirectory; this unit starts
 # the updater, which consumes the request first thing (so this never loops).
+# R44: the same for update/source-filter-request.json, the relay entrances'
+# source allowlists the updater applies with nft (the agent has no
+# CAP_NET_ADMIN).
 # Installed and enabled by the panel's one-line installer (by hand: see
 # akari-agent.service; `akari-agent -print-unit akari-agent-update.path`
 # prints this file as the release carries it).
@@ -16,6 +19,7 @@ Documentation=https://github.com/akari-projectX/akari-agent
 
 [Path]
 PathExists=/var/lib/private/akari-agent/update/apply-request.json
+PathExists=/var/lib/private/akari-agent/update/source-filter-request.json
 Unit=akari-agent-update.service
 
 [Install]

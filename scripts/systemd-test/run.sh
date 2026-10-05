@@ -20,7 +20,10 @@
 #      (root 0644, systemd reloaded), confirmed;
 #   5. a hostile request (staged file a symlink to a root file): refused;
 #   6. a broken release that trips systemd's start limit (unit failed,
-#      NRestarts frozen): rolled back within 30 s, restored agent running.
+#      NRestarts frozen): rolled back within 30 s, restored agent running;
+#   7. R44: the relay source allowlists are applied by the updater (nft,
+#      host network namespace), a hostile request refused, removal; the
+#      agent itself holds no capability but CAP_NET_BIND_SERVICE.
 #
 # The full flow with a panel (offer, download, rollout health gate,
 # installer) is akari-panel's smoke (M6 section).
@@ -97,6 +100,15 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=t
   -keyout /dev/null -out "$W/ca.pem" 2>/dev/null
 { printf 'panel_addr = "127.0.0.1:1"\nserver_name = "panel.invalid"\nenrollment_token = "unused"\n[identity]\nca_pem = """\n'
   cat "$W/ca.pem"; printf '"""\n'; } >"$W/bootstrap.toml"
+cat >"$W/filter1.json" <<'J'
+{"schema":1,"id":"a1","filters":[{"port":20443,"tcp":true,"cidrs":["203.0.113.0/24","2001:db8::/48"]}]}
+J
+cat >"$W/filter2.json" <<'J'
+{"schema":1,"id":"a2","filters":[{"port":20443,"tcp":true,"cidrs":["203.0.113.0/24 } ; flush ruleset"]}]}
+J
+cat >"$W/filter3.json" <<'J'
+{"schema":1,"id":"a3","filters":[]}
+J
 mkdir -p "$W/legacy" && cp "$LEGACY"/* "$W/legacy/"
 chmod -R a+rX "$W"
 
@@ -265,4 +277,40 @@ sleep 4
 [ "$(x 'systemctl is-active akari-agent')" = active ] || fail "restored agent did not stay up"
 wait_alog '"agent_version":"v900.0.3"'
 units_are 3 || fail "units changed"
+echo "== 7. R44 source allowlists: applied by the root updater with nft, never by the agent"
+# The agent's side is played (its request, as sourcefilter.go writes it):
+# 1 = a relay allowlist, 2 = hostile (nft syntax in a network: refused
+# without running nft, the table untouched), 3 = no filters (table removed).
+filter_req() { # N
+  x "own=\$(stat -c %u:%g $U)
+     install -o \${own%:*} -g \${own#*:} -m 0600 /w/filter$1.json $U/.f && mv $U/.f $U/source-filter-request.json"
+}
+fresult() { x "cat $U/source-filter-result.json 2>/dev/null" || true; }
+wait_fresult() { # id
+  for _ in $(seq 1 20); do fresult | grep -q "\"id\":\"$1\"" && return 0; sleep 0.5; done
+  fail "no source filter result for $1 (have: $(fresult); updater: $(ulog | tail -3))"
+}
+table() { x 'nft list table inet akari_sources 2>/dev/null' || true; }
+filter_req 1
+wait_fresult a1
+fresult | grep -q '"applied":true' || fail "allowlist not applied: $(fresult)"
+table | grep -q 'tcp dport 20443 ct state new ip saddr != @s0_4 drop' || fail "nft table: $(table)"
+table | grep -q '203.0.113.0/24' && table | grep -q '2001:db8::/48' || fail "nft sets: $(table)"
+[ "$(x "stat -c %u $U/source-filter-result.json")" = "$(x "stat -c %u $U")" ] || fail "filter result not handed to the agent"
+x "test ! -e $U/source-filter-request.json" || fail "filter request not consumed"
+filter_req 2
+wait_fresult a2
+fresult | grep -q '"applied":false' || fail "hostile request applied: $(fresult)"
+table | grep -q 'tcp dport 20443' || fail "hostile request changed the table: $(table)"
+# Not `x … | grep -q .`: grep stops at the first line and the docker exec
+# writer's EPIPE fails the pipeline (pipefail) now and then.
+[ -n "$(x 'nft list ruleset')" ] || fail "ruleset flushed"
+filter_req 3
+wait_fresult a3
+fresult | grep -q '"applied":true' || fail "removal failed: $(fresult)"
+[ -z "$(table)" ] || fail "table not removed: $(table)"
+pid=$(x 'systemctl show -p MainPID --value akari-agent')
+caps=$(x "grep -E '^Cap(Eff|Prm|Bnd|Amb):' /proc/$pid/status") || fail "agent capabilities unreadable"
+grep -qv '0000000000000400' <<<"$caps" && fail "agent capabilities (only CAP_NET_BIND_SERVICE): $caps"
+x 'systemctl is-failed -q akari-agent-update.path' && fail "trigger unit failed"
 echo "systemd self-update test: ok"

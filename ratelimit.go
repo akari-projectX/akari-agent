@@ -237,27 +237,37 @@ func limitLink(ctx context.Context, link *transport.Link, lim *userLimit) *trans
 	}
 }
 
-// SetLimit installs the user's rate (bytes/s per direction; 0 = none).
-// A limit where there was none closes the user's live dispatches on every
-// inbound (they were admitted unwrapped, possibly spliced, and could not be
-// throttled); clients reconnect under the limit. Returns how many closed.
+// SetLimit installs the rate (bytes/s per direction; 0 = none) an op of
+// email carries. The limit is the account's (protocol 7, accountOf): all
+// of the account's emails (entrances) share one pair of buckets, and it
+// stays while any of them still carries it. A limit where there was none
+// closes the account's live dispatches on every inbound (they were
+// admitted unwrapped, possibly spliced, and could not be throttled);
+// clients reconnect under the limit. Returns how many closed.
 func (g *gateDispatcher) SetLimit(email string, bps uint64) int {
+	acc := accountOf(email)
 	g.mu.Lock()
-	cur := g.limits[email]
+	cur := g.limits[acc]
 	var victims []*liveConn
 	switch {
 	case bps == 0:
-		if cur != nil {
-			// Live wrapped connections become unthrottled in place.
-			cur.set(0)
-			delete(g.limits, email)
+		if set := g.limited[acc]; set != nil {
+			delete(set, email)
+			if len(set) == 0 {
+				delete(g.limited, acc)
+				// Live wrapped connections become unthrottled in place.
+				cur.set(0)
+				delete(g.limits, acc)
+			}
 		}
 	case cur != nil:
+		g.limited[acc][email] = struct{}{}
 		cur.set(bps)
 	default:
-		g.limits[email] = newUserLimit(bps)
+		g.limits[acc] = newUserLimit(bps)
+		g.limited[acc] = map[string]struct{}{email: {}}
 		for key := range g.live {
-			if key.email == email {
+			if accountOf(key.email) == acc {
 				victims = append(victims, g.takeLocked(key)...)
 			}
 		}
@@ -269,11 +279,11 @@ func (g *gateDispatcher) SetLimit(email string, bps uint64) int {
 	return len(victims)
 }
 
-// Limit returns the user's installed rate (0 = none).
+// Limit returns the installed rate of email's account (0 = none).
 func (g *gateDispatcher) Limit(email string) uint64 {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if l := g.limits[email]; l != nil {
+	if l := g.limits[accountOf(email)]; l != nil {
 		return l.up.rate.Load()
 	}
 	return 0
