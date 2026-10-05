@@ -19,22 +19,40 @@ import (
 	"akari/agent/pb"
 )
 
-// blockSwitchDrops: the scenarios whose established connections do NOT
-// survive the per-node switch (measured by this canary). Re-creating a
-// handler closes its listener: connections on a raw TCP stream (TCP, TLS,
-// REALITY, WebSocket, HTTPUpgrade, Shadowsocks 2022) and XHTTP over
-// TLS/REALITY (one long HTTP/2 request per connection) belong to their own
-// goroutines and keep relaying; gRPC (streams of a listener-owned HTTP/2
-// server), plain-HTTP XHTTP (the client's packet-up mode: every upload is a
-// new request, which the new handler does not know) and Hysteria 2 (QUIC
-// connections owned by the listener) are cut and redialled by the client.
-// Documented in the panel's DEPLOY §3h.
-var blockSwitchDrops = map[string]bool{
-	"VLESS-XHTTP":        true,
-	"VLESS-gRPC-TLS":     true,
-	"VLESS-REALITY-gRPC": true,
-	"Trojan-gRPC-TLS":    true,
-	"Hysteria2":          true,
+// switchOutcome: whether a scenario's established connection survives the
+// per-node switch (which re-creates its inbound handler).
+type switchOutcome int
+
+const (
+	switchKeeps switchOutcome = iota // always survives
+	switchDrops                      // always cut; the client redials
+	switchMay                        // timing-dependent: either is correct
+)
+
+func (o switchOutcome) String() string {
+	return [...]string{"keeps", "drops", "may drop"}[o]
+}
+
+// blockSwitchOutcome: the scenarios whose established connections do not
+// reliably survive the per-node switch (measured by this canary); every
+// other scenario keeps them. Re-creating a handler closes its listener:
+// connections on a raw TCP stream (TCP, TLS, REALITY, WebSocket,
+// HTTPUpgrade, Shadowsocks 2022) and XHTTP over TLS/REALITY (one long
+// HTTP/2 request per connection) belong to their own goroutines and keep
+// relaying; gRPC (streams of a listener-owned HTTP/2 server) and Hysteria 2
+// (QUIC connections owned by the listener) are cut and redialled by the
+// client. Plain-HTTP XHTTP (the client's packet-up mode: every upload is a
+// new request) survives only while the client sends its uploads over
+// keep-alive connections the old handler still serves (xray's XHTTP
+// listener Close closes only the listener); an upload on a fresh connection
+// reaches the new handler, which does not know the session, and the client
+// redials. Documented in the panel's DEPLOY §3h.
+var blockSwitchOutcome = map[string]switchOutcome{
+	"VLESS-XHTTP":        switchMay,
+	"VLESS-gRPC-TLS":     switchDrops,
+	"VLESS-REALITY-gRPC": switchDrops,
+	"Trojan-gRPC-TLS":    switchDrops,
+	"Hysteria2":          switchDrops,
 }
 
 func TestRT_BlockRulesMatrix(t *testing.T) {
@@ -47,17 +65,17 @@ func TestRT_BlockRulesMatrix(t *testing.T) {
 			t.Fatalf("%v: %v", sc, err)
 		}
 		seen[tc.name] = true
-		keeps := !blockSwitchDrops[tc.name]
-		t.Run(tc.name, func(t *testing.T) { runBlockCase(t, e, tc, keeps) })
+		want := blockSwitchOutcome[tc.name] // zero value: switchKeeps
+		t.Run(tc.name, func(t *testing.T) { runBlockCase(t, e, tc, want) })
 	}
-	for name := range blockSwitchDrops {
+	for name := range blockSwitchOutcome {
 		if !seen[name] {
-			t.Errorf("blockSwitchDrops names %q, which is not a manifest scenario", name)
+			t.Errorf("blockSwitchOutcome names %q, which is not a manifest scenario", name)
 		}
 	}
 }
 
-func runBlockCase(t *testing.T, e *matrixEnv, tc matrixCase, keeps bool) {
+func runBlockCase(t *testing.T, e *matrixEnv, tc matrixCase, want switchOutcome) {
 	m := NewCoreManager()
 	defer m.Teardown()
 	sp := freePort(t)
@@ -103,6 +121,14 @@ func runBlockCase(t *testing.T, e *matrixEnv, tc matrixCase, keeps bool) {
 		return nil
 	}
 	// refused: a new connection does not relay.
+	// switched: the established connection's fate matches want.
+	switched := func(c net.Conn, phase string) {
+		t.Helper()
+		survived := echoOnce(c, phase) == nil
+		if want != switchMay && survived != (want == switchKeeps) {
+			t.Fatalf("%s: connection survived the switch turning %s = %v, documented: %v", tc.name, phase, survived, want)
+		}
+	}
 	refused := func() bool {
 		for i := 0; i < 3; i++ {
 			c, err := dial()
@@ -126,9 +152,7 @@ func runBlockCase(t *testing.T, e *matrixEnv, tc matrixCase, keeps bool) {
 	if err := m.SetBlockPolicy(&pb.BlockPolicy{InboundTags: []string{"in"}, Rules: []*pb.BlockRule{miss}, Version: "on"}); err != nil {
 		t.Fatal(err)
 	}
-	if survived := echoOnce(before, "after-on") == nil; survived != keeps {
-		t.Fatalf("%s: connection survived the switch turning on = %v, documented %v", tc.name, survived, keeps)
-	}
+	switched(before, "on")
 	on := connect("on")
 	defer on.Close()
 
@@ -161,9 +185,7 @@ func runBlockCase(t *testing.T, e *matrixEnv, tc matrixCase, keeps bool) {
 	if err := m.SetBlockPolicy(&pb.BlockPolicy{Version: "off"}); err != nil {
 		t.Fatal(err)
 	}
-	if survived := echoOnce(on, "after-off") == nil; survived != keeps {
-		t.Fatalf("%s: connection survived the switch turning off = %v, documented %v", tc.name, survived, keeps)
-	}
+	switched(on, "off")
 	connect("off").Close()
-	t.Logf("RT-%s-BLOCK: blocked+counted, content change kept connections, switch keeps=%v", tc.name, keeps)
+	t.Logf("RT-%s-BLOCK: blocked+counted, content change kept connections, switch %v", tc.name, want)
 }
