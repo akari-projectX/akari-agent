@@ -23,7 +23,7 @@
 # throw-away user and cannot read /etc. The agent generates its own key and
 # keeps key + certificates in its StateDirectory (/var/lib/private/
 # akari-agent, 0700, files 0600; $STATE_DIRECTORY): back it up or the node
-# must re-enroll with a new token (`akari node enroll-token`).
+# must re-enroll with a new token (`akari server enroll-token`).
 #
 # Self-update (M6, docs/DEPLOY.md "Agent updates"): the agent never runs
 # anything from its StateDirectory (systemd mounts it noexec for
