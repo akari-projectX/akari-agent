@@ -1096,7 +1096,7 @@ func (q *finalQueue) flush(gen uint64, send func(*pb.AgentUp) error) {
 		if it.sent && it.gen == gen {
 			continue
 		}
-		if send(&pb.AgentUp{Msg: &pb.AgentUp_Traffic{Traffic: it.report}}) != nil {
+		if sendTraffic(send, it.report) != nil {
 			return
 		}
 		it.sent, it.gen, it.sentAt = true, gen, time.Now()

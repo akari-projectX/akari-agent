@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -184,5 +186,73 @@ func TestRebuildRepeatedUserStillReplaces(t *testing.T) {
 	m.gate.mu.Unlock()
 	if onA || !onB {
 		t.Fatalf("gate: in-a %v in-b %v", onA, onB)
+	}
+}
+
+// A counter set larger than the panel's per-report bound (65,536 rows,
+// dropped whole) goes out as several reports of the same session that
+// together carry every row exactly once, in the periodic loop and in the
+// final-counter queue alike.
+func TestLargeTrafficReportIsChunked(t *testing.T) {
+	const rows = 4*maxReportRows + 7 // 65,543 > 65,536
+	users := make([]*pb.UserTraffic, rows)
+	for i := range users {
+		users[i] = &pb.UserTraffic{UserId: fmt.Sprintf("u%d", i), UpBytes: uint64(i), DownBytes: 1}
+	}
+	report := &pb.TrafficReport{Users: users, SessionId: "s", MonotonicMs: 42}
+	check := func(t *testing.T, sent []*pb.AgentUp) {
+		t.Helper()
+		seen := map[string]bool{}
+		for _, m := range sent {
+			tr := m.GetTraffic()
+			if tr == nil || tr.SessionId != "s" || tr.MonotonicMs != 42 || len(tr.Users) == 0 || len(tr.Users) > maxReportRows {
+				t.Fatalf("bad chunk: session %q, ms %d, %d rows", tr.GetSessionId(), tr.GetMonotonicMs(), len(tr.GetUsers()))
+			}
+			for _, u := range tr.Users {
+				if seen[u.UserId] {
+					t.Fatalf("row %s sent twice", u.UserId)
+				}
+				seen[u.UserId] = true
+			}
+		}
+		if len(sent) != 5 || len(seen) != rows {
+			t.Fatalf("%d chunks, %d distinct rows; want 5, %d", len(sent), len(seen), rows)
+		}
+	}
+	var sent []*pb.AgentUp
+	collect := func(m *pb.AgentUp) error { sent = append(sent, m); return nil }
+	if err := sendTraffic(collect, report); err != nil {
+		t.Fatal(err)
+	}
+	check(t, sent)
+
+	var q finalQueue
+	q.add(report)
+	sent = nil
+	q.flush(1, collect)
+	check(t, sent)
+	sent = nil
+	q.flush(1, collect) // already sent on this stream
+	if len(sent) != 0 {
+		t.Fatalf("resent %d chunks on the same stream", len(sent))
+	}
+
+	// A send failure mid-report leaves it unsent: the next stream resends
+	// all of it.
+	var q2 finalQueue
+	q2.add(report)
+	n := 0
+	q2.flush(1, func(*pb.AgentUp) error {
+		if n++; n == 3 {
+			return errors.New("stream dead")
+		}
+		return nil
+	})
+	sent = nil
+	q2.flush(2, collect)
+	check(t, sent)
+
+	if c := trafficChunks(&pb.TrafficReport{Users: users[:maxReportRows]}); len(c) != 1 {
+		t.Fatalf("report at the bound split into %d", len(c))
 	}
 }
