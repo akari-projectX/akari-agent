@@ -217,7 +217,11 @@ ulog | grep -q 'stopped 3 times' || fail "rollback reason"
 ulog | grep -q 'installed the new release.s systemd units' || fail "v900.0.2's units were not installed"
 ulog | grep -q 'restored the previous systemd units' || fail "units not restored"
 units_are 1 || fail "units after the rollback are not v900.0.1's"
-x 'journalctl -u akari-agent -o cat --no-pager' | grep -q 'broken agent build' || fail "broken build never ran"
+# journald can index a short-lived process's lines a moment after the
+# rollback is recorded (seen in the v0.5.1-rc.1 release run): wait for them.
+broke() { x 'journalctl -u akari-agent -o cat --no-pager' | grep -q 'broken agent build'; }
+for _ in $(seq 1 20); do broke && break; sleep 0.5; done
+broke || fail "broken build never ran"
 for _ in $(seq 1 20); do x "cat $U/state.json 2>/dev/null" | grep -q '"v900.0.2"' && break; sleep 0.5; done
 x "cat $U/state.json" | grep -q '"state":5' || fail "agent owes no ROLLED_BACK report: $(x "cat $U/state.json")"
 x 'systemctl is-active -q akari-agent' || fail "agent not running after the rollback"
