@@ -114,6 +114,10 @@ type Agent struct {
 	// (graceful stop, self-update). nil falls back to the updater's
 	// directory (tests); nil without an updater persists nothing.
 	finalsStore *finalsStore
+	// ckpt: the crash-safety checkpoint of the counters (checkpoint.go);
+	// nil = none (tests). checkpointEvery bounds what a hard kill loses.
+	ckpt            *checkpointStore
+	checkpointEvery time.Duration
 	// stopping: a graceful stop began; xray stays down.
 	stopping atomic.Bool
 
@@ -173,6 +177,7 @@ func NewAgent(cfg *Config, agentVersion string, ids *identities) *Agent {
 		backoffBase:     time.Second,
 		leaseEvery:      5 * time.Second,
 		trafficEvery:    10 * time.Second,
+		checkpointEvery: defaultCheckpointEvery,
 		finalsConfirm:   finalsConfirmAfter,
 		shutdownFlush:   5 * time.Second,
 		sendStall:       sendStall,
@@ -237,6 +242,7 @@ func (a *Agent) run(ctx context.Context) error {
 	}
 	go a.leaseLoop(ctx)
 	go a.renewLoop(ctx)
+	go a.checkpointLoop(ctx)
 	go a.prober.loop(ctx, a.deliverLatency)
 	if a.certs != nil {
 		a.certs.onIssued = func(string) { a.onCertIssued() }
@@ -316,24 +322,26 @@ func (a *Agent) finalStore() *finalsStore {
 
 // persistFinalsLocked writes the unconfirmed final reports to the state
 // directory (the next process resends them; accounting is cumulative and
-// idempotent, so duplicates are harmless). Caller holds applyMu.
-func (a *Agent) persistFinalsLocked(why string) {
+// idempotent, so duplicates are harmless). Caller holds applyMu. Reports
+// whether the queue is now on disk (or empty).
+func (a *Agent) persistFinalsLocked(why string) bool {
 	st := a.finalStore()
 	if st == nil {
-		return
+		return false
 	}
 	reports := a.finals.all()
 	if len(reports) == 0 {
 		st.drop()
-		return
+		return true
 	}
 	if err := st.save(reports); err != nil {
 		// The reports also went out on the live stream (best effort) and
 		// the panel's caps bound what can be lost.
 		slog.Error("cannot persist final traffic counters", "why", why, "error", err)
-		return
+		return false
 	}
 	a.finalsPersisted.Store(true)
+	return true
 }
 
 // stopped: the process is stopping on a signal. Under the apply lock, xray
@@ -342,10 +350,14 @@ func (a *Agent) persistFinalsLocked(why string) {
 func (a *Agent) stopped() {
 	a.applyMu.Lock()
 	defer a.applyMu.Unlock()
+	a.stopping.Store(true) // no checkpoint after the finals are on disk
 	if a.core.Running() {
 		a.finals.add(a.core.Teardown())
 	}
-	a.persistFinalsLocked("shutdown")
+	if a.persistFinalsLocked("shutdown") && a.ckpt != nil {
+		// finals.json now holds everything the checkpoint did.
+		a.ckpt.clear()
+	}
 }
 
 // gracefulStop runs on the live stream when the process is asked to stop:
