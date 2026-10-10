@@ -43,7 +43,7 @@ LINKED MODULES (38 + Go standard library)
   go4.org/netipx v0.0.0-20231129151722-fdeea329fbba                             BSD-3-Clause
   golang.org/x/crypto v0.57.0                                                   BSD-3-Clause
   golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842                           BSD-3-Clause
-  golang.org/x/net v0.59.0                                                      BSD-3-Clause
+  golang.org/x/net v0.60.0                                                      BSD-3-Clause
   golang.org/x/sync v0.23.0                                                     BSD-3-Clause
   golang.org/x/sys v0.48.0                                                      BSD-3-Clause
   golang.org/x/text v0.42.0                                                     BSD-3-Clause
@@ -3517,7 +3517,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
 golang.org/x/crypto v0.57.0: LICENSE
-golang.org/x/net v0.59.0: LICENSE
+golang.org/x/net v0.60.0: LICENSE
 golang.org/x/sync v0.23.0: LICENSE
 golang.org/x/sys v0.48.0: LICENSE
 golang.org/x/text v0.42.0: LICENSE
@@ -3556,7 +3556,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ==============================================================================
 golang.org/x/crypto v0.57.0: PATENTS
 golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842: PATENTS
-golang.org/x/net v0.59.0: PATENTS
+golang.org/x/net v0.60.0: PATENTS
 golang.org/x/sync v0.23.0: PATENTS
 golang.org/x/sys v0.48.0: PATENTS
 golang.org/x/text v0.42.0: PATENTS

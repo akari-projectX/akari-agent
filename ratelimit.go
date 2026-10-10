@@ -23,8 +23,8 @@ import (
 // under the lock admit already takes.
 //
 // XTLS Vision's splice copies bytes kernel-to-kernel and bypasses every
-// reader/writer, so a limited user's dispatch turns splice off
-// (session.Inbound.CanSpliceCopy = 3, the value xray itself uses for "never
+// reader/writer, so every managed dispatch turns splice off (limitLink;
+// session.Inbound.CanSpliceCopy = 3, the value xray itself uses for "never
 // splice"); Vision keeps working, just through user space.
 //
 // Only the OUTBOUND side of a dispatch is wrapped: its reader (uplink) and
@@ -224,12 +224,23 @@ func (w *limitedWriter) Close() error { return common.Close(w.Writer) }
 
 // limitLink returns the outbound-side link of a limited user's dispatch
 // (nil lim = the link itself) and turns splice off for the connection.
+//
+// Splice is off for every managed user, limited or not: xray's splice copy
+// (proxy.CopyRawConnIfExist, v26.3.27) is one blocking ReadFrom that adds
+// the bytes to the user's downlink counter only when the connection ends.
+// A long Vision download was therefore invisible to reports and quota
+// enforcement while it ran, and lost entirely when the instance was torn
+// down first (Snapshot rebuild, graceful stop, self-update, lease expiry,
+// a crash): the counters were read before Close ended the connection
+// (test bed 2026-10-10: 0 of 225 MB billed). Without splice the bytes go
+// through the counted link writer as they flow; the XTLS framing is
+// unchanged, the copy costs ~12% single-stream throughput on loopback.
 func limitLink(ctx context.Context, link *transport.Link, lim *userLimit) *transport.Link {
-	if lim == nil {
-		return link
-	}
 	if in := session.InboundFromContext(ctx); in != nil && in.CanSpliceCopy != 3 {
 		in.CanSpliceCopy = 3
+	}
+	if lim == nil {
+		return link
 	}
 	return &transport.Link{
 		Reader: &limitedReader{Reader: link.Reader, ctx: ctx, b: &lim.up},

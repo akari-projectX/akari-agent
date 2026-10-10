@@ -69,6 +69,9 @@ func main() {
 		"updater mode: the agent's service (default by -init: akari-agent.service or akari-agent)")
 	heartbeat := flag.Duration("heartbeat-interval", 15*time.Second,
 		"how often the agent reports its machine status (heartbeat), 1s..5m")
+	checkpoint := flag.Duration("traffic-checkpoint-interval", defaultCheckpointEvery,
+		"how often unreported traffic counters are saved to the state directory, 1s..10s "+
+			"(at most this much traffic is lost if the process is killed)")
 	acmeRoots := flag.String("acme-roots", "", "PEM file of extra CA roots trusted for the ACME directory (tests; default: system roots)")
 	acmeHTTPPort := flag.Int("acme-http-port", 80, "TCP port the HTTP-01 challenge is answered on (the CA always connects to 80; tests only)")
 	acmeTLSPort := flag.Int("acme-tls-port", 443, "TCP port the TLS-ALPN-01 challenge is answered on (the CA always connects to 443; tests only)")
@@ -169,6 +172,7 @@ func main() {
 
 	a := NewAgent(cfg, agentVersion, ids)
 	a.heartbeatEvery = min(max(*heartbeat, time.Second), 5*time.Minute)
+	a.checkpointEvery = min(max(*checkpoint, time.Second), 10*time.Second)
 	a.filters = newSourceFilters(dir)
 	a.certs = newCertManager(dir)
 	a.certs.ua = "akari-agent/" + agentVersion
@@ -201,6 +205,12 @@ func main() {
 		slog.Info("resending final traffic counters from before the restart", "reports", len(finals))
 	} else {
 		a.finalsStore.drop()
+	}
+	// Counters a previous process checkpointed before it died without a
+	// graceful stop (checkpoint.go).
+	a.ckpt = &checkpointStore{dir: dir}
+	if n := a.resumeCheckpoint(); n > 0 {
+		slog.Warn("previous process stopped without a graceful shutdown; resending its checkpointed traffic counters", "reports", n)
 	}
 
 	slog.Info("agent starting",
