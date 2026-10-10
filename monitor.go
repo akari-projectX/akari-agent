@@ -78,7 +78,7 @@ func trafficLoop(ctx context.Context, every time.Duration, cm *CoreManager, send
 		case <-ticker.C:
 		}
 		if report := cm.TrafficChanges(); report != nil {
-			if err := send(&pb.AgentUp{Msg: &pb.AgentUp_Traffic{Traffic: report}}); err != nil {
+			if err := sendTraffic(send, report); err != nil {
 				return
 			}
 		}
@@ -87,4 +87,36 @@ func trafficLoop(ctx context.Context, every time.Duration, cm *CoreManager, send
 		}
 		onTick()
 	}
+}
+
+// maxReportRows bounds the rows of one TrafficReport message. The panel
+// drops a report with more than 65,536 rows whole (traffic.rs
+// MAX_REPORT_ROWS) and counts every row on its own (cumulative per key and
+// session), so a large counter set is sent as several reports of the same
+// session: 20k users on 4 entrances is 80k rows.
+const maxReportRows = 16384
+
+// trafficChunks splits r into reports of at most maxReportRows rows each
+// (r itself when it already fits; never an empty slice for a non-nil r).
+func trafficChunks(r *pb.TrafficReport) []*pb.TrafficReport {
+	if len(r.Users) <= maxReportRows {
+		return []*pb.TrafficReport{r}
+	}
+	out := make([]*pb.TrafficReport, 0, (len(r.Users)+maxReportRows-1)/maxReportRows)
+	for i := 0; i < len(r.Users); i += maxReportRows {
+		end := min(i+maxReportRows, len(r.Users))
+		out = append(out, &pb.TrafficReport{Users: r.Users[i:end:end], MonotonicMs: r.MonotonicMs, SessionId: r.SessionId})
+	}
+	return out
+}
+
+// sendTraffic sends r in chunks of at most maxReportRows rows; the first
+// error stops it (the stream is then dead and the next one resends).
+func sendTraffic(send func(*pb.AgentUp) error, r *pb.TrafficReport) error {
+	for _, c := range trafficChunks(r) {
+		if err := send(&pb.AgentUp{Msg: &pb.AgentUp_Traffic{Traffic: c}}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
