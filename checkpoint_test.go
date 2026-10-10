@@ -51,6 +51,9 @@ func TestCheckpointRoundTripAndTornSlot(t *testing.T) {
 	if got = (&checkpointStore{dir: dir}).load(); got[0].SessionId != "s2" {
 		t.Fatalf("new write outranked by a leftover slot: %v", got)
 	}
+	if err := n.write(make([]byte, maxCheckpointPayload+1)); err == nil {
+		t.Fatal("oversized checkpoint accepted")
+	}
 	n.clear()
 	if got = (&checkpointStore{dir: dir}).load(); got != nil {
 		t.Fatalf("cleared checkpoint still loads: %v", got)

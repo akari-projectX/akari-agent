@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"log/slog"
 	"os"
@@ -44,6 +45,10 @@ const (
 	checkpointHdr   = len(checkpointMagic) + 8 + 4 + 4 // magic, seq, len, crc
 	// defaultCheckpointEvery: what a hard kill can lose at most.
 	defaultCheckpointEvery = time.Second
+	// maxCheckpointPayload bounds a checkpoint (the length field is 32
+	// bits; ~1.3 M user rows at 50 bytes fit in 64 MiB, the agent's own
+	// message limit).
+	maxCheckpointPayload = 64 << 20
 )
 
 var checkpointSlots = [2]string{"traffic.ckpt.0", "traffic.ckpt.1"}
@@ -100,7 +105,7 @@ func readSlot(path string) (seq uint64, payload []byte, ok bool) {
 	n := binary.BigEndian.Uint32(h[8:12])
 	sum := binary.BigEndian.Uint32(h[12:16])
 	body := b[checkpointHdr:]
-	if uint64(n) != uint64(len(body)) || crc32.Checksum(body, crcTable) != sum {
+	if n > maxCheckpointPayload || uint64(n) != uint64(len(body)) || crc32.Checksum(body, crcTable) != sum {
 		return 0, nil, false
 	}
 	return seq, body, true
@@ -135,6 +140,9 @@ func (c *checkpointStore) load() []*pb.TrafficReport {
 
 // write stores the payload in the older slot (in place, no fsync).
 func (c *checkpointStore) write(payload []byte) error {
+	if len(payload) > maxCheckpointPayload {
+		return fmt.Errorf("checkpoint of %d bytes exceeds %d", len(payload), maxCheckpointPayload)
+	}
 	c.seq++
 	i := int(c.seq % 2)
 	if c.files[i] == nil {

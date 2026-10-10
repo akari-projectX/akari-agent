@@ -493,11 +493,14 @@ func TestEnrollAgainstPanel(t *testing.T) {
 	f.mu.Unlock()
 	a3 := tlsAgent(t, addr, dir, &Config{EnrollmentToken: "tok-2", Identity: IdentityConfig{CAPEM: ca.pem}})
 	stop, _ = runAgent(t, a3)
-	eventually(t, "re-enrollment", func() bool { e, _, _ := f.snapshot(); return e == 2 })
+	// The fake panel counts the enrollment before the agent has stored the
+	// certificate it returned: wait for both.
+	eventually(t, "re-enrollment with a new certificate", func() bool {
+		e, _, _ := f.snapshot()
+		id := a3.ids.current()
+		return e == 2 && id != nil && id.leaf.SerialNumber.Cmp(cur.leaf.SerialNumber) != 0
+	})
 	stop()
-	if a3.ids.current().leaf.SerialNumber.Cmp(cur.leaf.SerialNumber) == 0 {
-		t.Fatal("re-enrollment kept the old certificate")
-	}
 	// Refused token, no identity: permanent error.
 	a4 := tlsAgent(t, addr, t.TempDir(), &Config{EnrollmentToken: "wrong", Identity: IdentityConfig{CAPEM: ca.pem}})
 	err := a4.Run(context.Background())
