@@ -96,7 +96,10 @@ func (a *Agent) onUpdateOffer(ctx context.Context, gen uint64, send func(*pb.Age
 		return reject(version, perr)
 	}
 	policy := release.Policy{Running: a.agentVersion, OS: runtime.GOOS, Arch: runtime.GOARCH,
-		PanelProtocol: o.GetPanelProtocol(), RolledBack: a.upd.rolledBack}
+		PanelProtocol: o.GetPanelProtocol(), RolledBack: a.upd.rolledBack,
+		// The history of versions this node ran is the root updater's (the
+		// authority re-checks everything); the agent cannot read it.
+		DeferRan: true}
 	if err := policy.Check(m); err != nil {
 		return reject(version, err)
 	}

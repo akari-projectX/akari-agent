@@ -3,10 +3,13 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -898,5 +901,113 @@ func TestOpenRCStuckSupervisor(t *testing.T) {
 	}
 	if procAlive(os.Getpid()) != true || procAlive(1<<30) {
 		t.Fatal("procAlive")
+	}
+}
+
+// rollbackReq stages a signed rollback manifest (schema 2 unless mod
+// changes it) the way the agent would.
+func (e *updaterEnv) stageRollback(version string, bin []byte, mod func(*release.Manifest)) {
+	e.t.Helper()
+	sum := sha256.Sum256(bin)
+	m := &release.Manifest{Schema: release.SchemaRollback, Version: version, OS: "linux", Arch: "amd64",
+		SHA256: hex.EncodeToString(sum[:]), Size: int64(len(bin)), MinPanelProtocol: 3,
+		CreatedAt: "2026-09-30T00:00:00Z", Rollback: true, RollbackFrom: "v1.1.0", ExpiresAt: "2026-10-07T00:00:00Z"}
+	if mod != nil {
+		mod(m)
+	}
+	// Not m.Encode: the schema-1 case is a manifest the signer refuses.
+	mb, err := json.Marshal(m)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.agentDir, stagedName), bin, 0o600); err != nil {
+		e.t.Fatal(err)
+	}
+	e.writeRequest(applyRequest{Schema: requestSchema, Kind: kindApply, RolloutID: "rb", Version: version, PanelProtocol: 3,
+		Manifest: mb, Signatures: []release.Signature{release.Sign(mb, e.k.priv)}})
+}
+
+// Audit P2-2: a signed rollback installs only on the version it names,
+// before it expires, and only back to a version this node ran.
+func TestRollbackIsBound(t *testing.T) {
+	e := newUpdaterEnv(t)
+	// The node updates v1.0.0 -> v1.1.0 (the updater of v1.0.0 records
+	// itself as having run), then runs v1.1.0.
+	newBin := []byte("new agent v1.1.0")
+	e.stage("v1.1.0", newBin, nil)
+	e.onRestart = func(int32) { e.confirm("v1.1.0") }
+	if err := e.p.run(); err != nil {
+		t.Fatal(err)
+	}
+	if st := e.rootState(); len(st.Ran) != 2 || st.Ran[0] != "v1.0.0" || st.Ran[1] != "v1.1.0" {
+		t.Fatalf("ran versions %v", st.Ran)
+	}
+	e.p.version = "v1.1.0" // the next update runs the new binary's updater
+	restarts := e.restarts.Load()
+	old := []byte("installed v1.0.0")
+	for _, c := range []struct {
+		name, want string
+		mod        func(*release.Manifest)
+		version    string
+	}{
+		{"names another version", "replaces v1.2.0", func(m *release.Manifest) { m.RollbackFrom = "v1.2.0" }, "v1.0.0"},
+		{"expired", "expired", func(m *release.Manifest) {
+			m.CreatedAt, m.ExpiresAt = "2026-09-20T00:00:00Z", "2026-09-27T00:00:00Z"
+		}, "v1.0.0"},
+		{"expires exactly now", "expired", func(m *release.Manifest) {
+			m.CreatedAt, m.ExpiresAt = "2026-09-20T00:00:00Z", "2026-10-02T00:00:00Z"
+		}, "v1.0.0"},
+		{"never ran that version", "never ran v0.9.0", nil, "v0.9.0"},
+		{"schema 1", "refused", func(m *release.Manifest) { m.Schema, m.RollbackFrom, m.ExpiresAt = 1, "", "" }, "v1.0.0"},
+		{"no binding", "rollback_from", func(m *release.Manifest) { m.RollbackFrom = "" }, "v1.0.0"},
+		{"lifetime over 30 days", "30 days", func(m *release.Manifest) { m.ExpiresAt = "2026-11-02T00:00:00Z" }, "v1.0.0"},
+	} {
+		e.stageRollback(c.version, old, c.mod)
+		if err := e.p.run(); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if r := e.result(); r.State != resRejected || !strings.Contains(r.Error, c.want) {
+			t.Errorf("%s: result %+v, want rejection containing %q", c.name, r, c.want)
+		}
+		if e.installed() != string(newBin) || e.restarts.Load() != restarts {
+			t.Fatalf("%s: the binary changed (%q)", c.name, e.installed())
+		}
+	}
+	// The same rollback with its binding right goes through.
+	e.stageRollback("v1.0.0", old, nil)
+	e.onRestart = func(int32) { e.confirm("v1.0.0") }
+	if err := e.p.run(); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.result(); r.State != resConfirmed || r.Version != "v1.0.0" {
+		t.Fatalf("result %+v", r)
+	}
+	if e.installed() != string(old) {
+		t.Fatalf("installed %q", e.installed())
+	}
+}
+
+func TestUpdaterRecordsRanVersions(t *testing.T) {
+	e := newUpdaterEnv(t)
+	if err := e.p.run(); err != nil {
+		t.Fatal(err)
+	}
+	if st := e.rootState(); len(st.Ran) != 1 || st.Ran[0] != "v1.0.0" {
+		t.Fatalf("the installed version is a ran version: %v", st.Ran)
+	}
+	// An unversioned build is not a rollback target.
+	e.p.version = "dev"
+	if err := e.p.run(); err != nil {
+		t.Fatal(err)
+	}
+	if st := e.rootState(); len(st.Ran) != 1 {
+		t.Fatalf("dev build recorded: %v", st.Ran)
+	}
+	var st rootState
+	for i := range 2 * maxRan {
+		st.markRan("v1.0." + strconv.Itoa(i))
+	}
+	if len(st.Ran) != maxRan || st.Ran[maxRan-1] != "v1.0."+strconv.Itoa(2*maxRan-1) {
+		t.Fatalf("ran history not bounded newest-last: %d", len(st.Ran))
 	}
 }

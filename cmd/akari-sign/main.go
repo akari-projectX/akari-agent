@@ -145,7 +145,9 @@ func sign(args []string) error {
 	createdAt := fs.String("created-at", "", "RFC 3339 timestamp (default: $SOURCE_DATE_EPOCH or now)")
 	outM := fs.String("out-manifest", "", "default: <binary>.manifest.json")
 	outS := fs.String("out-sig", "", "default: <binary>.manifest.sig")
-	rollback := fs.Bool("rollback", false, "mark as an explicit rollback target (may be installed over newer versions)")
+	rollback := fs.Bool("rollback", false, "mark as an explicit rollback target (may be installed over newer versions; needs -rollback-from)")
+	rollbackFrom := fs.String("rollback-from", "", "rollback only: the exact version this rollback replaces (nodes running anything else refuse it)")
+	expires := fs.String("expires", "7d", "rollback only: how long the signed rollback stays valid, like 7d or 36h (at most 30d), or an RFC 3339 time")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -186,8 +188,26 @@ func sign(args []string) error {
 	if err != nil {
 		return err
 	}
+	schema, from, expiresAt := release.SchemaForward, "", ""
+	switch {
+	case *rollback:
+		created, perr := time.Parse(time.RFC3339, ts)
+		if perr != nil {
+			return fmt.Errorf("sign: -created-at: %w", perr)
+		}
+		if *rollbackFrom == "" {
+			return errors.New("sign: -rollback needs -rollback-from <the version it replaces>")
+		}
+		exp, eerr := parseExpiry(*expires, created)
+		if eerr != nil {
+			return eerr
+		}
+		schema, from, expiresAt = release.SchemaRollback, *rollbackFrom, exp.UTC().Format(time.RFC3339)
+	case *rollbackFrom != "":
+		return errors.New("sign: -rollback-from only applies to -rollback")
+	}
 	m := &release.Manifest{
-		Schema: release.Schema, Version: *version, OS: *osName, Arch: *arch,
+		Schema: schema, RollbackFrom: from, ExpiresAt: expiresAt, Version: *version, OS: *osName, Arch: *arch,
 		SHA256: sum, Size: size, MinPanelProtocol: uint32(*minProto), //nolint:gosec // range checked above
 		CreatedAt: ts, Rollback: *rollback,
 	}
@@ -215,6 +235,27 @@ func sign(args []string) error {
 	fmt.Printf("signed %s %s/%s sha256=%s size=%d key=%s\n  %s\n  %s\n",
 		m.Version, m.OS, m.Arch, m.SHA256, m.Size, sig.KeyID, *outM, *outS)
 	return nil
+}
+
+// parseExpiry reads -expires: a duration with a day unit ("7d"), a Go
+// duration ("36h"), or an absolute RFC 3339 time. The manifest format
+// caps it at 30 days after created_at (Manifest validation enforces it).
+func parseExpiry(v string, created time.Time) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t, nil
+	}
+	if days, ok := strings.CutSuffix(v, "d"); ok {
+		n, err := strconv.Atoi(days)
+		if err != nil || n <= 0 || n > 30 {
+			return time.Time{}, fmt.Errorf("sign: -expires %q: days must be 1..30", v)
+		}
+		return created.AddDate(0, 0, n), nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return time.Time{}, fmt.Errorf("sign: -expires %q: want like 7d, 36h or an RFC 3339 time", v)
+	}
+	return created.Add(d), nil
 }
 
 func hashFile(path string) (string, int64, error) {
@@ -336,5 +377,12 @@ func verify(args []string) error {
 		}
 	}
 	fmt.Printf("ok: %s %s/%s signed by %s\n", m.Version, m.OS, m.Arch, id)
+	if m.Rollback {
+		note := "valid"
+		if m.Expired(time.Now()) {
+			note = "EXPIRED"
+		}
+		fmt.Printf("  rollback: only for nodes running %s; expires %s (%s)\n", m.RollbackFrom, m.ExpiresAt, note)
+	}
 	return nil
 }

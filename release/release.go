@@ -32,8 +32,17 @@ const MaxArtifactSize = 256 << 20
 // MaxManifestSize bounds the manifest bytes.
 const MaxManifestSize = 4096
 
-// Schema is the only manifest schema this code understands.
-const Schema = 1
+// Manifest schemas. 1 = a normal forward release. 2 = a signed rollback,
+// bound to the version it replaces and to an expiry (audit P2-2): a leaked
+// rollback manifest cannot be replayed later or against another version.
+// Schema-1 rollback manifests are refused.
+const (
+	SchemaForward  = 1
+	SchemaRollback = 2
+)
+
+// MaxRollbackLifetime bounds expires_at - created_at of a rollback.
+const MaxRollbackLifetime = 30 * 24 * time.Hour
 
 // PrivateKeyPrefix tags a release private key (the 32-byte Ed25519 seed,
 // standard base64).
@@ -50,8 +59,15 @@ type Manifest struct {
 	MinPanelProtocol uint32 `json:"min_panel_protocol"`
 	CreatedAt        string `json:"created_at"`
 	// Rollback: an explicitly signed downgrade target. Only such a manifest
-	// may carry a version below the running one.
+	// may carry a version below the running one; it is schema 2 and names
+	// RollbackFrom and ExpiresAt.
 	Rollback bool `json:"rollback"`
+	// RollbackFrom: the exact version this rollback replaces; accepted
+	// only by an agent running it.
+	RollbackFrom string `json:"rollback_from,omitempty"`
+	// ExpiresAt (RFC 3339): the manifest is not valid at or after this
+	// time; at most MaxRollbackLifetime after CreatedAt.
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 
 var (
@@ -91,7 +107,7 @@ func ParseManifest(b []byte) (*Manifest, error) {
 
 func (m *Manifest) validate() error {
 	switch {
-	case m.Schema != Schema:
+	case m.Schema != SchemaForward && m.Schema != SchemaRollback:
 		return fmt.Errorf("manifest: unsupported schema %d", m.Schema)
 	case !ValidVersion(m.Version):
 		return fmt.Errorf("manifest: invalid version %q", m.Version)
@@ -102,10 +118,58 @@ func (m *Manifest) validate() error {
 	case m.Size <= 0 || m.Size > MaxArtifactSize:
 		return fmt.Errorf("manifest: size %d out of range", m.Size)
 	}
-	if _, err := time.Parse(time.RFC3339, m.CreatedAt); err != nil {
+	created, err := time.Parse(time.RFC3339, m.CreatedAt)
+	if err != nil {
 		return fmt.Errorf("manifest: created_at: %w", err)
 	}
+	return m.validateRollback(created)
+}
+
+// validateRollback: a rollback is schema 2 and names the version it
+// replaces and an expiry; nothing else may carry those fields.
+func (m *Manifest) validateRollback(created time.Time) error {
+	if !m.Rollback {
+		if m.Schema != SchemaForward {
+			return errors.New("manifest: schema 2 is for rollback manifests only")
+		}
+		if m.RollbackFrom != "" || m.ExpiresAt != "" {
+			return errors.New("manifest: rollback_from / expires_at belong to rollback manifests")
+		}
+		return nil
+	}
+	if m.Schema != SchemaRollback {
+		return errors.New("manifest: rollback manifests need schema 2 (rollback_from, expires_at); schema-1 rollbacks are refused")
+	}
+	if m.RollbackFrom == "" {
+		return errors.New("manifest: rollback manifest lacks rollback_from")
+	}
+	if c, err := CompareVersions(m.RollbackFrom, m.Version); err != nil || c <= 0 {
+		return fmt.Errorf("manifest: rollback_from %q must be a version newer than %s", m.RollbackFrom, m.Version)
+	}
+	if m.ExpiresAt == "" {
+		return errors.New("manifest: rollback manifest lacks expires_at")
+	}
+	exp, err := time.Parse(time.RFC3339, m.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("manifest: expires_at: %w", err)
+	}
+	if !exp.After(created) {
+		return errors.New("manifest: expires_at is not after created_at")
+	}
+	if exp.Sub(created) > MaxRollbackLifetime {
+		return fmt.Errorf("manifest: expires_at is more than %d days after created_at", int(MaxRollbackLifetime.Hours()/24))
+	}
 	return nil
+}
+
+// Expired reports whether a rollback manifest's expires_at has passed at
+// now. Manifests without one never expire (only rollbacks carry it).
+func (m *Manifest) Expired(now time.Time) bool {
+	if m.ExpiresAt == "" {
+		return false
+	}
+	exp, err := time.Parse(time.RFC3339, m.ExpiresAt)
+	return err != nil || !now.Before(exp)
 }
 
 // Signature is one release-key signature over a manifest.
@@ -223,6 +287,21 @@ type Policy struct {
 	// RolledBack reports whether the agent already rolled back from this
 	// version (it is never accepted again).
 	RolledBack func(version string) bool
+	// Ran reports whether this node itself previously ran (and, for the
+	// updater, confirmed) the version. A signed rollback may only go to
+	// such a version, so even a freshly signed rollback cannot install a
+	// release this node never ran. nil = unknown = refuse rollbacks,
+	// unless DeferRan.
+	Ran func(version string) bool
+	// DeferRan: the caller is not the authority on Ran (the unprivileged
+	// agent cannot read the root updater's history) and skips that one
+	// check; the updater re-verifies everything with Ran set.
+	DeferRan bool
+	// Now is the clock for expires_at (nil = time.Now). The wall clock is
+	// the only one available offline: someone who controls the node's time
+	// can stretch a rollback's window, but never beyond the manifest's
+	// own 30-day cap, and the manifest is still bound to rollback_from.
+	Now func() time.Time
 }
 
 // Check applies the version policy to a verified manifest.
@@ -245,6 +324,22 @@ func (p Policy) Check(m *Manifest) error {
 		return fmt.Errorf("already running %s", m.Version)
 	case c < 0 && !m.Rollback:
 		return fmt.Errorf("refusing downgrade %s -> %s (manifest is not a signed rollback target)", p.Running, m.Version)
+	case !m.Rollback:
+		return nil
+	}
+	// A signed rollback: only from the version it names, before it
+	// expires, to a version this node ran.
+	now := time.Now
+	if p.Now != nil {
+		now = p.Now
+	}
+	switch {
+	case m.RollbackFrom != p.Running:
+		return fmt.Errorf("this rollback replaces %s, this agent runs %s", m.RollbackFrom, p.Running)
+	case m.Expired(now()):
+		return fmt.Errorf("this signed rollback expired at %s", m.ExpiresAt)
+	case !p.DeferRan && (p.Ran == nil || !p.Ran(m.Version)):
+		return fmt.Errorf("this node never ran %s: a rollback only goes back to a version it has run", m.Version)
 	}
 	return nil
 }

@@ -549,12 +549,20 @@ message Noop {}
 //   {"schema":1, "version":"v1.2.3", "os":"linux", "arch":"amd64",
 //    "sha256":"<64 lowercase hex>", "size":<bytes>,
 //    "min_panel_protocol":3, "created_at":"<RFC 3339>", "rollback":false}
+//   (rollback: see below)
 // version is semver with a leading "v". The agent accepts it only if:
-// some signature verifies under a pinned key; schema == 1; os/arch are its
+// some signature verifies under a pinned key; schema is 1 (forward) or 2 (rollback); os/arch are its
 // own; version > its running version (semver precedence) — or rollback is
 // true (an explicitly signed rollback target), and never a version it
 // already rolled back from; min_panel_protocol <= the offer's
 // panel_protocol; size <= 256 MiB.
+// A rollback manifest is schema 2 and adds "rollback_from":"<version>" and
+// "expires_at":"<RFC 3339>" (after created_at, at most 30 days later):
+// the agent accepts it only while running exactly rollback_from, before
+// expires_at, and only to a version it has itself run (the updater keeps
+// that history). Schema-1 rollback manifests are refused; forward releases
+// stay schema 1 and carry neither field. Shared vector:
+// proto/update_vector.json (rollback_cases).
 // Signature: Ed25519 over "akari-agent-manifest-v1\n" || manifest bytes.
 // key_id: first 8 bytes of SHA-256(raw 32-byte public key), lowercase hex.
 message ManifestSignature {

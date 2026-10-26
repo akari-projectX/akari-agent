@@ -18,6 +18,8 @@ import (
 func FuzzParseManifest(f *testing.F) {
 	f.Add([]byte(`{"schema":1,"version":"v1.2.3","os":"linux","arch":"amd64","sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","size":5,"min_panel_protocol":3,"created_at":"2026-10-02T00:00:00Z","rollback":false}`))
 	f.Add([]byte(`{"schema":1,"VERSION":"v1.2.3-rc.1+b.7","os":"linux","arch":"arm64","sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","size":5,"min_panel_protocol":3,"created_at":"2026-10-02T00:00:00+08:00"} `))
+	f.Add([]byte(`{"schema":2,"version":"v1.2.3","os":"linux","arch":"amd64","sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","size":5,"min_panel_protocol":3,"created_at":"2026-10-20T00:00:00Z","rollback":true,"rollback_from":"v1.3.0","expires_at":"2026-10-27T00:00:00Z"}`))
+	f.Add([]byte(`{"schema":2,"version":"v1.2.3","os":"linux","arch":"amd64","sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","size":5,"min_panel_protocol":3,"created_at":"2026-10-20T00:00:00Z","rollback":true,"rollback_from":"v1.3.0","expires_at":"2026-11-19T00:00:00+00:00"}`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		m, err := ParseManifest(b)
 		if err != nil {
