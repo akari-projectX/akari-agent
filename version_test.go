@@ -18,15 +18,14 @@ func TestVersionString(t *testing.T) {
 }
 
 // The embedded licence bundle is the generated file (R19): it states the
-// binary's GPL-3.0-or-later status and carries the GPL and MIT texts.
+// binary's licensing (no GPL module is linked since xray-core v26.10.21) and
+// carries the MIT text and the linked modules.
 func TestThirdPartyLicensesEmbedded(t *testing.T) {
 	for _, want := range []string{
 		"akari-agent: licences of the released binary",
-		"GPL-3.0-or-later",
+		"No GPL module is linked",
 		"github.com/xtls/xray-core",
-		"github.com/sagernet/sing ",
-		"GNU GENERAL PUBLIC LICENSE",
-		"Version 3, 29 June 2007",
+		"Mozilla Public License",
 		"MIT License",
 	} {
 		if !strings.Contains(thirdPartyLicenses, want) {

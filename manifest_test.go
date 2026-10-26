@@ -71,21 +71,39 @@ func TestModulesMatchManifest(t *testing.T) {
 	}
 }
 
+// Pseudo-versions of xray-core commits that carry a release before upstream
+// pushes the matching Go module tag (v1.YYMMDD.P): commit -> release. The
+// pseudo-version's base is the previous tag, so its date part names the
+// OLD release. Drop the entry when go.mod moves to the v1.* tag.
+var xrayCommitReleases = map[string]string{
+	"1b1647cd9ddf": "v26.10.21",
+}
+
 // The kernel version the manifest was verified against is the xray-core
-// this agent links (v1.YYMMDD.P = vYY.M.D): an xray bump must re-verify the
+// this agent links (v1.YYMMDD.P = vYY.M.D, or a pseudo-version of a release
+// commit listed in xrayCommitReleases): an xray bump must re-verify the
 // matrix (`make test-canary`) and update the panel's manifest.
 func TestManifestKernelIsLinkedXray(t *testing.T) {
 	mod, err := os.ReadFile("go.mod")
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`github\.com/xtls/xray-core v1\.(\d\d)(\d\d)(\d\d)\.(\d+)`).FindSubmatch(mod)
+	m := regexp.MustCompile(`github\.com/xtls/xray-core v1\.(\d\d)(\d\d)(\d\d)\.(\d+)(-0\.\d{14}-([0-9a-f]{12}))?`).FindSubmatch(mod)
 	if m == nil {
 		t.Fatal("xray-core not found in go.mod")
 	}
-	var yy, mm, dd int
-	fmt.Sscanf(string(m[1])+" "+string(m[2])+" "+string(m[3]), "%d %d %d", &yy, &mm, &dd)
-	want := fmt.Sprintf("v%d.%d.%d", yy, mm, dd)
+	var want string
+	if commit := string(m[6]); commit != "" {
+		release, ok := xrayCommitReleases[commit]
+		if !ok {
+			t.Fatalf("go.mod links xray-core commit %s (%s): add it to xrayCommitReleases", commit, m[0])
+		}
+		want = release
+	} else {
+		var yy, mm, dd int
+		fmt.Sscanf(string(m[1])+" "+string(m[2])+" "+string(m[3]), "%d %d %d", &yy, &mm, &dd)
+		want = fmt.Sprintf("v%d.%d.%d", yy, mm, dd)
+	}
 	if got := manifest.kernelVersion("xray"); got != want {
 		t.Fatalf("manifest kernel xray %q, go.mod links %s (%s)", got, want, m[0])
 	}

@@ -63,7 +63,7 @@ jobs:
           make dist VERSION="$GITHUB_REF_NAME" COMMIT="$(git rev-parse --short=12 "$GITHUB_SHA")"
           dist/akari-agent-linux-amd64 -version
           [ "$(dist/akari-agent-linux-amd64 -version | cut -d' ' -f2)" = "$GITHUB_REF_NAME" ]
-          # R19: the binary carries its licensing (GPL-3.0-or-later combined work).
+          # R19: the binary carries its licensing (generated from the linked modules).
           dist/akari-agent-linux-amd64 -licenses | cmp - dist/THIRD_PARTY_LICENSES.txt
       # M6 self-update: Ed25519-signed manifests (what agents verify, with
       # the keys pinned in release-keys.txt). The private key lives only in
@@ -121,9 +121,9 @@ jobs:
           ## Licensing
 
           akari-agent's own source code is MIT licensed. The release **binaries** statically link
-          `github.com/sagernet/sing` and `sing-shadowsocks` (GPL-3.0-or-later, through xray-core's
-          Shadowsocks support), so each binary is a combined work distributed under
-          **GPL-3.0-or-later**. Corresponding source is this tag (`make dist` reproduces the binary).
+          xray-core (MPL-2.0) and other permissively licensed modules; no GPL module is linked
+          (xray-core no longer depends on `sagernet/sing*`). Corresponding source is this tag
+          (`make dist` reproduces the binary).
           Every linked module and its licence text: `THIRD_PARTY_LICENSES.txt` (also printed by
           `akari-agent -licenses`).
           EOF

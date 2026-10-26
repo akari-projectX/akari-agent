@@ -1,6 +1,6 @@
 # akari-agent
 
-Akari 控制面板的节点端 agent。内嵌 **xray-core**（`v1.260327.0`，即 release v26.3.27 的 Go 模块形式），并与面板保持一条仅出站的 mTLS gRPC 长连接。节点上没有管理端口，也不保存协议凭据——由面板 CA 签发的 TLS 客户端证书就是节点的身份。
+Akari 控制面板的节点端 agent。内嵌 **xray-core**（release v26.10.21，Go 模块形式为其提交的伪版本 `v1.260327.1-0.20261021115930-1b1647cd9ddf`），并与面板保持一条仅出站的 mTLS gRPC 长连接。节点上没有管理端口，也不保存协议凭据——由面板 CA 签发的 TLS 客户端证书就是节点的身份。
 
 职责：
 
@@ -17,7 +17,7 @@ Akari 控制面板的节点端 agent。内嵌 **xray-core**（`v1.260327.0`，�
 ## Licence（许可）
 
 - **源码**：akari-agent 自有代码采用 MIT 许可（`LICENSE`）。
-- **二进制**：每个 agent 二进制都静态链接 xray-core（MPL-2.0），并通过 xray-core 的 Shadowsocks 支持链接 `github.com/sagernet/sing` 与 `sing-shadowsocks`，二者为 **GPL-3.0-or-later**。因此发布版（或自行构建）的 agent 二进制是按 **GPL-3.0-or-later**（`LICENSES/GPL-3.0.txt`）分发的组合作品。对应源码即本公开仓库中 `akari-agent -version` 所示的 tag/commit；`make dist` 可逐字节复现发布二进制。我们自己的文件仍为 MIT，不做重新授权。（决策 R19：二进制的许可状态在此处和发布说明中声明；我们不携带为规避 GPL 模块而去掉 Shadowsocks 的 xray 补丁。）
+- **二进制**：每个 agent 二进制静态链接 xray-core（MPL-2.0）等模块，**不含 GPL 模块**——xray-core v26.10.21 起自己实现 Shadowsocks 2022，不再依赖 `github.com/sagernet/sing*`（GPL-3.0-or-later；它们现在只被测试使用，不进二进制）。二进制按 MIT 与第三方声明分发（`THIRD_PARTY_LICENSES.txt`，由 `make third-party` 按实际链接的模块生成，若将来再链接 GPL 模块会自动写入组合作品声明并附 `LICENSES/GPL-3.0.txt`）。对应源码即本公开仓库中 `akari-agent -version` 所示的 tag/commit；`make dist` 可逐字节复现发布二进制。（决策 R19 的前提——二进制链接 GPL 模块——不再成立，见 `THIRD-PARTY-NOTICES.md`。）
 - **第三方许可**：`THIRD_PARTY_LICENSES.txt` 列出链接进二进制的每个模块及其许可，并原样附带许可/声明文本。它是生成物（`make third-party`，`cmd/thirdparty`：对 linux/amd64+arm64 执行 `go list -deps`，许可文件取自模块缓存，白名单 fail-closed）；过期时 CI 失败（`make check-third-party`）；每次发布都作为附件提供，二进制也内嵌了它：`akari-agent -licenses` 会打印（通过面板安装的节点只会收到二进制）。`THIRD-PARTY-NOTICES.md` 是其背后的维护者评估。
 
 ## Build（构建）
