@@ -102,16 +102,6 @@ func embeddedUnit(name string) ([]byte, bool) {
 	return nil, false
 }
 
-// embeddedUnits: the files this release carries for s.
-func (s *initSys) embeddedUnits() map[string][]byte {
-	out := make(map[string][]byte, len(s.units))
-	for _, n := range s.units {
-		b, _ := embeddedUnit(n)
-		out[n] = b
-	}
-	return out
-}
-
 func allUnitNames() []string {
 	var out []string
 	for _, s := range initSystems {
