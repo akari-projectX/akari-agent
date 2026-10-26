@@ -618,6 +618,7 @@ func (a *Agent) session(parent context.Context) (err error) {
 	go func() {
 		defer wg.Done()
 		trafficLoop(ctx, a.trafficEvery, a.core, send, func() {
+			a.finals.flush(gen, send) // the next burst, if one was held back
 			a.finals.confirm(gen, a.finalsConfirm)
 			if a.finals.len() == 0 && a.finalsPersisted.Swap(false) {
 				if st := a.finalStore(); st != nil {
@@ -1061,9 +1062,25 @@ func (a *Agent) tlsConfig(id *nodeIdentity) *tls.Config {
 // session), so a report is resent on every new stream until one stream has
 // carried it and then stayed up for finalsConfirmAfter (longer than the
 // keepalive death time, so a stream that was already dead cannot confirm).
+//
+// There is one item per session: reports of the same session (a removed
+// user's final counters, then the instance's) are merged, the larger
+// cumulative value per user winning. The panel admits at most
+// MAX_DIRTY_SESSIONS_PER_SERVER (16) sessions that it has not yet persisted
+// (a flush every 5 s) and silently drops the report of any further new
+// session, which the agent would then count as delivered; so flush sends at
+// most finalsPerBurst sessions at a time and, when more are queued, waits
+// finalsBurstGap (longer than the panel's flush interval) before the next
+// burst, leaving room for the live session.
 type finalQueue struct {
 	mu    sync.Mutex
 	items []*finalItem
+	// now is the clock (nil: time.Now); the burst gap uses it.
+	now func() time.Time
+	// burstGen and burstAt: the stream and time of the last burst that left
+	// reports behind (zero: none). The next flush on that stream waits.
+	burstGen uint64
+	burstAt  time.Time
 }
 
 type finalItem struct {
@@ -1073,7 +1090,21 @@ type finalItem struct {
 	sentAt time.Time
 }
 
-const maxFinals = 64
+const (
+	maxFinals = 64
+	// finalsPerBurst: sessions sent at once (half the panel's cap of
+	// unpersisted sessions per server: the rest is for the live session).
+	finalsPerBurst = 8
+	// finalsBurstGap: wait between bursts (the panel flushes every 5 s).
+	finalsBurstGap = 7 * time.Second
+)
+
+func (q *finalQueue) clock() time.Time {
+	if q.now != nil {
+		return q.now()
+	}
+	return time.Now()
+}
 
 func (q *finalQueue) add(r *pb.TrafficReport) {
 	if r == nil || len(r.Users) == 0 {
@@ -1081,6 +1112,13 @@ func (q *finalQueue) add(r *pb.TrafficReport) {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	for _, it := range q.items {
+		if it.report.SessionId == r.SessionId {
+			it.report = mergeReports(it.report, r)
+			it.sent = false // the merged values go out again
+			return
+		}
+	}
 	q.items = append(q.items, &finalItem{report: r})
 	if len(q.items) > maxFinals {
 		slog.Warn("dropping oldest unsent final traffic report", "session", q.items[0].report.SessionId)
@@ -1088,19 +1126,57 @@ func (q *finalQueue) add(r *pb.TrafficReport) {
 	}
 }
 
-// flush sends every report not yet sent on stream gen.
+// mergeReports combines two reports of one session: counters are
+// cumulative within a session, so each user keeps the larger value of each
+// direction. Neither input is modified.
+func mergeReports(a, b *pb.TrafficReport) *pb.TrafficReport {
+	out := &pb.TrafficReport{
+		SessionId:   a.SessionId,
+		MonotonicMs: max(a.MonotonicMs, b.MonotonicMs),
+		Users:       make([]*pb.UserTraffic, 0, len(a.Users)+len(b.Users)),
+	}
+	at := make(map[string]int, len(a.Users)+len(b.Users))
+	for _, rep := range []*pb.TrafficReport{a, b} {
+		for _, u := range rep.Users {
+			i, ok := at[u.UserId]
+			if !ok {
+				at[u.UserId] = len(out.Users)
+				out.Users = append(out.Users, &pb.UserTraffic{UserId: u.UserId, UpBytes: u.UpBytes, DownBytes: u.DownBytes})
+				continue
+			}
+			m := out.Users[i]
+			m.UpBytes, m.DownBytes = max(m.UpBytes, u.UpBytes), max(m.DownBytes, u.DownBytes)
+		}
+	}
+	return out
+}
+
+// flush sends the reports not yet sent on stream gen: at most
+// finalsPerBurst of them, the rest in later bursts (the next flush on this
+// stream at least finalsBurstGap later; the traffic tick calls it).
 func (q *finalQueue) flush(gen uint64, send func(*pb.AgentUp) error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	now := q.clock()
+	if q.burstGen == gen && now.Sub(q.burstAt) < finalsBurstGap {
+		return
+	}
+	n := 0
 	for _, it := range q.items {
 		if it.sent && it.gen == gen {
 			continue
 		}
+		if n == finalsPerBurst {
+			q.burstGen, q.burstAt = gen, now
+			return
+		}
 		if sendTraffic(send, it.report) != nil {
 			return
 		}
-		it.sent, it.gen, it.sentAt = true, gen, time.Now()
+		it.sent, it.gen, it.sentAt = true, gen, now
+		n++
 	}
+	q.burstGen = 0
 }
 
 // confirm drops reports sent on stream gen at least `after` ago (the stream
