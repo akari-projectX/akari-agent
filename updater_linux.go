@@ -81,9 +81,29 @@ const (
 
 // rootState is the updater's own record (root-only directory).
 type rootState struct {
-	Schema     int        `json:"schema"`
-	RolledBack []string   `json:"rolled_back,omitempty"`
-	Trial      *rootTrial `json:"trial,omitempty"`
+	Schema     int      `json:"schema"`
+	RolledBack []string `json:"rolled_back,omitempty"`
+	// Ran: versions this node ran and confirmed (oldest first, at most
+	// maxRan): the installed version whenever the updater runs without a
+	// probation pending, and every update that passed its self-check. A
+	// signed rollback may only go to one of these (audit P2-2).
+	Ran   []string   `json:"ran,omitempty"`
+	Trial *rootTrial `json:"trial,omitempty"`
+}
+
+// maxRan bounds rootState.Ran.
+const maxRan = 64
+
+// markRan records a confirmed version; reports whether the state changed.
+func (st *rootState) markRan(v string) bool {
+	if !release.ValidVersion(v) || slices.Contains(st.Ran, v) {
+		return false
+	}
+	st.Ran = append(st.Ran, v)
+	if len(st.Ran) > maxRan {
+		st.Ran = st.Ran[len(st.Ran)-maxRan:]
+	}
+	return true
 }
 
 type rootTrial struct {
@@ -344,6 +364,13 @@ func (p *applier) run() error {
 			return err
 		}
 	}
+	// The installed binary is what runs now; with no probation pending it
+	// is a confirmed version (a legitimate rollback target later).
+	if st.Trial == nil && st.markRan(p.version) {
+		if err := p.save(&st); err != nil {
+			return err
+		}
+	}
 	d, err := openAgentDir(p.stateDir)
 	if errors.Is(err, unix.ENOENT) {
 		return nil
@@ -359,6 +386,7 @@ func (p *applier) run() error {
 		// Passed while no updater watched (e.g. across a reboot).
 		slog.Info("agent update passed its self-check", "version", t.Version)
 		st.Trial = nil
+		st.markRan(t.Version)
 		if err := p.save(&st); err != nil {
 			return err
 		}
@@ -450,6 +478,7 @@ func (p *applier) apply(d *agentDir, st *rootState, req *applyRequest) error {
 		return p.rollback(d, st, m.Version, req.RolloutID, why)
 	}
 	st.Trial = nil
+	st.markRan(m.Version)
 	if err := p.save(st); err != nil {
 		return err
 	}
@@ -474,7 +503,9 @@ func (p *applier) verify(st *rootState, req *applyRequest) (*release.Manifest, s
 		return nil, "", fmt.Errorf("request names %q, the signed manifest %s", req.Version, m.Version)
 	}
 	policy := release.Policy{Running: p.version, OS: p.goos, Arch: p.goarch, PanelProtocol: req.PanelProtocol,
-		RolledBack: func(v string) bool { return slices.Contains(st.RolledBack, v) }}
+		RolledBack: func(v string) bool { return slices.Contains(st.RolledBack, v) },
+		Ran:        func(v string) bool { return slices.Contains(st.Ran, v) },
+		Now:        p.now}
 	if err := policy.Check(m); err != nil {
 		return nil, "", err
 	}
