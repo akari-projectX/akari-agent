@@ -618,7 +618,8 @@ func (a *Agent) session(parent context.Context) (err error) {
 	go func() {
 		defer wg.Done()
 		trafficLoop(ctx, a.trafficEvery, a.core, send, func() {
-			a.finals.flush(gen, send) // the next burst, if one was held back
+			a.finals.add(a.core.SweepGone()) // churn: forget users removed long ago
+			a.finals.flush(gen, send)        // also the next burst, if one was held back
 			a.finals.confirm(gen, a.finalsConfirm)
 			if a.finals.len() == 0 && a.finalsPersisted.Swap(false) {
 				if st := a.finalStore(); st != nil {

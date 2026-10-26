@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/xtls/xray-core/app/dispatcher"
 	_ "github.com/xtls/xray-core/app/dns"
@@ -120,6 +121,15 @@ type CoreManager struct {
 	// counted: every email with counters in this instance, including users
 	// removed since (xray keeps their counters; the tail is still billed).
 	counted map[string]*userCounters
+	// goneCounters: users in counted with nothing installed any more -> since
+	// when; staleIssued: issued credentials of removed users on tags where
+	// removal really removes (not tombstones) -> since when. SweepGone
+	// drops both after a grace period, so user churn on a long-lived
+	// instance does not grow the maps without bound (audit P3-4).
+	goneCounters map[string]time.Time
+	staleIssued  map[issuedKey]time.Time
+	// now is the clock of the sweep (nil: time.Now); tests set it.
+	now func() time.Time
 	// nodeCert: where TLS inbounds naming the node certificate credential
 	// files read the ACME-managed certificate (protocol 6); nil = no
 	// rewrite (the files the admin installs). Set before each Rebuild.
@@ -151,6 +161,33 @@ func (m *CoreManager) resetUsersLocked() {
 	m.issued = make(map[string]map[string]appliedCred)
 	m.tombs = make(map[string]int)
 	m.counted = make(map[string]*userCounters)
+	m.goneCounters = make(map[string]time.Time)
+	m.staleIssued = make(map[issuedKey]time.Time)
+}
+
+// issuedKey names one entry of issued.
+type issuedKey struct{ tag, uid string }
+
+const (
+	// goneCounterGrace: how long a removed user's counters stay in counted
+	// (bytes still in flight when the gate cut the connection are counted
+	// into the same counters and reported with the next periodic report)
+	// before SweepGone hands their final values to the final queue.
+	goneCounterGrace = 2 * time.Minute
+	// staleIssuedTTL: how long the credential of a removed user stays in
+	// issued. A re-add of the identical credential within it reuses the
+	// *MemoryUser a client that kept its authenticated connection across
+	// the removal (Hysteria 2 QUIC, mux) still carries (W9). Hysteria
+	// clients can keep such a connection for days, hence a day, not
+	// minutes. Tombstones of shrink-unsafe tags are never dropped.
+	staleIssuedTTL = 24 * time.Hour
+)
+
+func (m *CoreManager) clock() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
 }
 
 // SessionID returns the session the current counters belong to.
@@ -639,6 +676,8 @@ func (m *CoreManager) applyOpLocked(op *pb.UserOp, fresh bool) (lost bool, err e
 			lost = true
 			if shrinkUnsafe(m.kinds[tag]) {
 				m.tombs[tag]++ // stays in xray's table, refused by the gate
+			} else if _, had := m.issued[tag][uid]; had {
+				m.staleIssued[issuedKey{tag, uid}] = m.clock()
 			}
 		}
 		m.gate.Revoke(gateKey{tag: tag, email: uid})
@@ -676,6 +715,9 @@ func (m *CoreManager) applyOpLocked(op *pb.UserOp, fresh bool) (lost bool, err e
 		m.registerCountersLocked(uid)
 	} else {
 		delete(m.applied, uid)
+		if _, ok := m.counted[uid]; ok {
+			m.goneCounters[uid] = m.clock()
+		}
 		m.gate.SetLimit(uid, 0)
 	}
 	return lost, err
@@ -710,6 +752,7 @@ func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, 
 		}
 		// Revive the tombstone: it never left xray's table.
 		m.gate.Allow(key, prev.user)
+		delete(m.staleIssued, issuedKey{tag, uid})
 		m.tombs[tag]--
 		cur[tag] = prev
 		m.registerCountersLocked(uid)
@@ -746,6 +789,7 @@ func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, 
 		m.issued[tag] = make(map[string]appliedCred)
 	}
 	m.issued[tag][uid] = c
+	delete(m.staleIssued, issuedKey{tag, uid})
 	m.registerCountersLocked(uid)
 	return nil
 }
@@ -760,6 +804,7 @@ func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, 
 // The counters are kept in m.counted (resolved once: a report reads two
 // atomics per user, no name building or lookup). Idempotent.
 func (m *CoreManager) registerCountersLocked(uid string) {
+	delete(m.goneCounters, uid)
 	if _, ok := m.counted[uid]; ok || m.instance == nil {
 		return
 	}
@@ -773,6 +818,45 @@ func (m *CoreManager) registerCountersLocked(uid string) {
 		return
 	}
 	m.counted[uid] = &userCounters{up: up, down: down}
+}
+
+// SweepGone bounds the per-user maps under churn (audit P3-4). Users whose
+// credentials were all removed more than goneCounterGrace ago leave
+// counted: their counters' final values are returned as a final report of
+// this session (the caller queues it like any other final report, which
+// delivers it with the usual confirmation; xray keeps the counters
+// themselves, so a re-add continues them), and issued credentials of
+// removed users older than staleIssuedTTL are forgotten. Called on the
+// traffic tick; nil when there is nothing to report.
+func (m *CoreManager) SweepGone() *pb.TrafficReport {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.clock()
+	var rows []*pb.UserTraffic
+	for uid, since := range m.goneCounters {
+		if now.Sub(since) < goneCounterGrace {
+			continue
+		}
+		delete(m.goneCounters, uid)
+		c := m.counted[uid]
+		delete(m.counted, uid)
+		if c == nil {
+			continue
+		}
+		if up, down := c.up.Value(), c.down.Value(); up != 0 || down != 0 {
+			rows = append(rows, &pb.UserTraffic{UserId: uid, UpBytes: uint64(up), DownBytes: uint64(down)})
+		}
+	}
+	for k, since := range m.staleIssued {
+		if now.Sub(since) >= staleIssuedTTL {
+			delete(m.staleIssued, k)
+			delete(m.issued[k.tag], k.uid)
+		}
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	return &pb.TrafficReport{Users: rows, SessionId: m.sessionID}
 }
 
 // Tombstones returns the number of tombstones on tag (tests, bench).
