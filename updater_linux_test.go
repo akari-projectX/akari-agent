@@ -76,6 +76,8 @@ func newUpdaterEnvFor(t *testing.T, init *initSys) *updaterEnv {
 		[]release.PublicKey{e.k.pub})
 	p.version = "v1.0.0"
 	p.goos, p.goarch = "linux", "amd64"
+	// Hermetic: no foreign sockets (the host's /proc/net is not the test's business).
+	p.sockets = func(bool) ([]netSocket, error) { return nil, nil }
 	p.selfCheck, p.grace, p.poll = 10*time.Second, 5*time.Second, time.Second
 	p.now = func() time.Time { return e.clock }
 	p.sleep = func(d time.Duration) { e.clock = e.clock.Add(d) }

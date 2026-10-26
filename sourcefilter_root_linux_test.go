@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 
 	"akari/agent/pb"
@@ -68,6 +69,77 @@ func TestSourceFiltersThroughTheUpdater(t *testing.T) {
 	run()
 	if len(scripts) != n {
 		t.Fatal("nft ran without a request")
+	}
+}
+
+// P2-1: a compromised agent must not get the root updater to drop new
+// connections to a port another user serves (sshd). Those filters are
+// skipped, the rest is applied, and the agent reports it.
+func TestUpdaterSkipsPortsOtherUsersHold(t *testing.T) {
+	e := newUpdaterEnv(t)
+	var scripts []string
+	e.p.nft = func(_ context.Context, script string) error { scripts = append(scripts, script); return nil }
+	st, err := os.Stat(e.agentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentUID := st.Sys().(*syscall.Stat_t).Uid
+	held := []netSocket{{22, agentUID + 1}, {20443, agentUID}, {5353, agentUID + 2}}
+	var failure error
+	e.p.sockets = func(udp bool) ([]netSocket, error) {
+		if udp {
+			return held[2:], failure
+		}
+		return held[:2], failure
+	}
+	s := newSourceFilters(filepath.Dir(e.agentDir))
+	cidrs := []string{"203.0.113.0/24"}
+	apply := func(filters ...*pb.SourceFilter) {
+		t.Helper()
+		s.Apply(filters)
+		if err := e.p.run(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Port 22 (root's sshd) and 5353/udp are skipped; 20443 (the agent's
+	// own, or unbound 20444) is applied.
+	apply(
+		&pb.SourceFilter{Port: 22, Tcp: true, Cidrs: cidrs},
+		&pb.SourceFilter{Port: 20443, Tcp: true, Cidrs: cidrs},
+		&pb.SourceFilter{Port: 5353, Tcp: true, Udp: true, Cidrs: cidrs},
+		&pb.SourceFilter{Port: 20444, Udp: true, Cidrs: cidrs},
+	)
+	if len(scripts) != 1 {
+		t.Fatalf("nft ran %d times", len(scripts))
+	}
+	for _, port := range []string{"dport 22 ", "dport 5353 "} {
+		if strings.Contains(scripts[0], port) {
+			t.Errorf("script filters a port another user holds (%q):\n%s", port, scripts[0])
+		}
+	}
+	for _, port := range []string{"tcp dport 20443 ", "udp dport 20444 "} {
+		if !strings.Contains(scripts[0], port) {
+			t.Errorf("script lacks %q:\n%s", port, scripts[0])
+		}
+	}
+	got := s.Status()
+	if got.GetApplied() || !strings.Contains(got.GetError(), "22, 5353") {
+		t.Errorf("Status() = %v, want not applied, naming ports 22, 5353", got)
+	}
+	// Only foreign ports: the table is removed, nothing is filtered.
+	apply(&pb.SourceFilter{Port: 22, Tcp: true, Cidrs: cidrs})
+	if last := scripts[len(scripts)-1]; strings.Contains(last, "dport") {
+		t.Errorf("only a foreign port requested, script filters it:\n%s", last)
+	}
+	// The sockets cannot be read: fail closed, nothing applied.
+	failure = errors.New("proc unreadable")
+	n := len(scripts)
+	apply(&pb.SourceFilter{Port: 20443, Tcp: true, Cidrs: cidrs})
+	if len(scripts) != n {
+		t.Error("nft ran although the sockets could not be read")
+	}
+	if st := s.Status(); st.GetApplied() || !strings.Contains(st.GetError(), "proc unreadable") {
+		t.Errorf("Status() = %v, want the read error", st)
 	}
 }
 

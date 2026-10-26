@@ -125,6 +125,10 @@ type applier struct {
 	reloadUnits func() error
 	// nft runs one nft transaction (R44 source filters; tests replace it).
 	nft func(ctx context.Context, script string) error
+	// sockets lists the bound sockets of one protocol family of the host
+	// (TCP listeners, or UDP sockets) for the P2-1 port check; tests
+	// replace it.
+	sockets func(udp bool) ([]netSocket, error)
 }
 
 func newApplier(stateDir, rootDir, target string, init *initSys, service string, keys []release.PublicKey) *applier {
@@ -138,6 +142,7 @@ func newApplier(stateDir, rootDir, target string, init *initSys, service string,
 		unitDir: init.dir,
 		unitsOf: func(binary string) (map[string][]byte, error) { return execPrintUnits(binary, init) },
 		nft:     runNft,
+		sockets: readNetSockets,
 	}
 	if init == openrcInit {
 		p.restart = func() error { return openrcRestart(service) }

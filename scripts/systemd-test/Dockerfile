@@ -3,11 +3,12 @@
 # fs, and --tmpfs /var/lib/private:mode=0700 (overlayfs cannot be idmapped:
 # without the tmpfs systemd would not mount the StateDirectory
 # noexec,idmapped as on a real VPS). nftables: R44 (the updater applies the
-# relay source allowlists). Test use only.
+# relay source allowlists; netcat-openbsd: a listener of another user for
+# the port check). Test use only.
 FROM debian:13
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      systemd systemd-sysv curl ca-certificates nftables \
+      systemd systemd-sysv curl ca-certificates nftables netcat-openbsd \
  && rm -rf /var/lib/apt/lists/* \
  && systemctl mask systemd-firstboot.service getty.target console-getty.service \
       systemd-logind.service systemd-networkd.service systemd-resolved.service \
