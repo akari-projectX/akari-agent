@@ -199,16 +199,6 @@ func (m *CoreManager) UserCount() int {
 	return len(m.applied)
 }
 
-// Connections returns how many proxied dispatches the gate tracks right
-// now (0 when no instance runs). Heartbeat.connections.
-func (m *CoreManager) Connections() uint64 {
-	g := m.liveGate.Load()
-	if g == nil {
-		return 0
-	}
-	return uint64(g.LiveTotal())
-}
-
 // LiveStats returns the gate's tracked dispatches and the distinct users
 // among them (0, 0 when no instance runs).
 func (m *CoreManager) LiveStats() (conns, users uint64) {
@@ -900,10 +890,6 @@ type built struct {
 	sniffed []string
 }
 
-func newInstance(inboundsJSON string) (*built, error) {
-	return newInstanceWith(inboundsJSON, nil)
-}
-
 // builtConfig is xray's config for a set of inbounds and what building it
 // learned.
 type builtConfig struct {
@@ -930,16 +916,6 @@ func freedomOutbound() map[string]any {
 		out["settings"] = map[string]any{"finalRules": []any{map[string]any{"action": "allow"}}}
 	}
 	return out
-}
-
-// buildConfig turns the inbounds into xray's config (gate in place of the
-// dispatcher), with node certificate entries pointed at cert (if set).
-func buildConfig(inbounds []json.RawMessage, cert *certFiles) (*core.Config, map[string]inboundKind, []string, error) {
-	b, err := buildConfigFor(inbounds, cert, nil)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return b.config, b.kinds, b.acmeTags, nil
 }
 
 // buildConfigFor is buildConfig plus W29 sniffing on the inbounds in sniff
@@ -1014,10 +990,6 @@ func buildConfigFor(inbounds []json.RawMessage, cert *certFiles, sniff map[strin
 		return nil, err
 	}
 	return &builtConfig{config: pbConfig, kinds: kinds, acmeTags: acmeTags, sniffed: sniffed}, nil
-}
-
-func newInstanceWith(inboundsJSON string, cert *certFiles) (*built, error) {
-	return newInstanceFor(inboundsJSON, cert, nil)
 }
 
 // newInstanceFor: newInstanceWith with W29 sniffing on the inbounds in sniff.

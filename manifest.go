@@ -231,16 +231,6 @@ func (f *manifestField) keyLens() map[string]int {
 	return out
 }
 
-// kernelVersion: the xray-core version the manifest was verified against.
-func (m *protocolManifest) kernelVersion(id string) string {
-	for _, k := range m.Kernel {
-		if k.ID == id {
-			return k.Version
-		}
-	}
-	return ""
-}
-
 func (s manifestScenario) String() string {
 	var opts []string
 	for k, v := range s.Options {
