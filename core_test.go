@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -10,10 +11,12 @@ import (
 	"testing"
 	"time"
 
+	xraylog "github.com/xtls/xray-core/app/log"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
+	commonserial "github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/stats"
@@ -487,4 +490,34 @@ func TestFakeDNSRefusedAfterXrayParse(t *testing.T) {
 		t.Fatalf("rejected a clean inbound: %v", err)
 	}
 	_ = b.inst.Close()
+}
+
+// xray prints one access line (user id, client address, destination host)
+// per accepted connection to the console unless the config says
+// "access":"none"; the agent's journal must not become a connection log.
+func TestAccessLogIsOff(t *testing.T) {
+	inb, _ := testSnapshot(freePort(t))
+	cfg, _, _, err := buildConfig([]json.RawMessage{json.RawMessage(strings.Trim(inb, "[]"))}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := commonserial.GetMessageType(&xraylog.Config{})
+	for _, app := range cfg.App {
+		if app.GetType() != want {
+			continue
+		}
+		m, err := app.GetInstance()
+		if err != nil {
+			t.Fatal(err)
+		}
+		lc := m.(*xraylog.Config)
+		if lc.AccessLogType != xraylog.LogType_None {
+			t.Fatalf("access log type = %v, want none", lc.AccessLogType)
+		}
+		if lc.ErrorLogType != xraylog.LogType_Console {
+			t.Fatalf("error log type = %v, want the console", lc.ErrorLogType)
+		}
+		return
+	}
+	t.Fatal("the xray config has no log app")
 }

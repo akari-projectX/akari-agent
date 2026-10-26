@@ -929,7 +929,11 @@ func buildConfigFor(inbounds []json.RawMessage, cert *certFiles, sniff map[strin
 		}
 	}
 	full := map[string]any{
-		"log":       map[string]any{"loglevel": "warning"},
+		// access "none": with a log section xray's default is to print one
+		// line per accepted connection to the console (the journal): the
+		// user id, the client address and the destination host, for every
+		// connection, at any log level. Nothing reads them.
+		"log":       map[string]any{"loglevel": "warning", "access": "none"},
 		"inbounds":  inbounds,
 		"outbounds": []any{freedomOutbound()},
 		// Per-user traffic counters live behind these policy switches.
