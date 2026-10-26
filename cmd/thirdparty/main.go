@@ -315,7 +315,9 @@ func classify(raw []byte) []string {
 	if has("mozilla public license version 2.0") || has("mozilla public license, version 2.0") {
 		ids = append(ids, "MPL-2.0")
 	}
-	if has("apache license") && has("version 2.0, january 2004") {
+	// The full text, or only the licence notice with its URL (jackpal/go-nat-pmp).
+	if has("apache license") && has("version 2.0, january 2004") ||
+		has("licensed under the apache license, version 2.0") && has("apache.org/licenses/license-2.0") {
 		ids = append(ids, "Apache-2.0")
 	}
 	if has("permission is hereby granted, free of charge, to any person obtaining a copy") {

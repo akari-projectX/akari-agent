@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -750,11 +751,12 @@ func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, 
 }
 
 // registerCountersLocked creates the user's xray traffic counters up front.
-// xray registers them lazily per connection with a check-then-register
-// (stats.GetOrRegisterCounter) that is not atomic: of two first connections
-// of a user racing, the loser gets a nil counter and relays uncounted —
-// bytes never billed. Registered here, under mu and before the user can
-// connect, every connection finds the counter and the race cannot occur.
+// Older xray registered them lazily per connection with a non-atomic
+// check-then-register: of two first connections of a user racing, the loser
+// got a nil counter and relayed uncounted — bytes never billed. Upstream
+// made Manager.GetOrRegisterCounter atomic; we keep registering here, under
+// mu and before the user can connect, so each report resolves the counters
+// once and the race cannot occur whatever the kernel does.
 // The counters are kept in m.counted (resolved once: a report reads two
 // atomics per user, no name building or lookup). Idempotent.
 func (m *CoreManager) registerCountersLocked(uid string) {
@@ -765,8 +767,8 @@ func (m *CoreManager) registerCountersLocked(uid string) {
 	if !ok {
 		return
 	}
-	up, err1 := stats.GetOrRegisterCounter(sm, "user>>>"+uid+">>>traffic>>>uplink")
-	down, err2 := stats.GetOrRegisterCounter(sm, "user>>>"+uid+">>>traffic>>>downlink")
+	up, err1 := sm.GetOrRegisterCounter("user>>>" + uid + ">>>traffic>>>uplink")
+	down, err2 := sm.GetOrRegisterCounter("user>>>" + uid + ">>>traffic>>>downlink")
 	if err1 != nil || err2 != nil || up == nil || down == nil {
 		return
 	}
@@ -942,6 +944,25 @@ type builtConfig struct {
 	sniffed  []string
 }
 
+// allowPrivateDestinations lifts xray's default final rules on the freedom
+// outbound. Since xray 26.4 freedom blocks connections that vless, vmess,
+// trojan, hysteria and shadowsocks inbounds make to private, loopback and
+// link-local addresses (a user must not reach the node's own network).
+// Production keeps that default. AKARI_ALLOW_PRIVATE_DESTINATIONS=1 in the
+// agent's environment lifts it (smoke and integration setups relay to
+// loopback echo servers; the unit tests set the variable in TestMain).
+var allowPrivateDestinations = os.Getenv("AKARI_ALLOW_PRIVATE_DESTINATIONS") == "1"
+
+// freedomOutbound is the single outbound: direct, with xray's safe default
+// final rules unless allowPrivateDestinations.
+func freedomOutbound() map[string]any {
+	out := map[string]any{"protocol": "freedom"}
+	if allowPrivateDestinations {
+		out["settings"] = map[string]any{"finalRules": []any{map[string]any{"action": "allow"}}}
+	}
+	return out
+}
+
 // buildConfig turns the inbounds into xray's config (gate in place of the
 // dispatcher), with node certificate entries pointed at cert (if set).
 func buildConfig(inbounds []json.RawMessage, cert *certFiles) (*core.Config, map[string]inboundKind, []string, error) {
@@ -963,11 +984,9 @@ func buildConfigFor(inbounds []json.RawMessage, cert *certFiles, sniff map[strin
 		}
 	}
 	full := map[string]any{
-		"log":      map[string]any{"loglevel": "warning"},
-		"inbounds": inbounds,
-		"outbounds": []any{
-			map[string]any{"protocol": "freedom"},
-		},
+		"log":       map[string]any{"loglevel": "warning"},
+		"inbounds":  inbounds,
+		"outbounds": []any{freedomOutbound()},
 		// Per-user traffic counters live behind these policy switches.
 		// No per-inbound counters (W8): nothing reads them, and with them
 		// on proxyman wraps every accepted connection in a

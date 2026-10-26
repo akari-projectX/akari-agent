@@ -16,6 +16,7 @@ func TestClassify(t *testing.T) {
 		{"Redistribution and use in source and binary forms, with or\nwithout modification, are permitted ... Neither the name of", []string{"BSD-3-Clause"}},
 		{"Redistribution and use in source and binary forms, with or without modification, are permitted provided", []string{"BSD-2-Clause"}},
 		{"Apache License\n Version 2.0, January 2004", []string{"Apache-2.0"}},
+		{"Licensed under the Apache License, Version 2.0 (the \"License\");\n   http://www.apache.org/licenses/LICENSE-2.0", []string{"Apache-2.0"}},
 		{"Mozilla Public License Version 2.0\n== ... GNU Affero General Public License, Version 3.0", []string{"MPL-2.0"}},
 		{"under the terms of the GNU General Public License as published by\nthe Free Software Foundation, either version 3 of the License, or\n(at your option) any later version.", []string{"GPL-3.0-or-later"}},
 		// The full GPL text alone does not say "or later": not decided automatically.

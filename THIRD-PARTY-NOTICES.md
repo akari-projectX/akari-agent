@@ -9,8 +9,8 @@ This repository's own code is MIT (see `LICENSE`). It vendors/copies the
 contract file `proto/agent.proto` (canonical copy lives in the
 `akari-panel` repository of the same organisation) and the released binary
 statically links the Go modules below. The list is generated from
-`go list -deps` of the agent (38 modules, 2026-10-02 W10+W11, xray-core
-`v1.260327.0`); `make check-third-party` (CI) fails when go.mod changes the
+`go list -deps` of the agent (47 modules, 2026-10-26, xray-core
+release v26.10.21); `make check-third-party` (CI) fails when go.mod changes the
 linked set, so this table is re-checked on every such change.
 License texts are in each module (module cache / upstream repository); the
 full dependency graph is `go.mod` / `go.sum`.
@@ -19,7 +19,7 @@ full dependency graph is `go.mod` / `go.sum`.
 
 | Component | License | Notes |
 |---|---|---|
-| [xray-core](https://github.com/XTLS/Xray-core) `v1.260327.0` | MPL-2.0 | embedded core; unmodified |
+| [xray-core](https://github.com/XTLS/Xray-core) v26.10.21 (`v1.260327.1-0.20261021115930-1b1647cd9ddf`) | MPL-2.0 | embedded core; unmodified |
 | [xtls/reality](https://github.com/XTLS/REALITY) | MPL-2.0 | via xray-core |
 | [grpc-go](https://github.com/grpc/grpc-go), `genproto/googleapis/rpc` | Apache-2.0 | |
 | [mholt/acmez](https://github.com/mholt/acmez) `v3` | Apache-2.0 | ACME client for the automatic node certificate (W10, `acme.go`); its only dependencies are `golang.org/x/{crypto,net}`. Test-only (not linked): [pebble](https://github.com/letsencrypt/pebble) and `challtestsrv` (MPL-2.0), [go-jose](https://github.com/go-jose/go-jose) (Apache-2.0) |
@@ -31,9 +31,19 @@ full dependency graph is `go.mod` / `go.sum`.
 | [google/btree](https://github.com/google/btree), [pires/go-proxyproto](https://github.com/pires/go-proxyproto), [vishvananda/netlink](https://github.com/vishvananda/netlink), [vishvananda/netns](https://github.com/vishvananda/netns), [gopkg.in/yaml.v2](https://github.com/go-yaml/yaml), [gvisor](https://github.com/google/gvisor) | Apache-2.0 | |
 | `golang.org/x/{crypto,exp,net,sync,sys,text,time}` | BSD-3-Clause | `x/sys` is a direct dependency (`go.mod`) |
 | [juju/ratelimit](https://github.com/juju/ratelimit) | LGPL-3.0 with a static-linking exception | the exception permits conveying a combined work that links the library statically or dynamically without providing the Minimal Corresponding Source / installation information (4d/4e), provided the other LGPL-3 terms are met (license text kept with the module) |
-| [SagerNet/sing](https://github.com/SagerNet/sing) `v0.5.1`, [sing-shadowsocks](https://github.com/SagerNet/sing-shadowsocks) `v0.2.7` | **GPL-3.0-or-later** | **see below** |
+| [SagerNet/sing](https://github.com/SagerNet/sing) `v0.5.1`, [sing-shadowsocks](https://github.com/SagerNet/sing-shadowsocks) `v0.2.7` | GPL-3.0-or-later | **test-only since xray-core v26.10.21 (not linked)**; see below |
 
-## GPL components linked into the binary (assessment for the maintainers)
+## GPL components (assessment for the maintainers)
+
+**Update 2026-10-26 (xray-core v26.10.21):** xray-core rewrote its Shadowsocks 2022
+implementation without `sagernet/sing*`; `go list -deps` of the agent no longer
+contains them (they remain in `go.mod` for the SS2022 tombstone test client only).
+The binary links no GPL module, `THIRD_PARTY_LICENSES.txt` says so (the generator
+decides from the linked set), and README / release notes were corrected. The R19
+decision below was made for the previous xray-core and is kept as history; whether
+to keep distributing under GPL voluntarily is for the maintainers to decide.
+
+Previous assessment (xray-core v26.3.27):
 
 `sagernet/sing` and `sagernet/sing-shadowsocks` are GPL-3.0-or-later (module
 `LICENSE` is the GPL-3.0 boilerplate; no linking exception). xray-core's

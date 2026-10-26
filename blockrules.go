@@ -47,6 +47,7 @@ import (
 
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/app/router"
+	"github.com/xtls/xray-core/common/geodata"
 	commonserial "github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/dns"
@@ -251,7 +252,7 @@ func validateBlockPolicy(p *pb.BlockPolicy) error {
 
 // blockDomain: "domain:"/"full:"/"keyword:" entries only (never regexp,
 // geosite or ext: — no file is ever read on behalf of the panel).
-func blockDomain(s string) (*router.Domain, error) {
+func blockDomain(s string) (*geodata.DomainRule, error) {
 	kind, value, ok := strings.Cut(s, ":")
 	if !ok || value == "" || len(value) > maxBlockDomainLen {
 		return nil, fmt.Errorf("bad domain entry %q", s)
@@ -264,22 +265,28 @@ func blockDomain(s string) (*router.Domain, error) {
 	}
 	switch kind {
 	case "domain":
-		return &router.Domain{Type: router.Domain_Domain, Value: value}, nil
+		return customDomain(geodata.Domain_Domain, value), nil
 	case "full":
-		return &router.Domain{Type: router.Domain_Full, Value: value}, nil
+		return customDomain(geodata.Domain_Full, value), nil
 	case "keyword":
-		return &router.Domain{Type: router.Domain_Plain, Value: value}, nil
+		return customDomain(geodata.Domain_Substr, value), nil
 	}
 	return nil, fmt.Errorf("bad domain entry %q", s)
 }
 
-func blockCIDR(s string) (*router.CIDR, error) {
+// customDomain wraps a literal domain matcher as a router domain rule.
+func customDomain(t geodata.Domain_Type, value string) *geodata.DomainRule {
+	return &geodata.DomainRule{Value: &geodata.DomainRule_Custom{Custom: &geodata.Domain{Type: t, Value: value}}}
+}
+
+func blockCIDR(s string) (*geodata.IPRule, error) {
 	p, err := netip.ParsePrefix(s)
 	if err != nil {
 		return nil, fmt.Errorf("bad network %q", s)
 	}
 	p = p.Masked()
-	return &router.CIDR{Ip: p.Addr().AsSlice(), Prefix: uint32(p.Bits())}, nil
+	cidr := &geodata.CIDR{Ip: p.Addr().AsSlice(), Prefix: uint32(p.Bits())}
+	return &geodata.IPRule{Value: &geodata.IPRule_Custom{Custom: &geodata.CIDRRule{Cidr: cidr}}}, nil
 }
 
 // blockRuleTag names one compiled xray rule: a panel rule becomes up to
@@ -304,7 +311,7 @@ func compileBlockRules(p *pb.BlockPolicy) (*router.Config, map[string]uint64, er
 	}
 	for _, r := range p.Rules {
 		if len(r.Domains) > 0 {
-			domains := make([]*router.Domain, 0, len(r.Domains))
+			domains := make([]*geodata.DomainRule, 0, len(r.Domains))
 			for _, d := range r.Domains {
 				dd, err := blockDomain(d)
 				if err != nil {
@@ -315,7 +322,7 @@ func compileBlockRules(p *pb.BlockPolicy) (*router.Config, map[string]uint64, er
 			add(r.Id, "d", func(x *router.RoutingRule) { x.Domain = domains })
 		}
 		if len(r.Cidrs) > 0 {
-			cidrs := make([]*router.CIDR, 0, len(r.Cidrs))
+			cidrs := make([]*geodata.IPRule, 0, len(r.Cidrs))
 			for _, c := range r.Cidrs {
 				cc, err := blockCIDR(c)
 				if err != nil {
@@ -323,7 +330,7 @@ func compileBlockRules(p *pb.BlockPolicy) (*router.Config, map[string]uint64, er
 				}
 				cidrs = append(cidrs, cc)
 			}
-			add(r.Id, "i", func(x *router.RoutingRule) { x.Geoip = []*router.GeoIP{{Cidr: cidrs}} })
+			add(r.Id, "i", func(x *router.RoutingRule) { x.Ip = cidrs })
 		}
 		if len(r.Protocols) > 0 {
 			for _, proto := range r.Protocols {

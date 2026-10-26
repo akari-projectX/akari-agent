@@ -90,7 +90,7 @@ func TestBlockPolicyValidation(t *testing.T) {
 	if len(cfg.Rule) != 3 || ids["akari-block-2-i"] != 2 || ids["akari-block-3-p"] != 3 {
 		t.Fatalf("rules %v ids %v", cfg.Rule, ids)
 	}
-	if got := cfg.Rule[1].Geoip[0].Cidr[0]; got.Prefix != 24 || net.IP(got.Ip).String() != "192.0.2.0" {
+	if got := cfg.Rule[1].Ip[0].GetCustom().GetCidr(); got.Prefix != 24 || net.IP(got.Ip).String() != "192.0.2.0" {
 		t.Fatalf("network not masked: %v", got)
 	}
 	for _, r := range cfg.Rule {
