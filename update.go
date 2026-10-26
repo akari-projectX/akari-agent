@@ -16,11 +16,12 @@ package main
 // (/usr/local/bin/akari-agent, the old one kept as akari-agent.prev),
 // restarts the agent and watches its self-check, rolling back on failure.
 //
-// Layout (<state dir>/update, 0700; files 0600):
+// Layout (<state dir>/update, 0700; files 0600; the final-counter queue,
+// finals.json, is not here: it sits in the state directory itself, see
+// finalsStore):
 //
 //	state.json          versions this node rolled back from, a report owed
 //	                    to the panel (agent-owned)
-//	finals.json         final traffic counters persisted across a restart
 //	staged              the verified download (never executed here)
 //	apply-request.json  the request to the updater (written last: it is the
 //	                    trigger the path unit watches)
