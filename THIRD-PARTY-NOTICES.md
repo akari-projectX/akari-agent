@@ -37,7 +37,7 @@ full dependency graph is `go.mod` / `go.sum`.
 
 **Update 2026-10-26 (xray-core v26.10.21):** xray-core rewrote its Shadowsocks 2022
 implementation without `sagernet/sing*`; `go list -deps` of the agent no longer
-contains them (they remain in `go.mod` for the SS2022 tombstone test client only).
+contains them (they remain in `go.mod` for the SS2022 native-removal test client only).
 The binary links no GPL module, `THIRD_PARTY_LICENSES.txt` says so (the generator
 decides from the linked set), and README / release notes were corrected. The R19
 decision below was made for the previous xray-core and is kept as history; whether

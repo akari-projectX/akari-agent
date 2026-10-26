@@ -16,27 +16,13 @@ import (
 // ss2022Module: Shadowsocks 2022, multi-user only, account {"password"}
 // (standard base64 user key of the method's key length).
 //
-// Tombstones (manifest `shrink_unsafe`, protocols.go shrinkUnsafe): a user
-// must never leave the user table of a running xray multi-user
-// Shadowsocks 2022 inbound. MultiUserInbound.RemoveUser
-// swap-deletes from the slice the service's user indexes point into, and
-// the connection path reads `users[index]` without a lock after a handshake
-// the client can stall: a pending handshake of the removed user would then
-// run as whichever user moved into its slot (admitted by the gate under
-// that user, billed to them), or index past the end and panic the agent.
-//
-// So on these inbounds (W9) the agent never calls RemoveUser. A removal
-// revokes the user in the gate only and leaves the credential in the table
-// as a tombstone: indices never move, an in-flight or new handshake with
-// that key resolves to the removed user's own *MemoryUser, which the gate
-// refuses. Re-adding the SAME credential revives the tombstone (the gate
-// admits that pointer again; xray is not touched). xray's AddUser refuses a
-// duplicate email, so a different credential for a user the table holds
-// (rotation, re-add with a new key) needs a new instance: such deltas are
-// refused (BASE_MISMATCH) and the panel sends a Snapshot, which also
-// compacts. Tombstones are bounded (maxTombstones); a removal past the
-// bound is refused the same way. Tombstones are not "applied": they are
-// outside the state hash and the user count. Additions append and are safe.
+// Removal and rotation are ordinary (protocol 8): xray's multi-user server
+// resolves a user through maps keyed by the PSK hash and the email, and a
+// connection keeps its user's own *MemoryUser, so RemoveUser moves nobody and
+// a removed user's stalled handshake resolves to that user, which the gate
+// refuses (ss_native_test.go). Rotation is RemoveUser + AddUser of the same
+// email. (xray v26.3.27 swap-deleted in RemoveUser; protocol 5-7 agents kept
+// removed credentials as tombstones because of that.)
 type ss2022Module struct{}
 
 func (ss2022Module) wire() string { return "shadowsocks" }

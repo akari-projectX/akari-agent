@@ -119,6 +119,11 @@ message Hello {
   //       online-user count per account (the part before '#'). Older agents
   //       limit and count each user_id on its own (a user on two entrances
   //       may get twice the limit; the panel flags such nodes).
+  //   8 = Shadowsocks 2022 removal and credential rotation are native
+  //       deltas (the agent's xray looks users up by hash/email, so
+  //       RemoveUser cannot hand an in-flight handshake to another user; no
+  //       tombstones, no BASE_MISMATCH for a shrink). Agents 5..7 keep the
+  //       tombstone rule above: removals are deltas, rotations Snapshots.
   uint32 protocol_version = 5;
   // State hash of what the agent actually runs (see "State hash" below),
   // for config_version + the applied user set. Empty for protocol 0.

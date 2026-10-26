@@ -274,10 +274,6 @@ label_zh = "Shadowsocks 2022"
 transports = ["native"]
 security = ["none"]
 l4 = "option:network"
-# A removed user stays in the kernel's user table as a gate-refused
-# tombstone (xray's multi-user SS2022 inbound cannot drop a user while
-# running): removals are deltas, rotations need a rebuild (W9).
-shrink_unsafe = true
 
   [[protocol.credential]]
   field = "password"
