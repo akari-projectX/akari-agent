@@ -1,7 +1,7 @@
 FUZZ_MAIN = FuzzBuildConfig FuzzRewriteCertPaths FuzzBuildUser FuzzInboundTCPPorts FuzzACMEConfig FuzzProcParsers FuzzStateHash FuzzLoadConfig FuzzApplyRequest FuzzNftScript FuzzFilterRequest
 FUZZ_RELEASE = FuzzParseManifest FuzzCompareVersions FuzzVerify FuzzParseKeys
 
-.PHONY: fuzz cover third-party check-third-party bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb sync-units check-units openrc-test vet fmt-check test test-canary vulncheck ci
+.PHONY: lint fuzz cover third-party check-third-party bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb sync-units check-units openrc-test vet fmt-check test test-canary vulncheck ci
 
 # Canonical contract lives in akari-panel/proto/agent.proto. This repo vendors
 # a copy: `make sync-proto` pulls the sibling checkout's version and
@@ -125,7 +125,7 @@ vulncheck:
 	echo "only allow-listed vulnerabilities: $(VULN_ALLOW)"
 
 # What CI runs (minus check-proto/check-pb, which need ../akari-panel).
-ci: fmt-check vet check-third-party test build vulncheck
+ci: fmt-check vet lint check-third-party test build vulncheck
 
 vet:
 	go vet ./...
@@ -133,6 +133,12 @@ vet:
 
 fmt-check:
 	test -z "$$(gofmt -l .)"
+
+# golangci-lint (.golangci.yml; rules from GO-STYLE.md). Pinned; built with the
+# go.mod toolchain because golangci-lint refuses a module newer than itself.
+GOLANGCI_LINT_VERSION = v2.15.0
+lint:
+	GOTOOLCHAIN=$$(awk '/^toolchain/{print $$2}' go.mod) go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 
 test: test-canary
 	go test -race ./...
