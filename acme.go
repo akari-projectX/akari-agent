@@ -261,13 +261,27 @@ func (m *certManager) files(domain string) certFiles {
 	return certFiles{cert: filepath.Join(d, "fullchain.pem"), key: filepath.Join(d, "privkey.pem")}
 }
 
-// ensureFiles returns the domain's files, writing a placeholder when they
-// are missing or unusable.
+// errCertInvalid marks stored certificate files that were read but are not
+// a usable pair (damaged PEM, key and chain that do not match).
+var errCertInvalid = errors.New("stored certificate unusable")
+
+// ensureFiles returns the domain's files, writing a placeholder only when
+// they are missing or definitely unusable. A failure to read them (EIO,
+// EMFILE, ...) says nothing about their content: it is returned and the
+// files stay as they are (audit 2026-10 P3-18: the placeholder used to
+// overwrite a valid certificate after a transient read error).
 func (m *certManager) ensureFiles(domain string) (certFiles, error) {
 	f := m.files(domain)
-	if leaf, err := loadLeaf(f); err == nil {
+	if err := recoverPair(f); err != nil {
+		slog.Warn("cannot finish an interrupted certificate replacement", "domain", domain, "error", err)
+	}
+	leaf, err := loadLeaf(f)
+	if err == nil {
 		f.placeholder = isPlaceholder(leaf)
 		return f, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errCertInvalid) {
+		return f, fmt.Errorf("read the stored certificate for %q: %w", domain, err)
 	}
 	certPEM, keyPEM, err := placeholderCert(domain, m.now())
 	if err != nil {
@@ -280,7 +294,9 @@ func (m *certManager) ensureFiles(domain string) (certFiles, error) {
 	return f, nil
 }
 
-// loadLeaf parses the stored pair (must match) and returns the leaf.
+// loadLeaf parses the stored pair (must match) and returns the leaf. A
+// file that cannot be read is returned as the I/O error; content that
+// does not parse or pair wraps errCertInvalid.
 func loadLeaf(f certFiles) (*x509.Certificate, error) {
 	c, err := os.ReadFile(f.cert)
 	if err != nil {
@@ -292,9 +308,13 @@ func loadLeaf(f certFiles) (*x509.Certificate, error) {
 	}
 	pair, err := tls.X509KeyPair(c, k)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errCertInvalid, err)
 	}
-	return x509.ParseCertificate(pair.Certificate[0])
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errCertInvalid, err)
+	}
+	return leaf, nil
 }
 
 func isPlaceholder(leaf *x509.Certificate) bool {
@@ -334,9 +354,16 @@ func placeholderCert(domain string, now time.Time) (certPEM, keyPEM []byte, err 
 		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kder}), nil
 }
 
-// writePair replaces the domain's key and chain, each atomically (key
-// first: xray reads the chain first, and a read between the two renames
-// fails to pair and keeps the previous certificate until the next read).
+// pendingSuffix names the staged copies writePair makes of a new pair.
+const pendingSuffix = ".pending"
+
+// writePair replaces the domain's key and chain. xray reads the chain
+// first, and a read between two renames fails to pair and keeps the
+// previous certificate until the next read, so the key goes first. Both
+// are staged next to their targets (atomic, synced) before either is
+// renamed: a crash between the two renames leaves the new chain staged,
+// which recoverPair finishes at the next start instead of the pair being
+// lost (the new chain would otherwise exist nowhere on disk).
 func (m *certManager) writePair(domain string, certPEM, keyPEM []byte) error {
 	d := m.domainDir(domain)
 	if err := os.MkdirAll(d, 0o700); err != nil {
@@ -346,10 +373,64 @@ func (m *certManager) writePair(domain string, certPEM, keyPEM []byte) error {
 		return err
 	}
 	f := m.files(domain)
-	if err := writeSecret(f.key, keyPEM); err != nil {
+	if err := writeSecret(f.key+pendingSuffix, keyPEM); err != nil {
 		return err
 	}
-	return writeSecret(f.cert, certPEM)
+	if err := writeSecret(f.cert+pendingSuffix, certPEM); err != nil {
+		return err
+	}
+	return commitPair(f)
+}
+
+// commitPair renames the staged key and then the staged chain into place.
+func commitPair(f certFiles) error {
+	if err := os.Rename(f.key+pendingSuffix, f.key); err != nil {
+		return err
+	}
+	if err := os.Rename(f.cert+pendingSuffix, f.cert); err != nil {
+		return err
+	}
+	syncDir(filepath.Dir(f.cert))
+	return nil
+}
+
+// recoverPair finishes a replacement a crash interrupted: staged files
+// that form a valid pair (the staged key, or the already renamed one, with
+// the staged chain) are committed; anything else staged is dropped. With
+// nothing staged it does nothing.
+func recoverPair(f certFiles) error {
+	stagedCert, err := os.ReadFile(f.cert + pendingSuffix)
+	if errors.Is(err, os.ErrNotExist) {
+		// A staged key without its chain: the crash came before the
+		// replacement began renaming anything; the pair on disk is intact.
+		if err := os.Remove(f.key + pendingSuffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	keyPath := f.key + pendingSuffix
+	if _, err := os.Stat(keyPath); errors.Is(err, os.ErrNotExist) {
+		keyPath = f.key // the key was renamed before the crash
+	}
+	key, err := os.ReadFile(keyPath)
+	if err != nil {
+		return err
+	}
+	if _, err := tls.X509KeyPair(stagedCert, key); err != nil {
+		slog.Warn("dropping an unusable staged certificate", "error", err)
+		_ = os.Remove(f.cert + pendingSuffix)
+		_ = os.Remove(f.key + pendingSuffix)
+		return nil
+	}
+	if keyPath == f.key {
+		// Only the chain is left to move.
+		return os.Rename(f.cert+pendingSuffix, f.cert)
+	}
+	slog.Warn("finishing an interrupted certificate replacement")
+	return commitPair(f)
 }
 
 // Status is the heartbeat's CertStatus (nil without ACME).
