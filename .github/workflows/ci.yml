@@ -248,7 +248,10 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: akari-panel/spa/package-lock.json
+          # The panel's apps (make smoke builds both; spa/ was split into portal/ + admin/).
+          cache-dependency-path: |
+            akari-panel/portal/package-lock.json
+            akari-panel/admin/package-lock.json
       # The runner's own Postgres/Valkey would collide with compose's ports.
       - run: sudo systemctl stop postgresql || true
       # R22: the panel dials its main domain (install-link pin probe).
