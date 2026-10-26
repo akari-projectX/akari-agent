@@ -61,7 +61,7 @@ func startStalledPanel(t *testing.T) *stalledPanel {
 		<-s.Context().Done()
 		return nil
 	}
-	p.addr = startFakePanel(t, f, grpc.InitialWindowSize(1<<16), grpc.InitialConnWindowSize(1<<16))
+	p.addr = startFakePanel(t, f, grpc.InitialStreamWindowSize(1<<16), grpc.InitialConnWindowSize(1<<16))
 	return p
 }
 

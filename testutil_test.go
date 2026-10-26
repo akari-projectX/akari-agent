@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -103,7 +104,7 @@ func (v *vlessConn) echo(msg string) error {
 func (v *vlessConn) closedWithin(d time.Duration) bool {
 	_ = v.SetReadDeadline(time.Now().Add(d))
 	_, err := v.r.ReadByte()
-	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 		return false
 	}
 	return err != nil

@@ -74,7 +74,7 @@ func TestEnsureFilesKeepsFilesItCannotRead(t *testing.T) {
 func TestEnsureFilesWritesAPlaceholderForMissingOrDamagedFiles(t *testing.T) {
 	tests := []struct {
 		name   string
-		break_ func(t *testing.T, f certFiles)
+		damage func(t *testing.T, f certFiles)
 	}{
 		{"missing", func(t *testing.T, f certFiles) {}},
 		{"damaged chain", func(t *testing.T, f certFiles) {
@@ -91,7 +91,7 @@ func TestEnsureFilesWritesAPlaceholderForMissingOrDamagedFiles(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			m, f := newFilesManager(t)
-			tc.break_(t, f)
+			tc.damage(t, f)
 			got, err := m.ensureFiles(testDomain)
 			if err != nil || !got.placeholder {
 				t.Fatalf("ensureFiles() = placeholder %v, err %v; want a placeholder", got.placeholder, err)
@@ -113,9 +113,9 @@ func TestEnsureFilesFinishesAnInterruptedReplacement(t *testing.T) {
 		return old, next
 	}
 	tests := []struct {
-		name string
-		prep func(t *testing.T, f certFiles) (old, next string)
-		new_ bool // whether the staged pair wins
+		name       string
+		prep       func(t *testing.T, f certFiles) (old, next string)
+		stagedWins bool // whether the staged pair wins
 	}{
 		{"nothing renamed yet", stage, true},
 		{"key renamed, chain not", func(t *testing.T, f certFiles) (string, string) {
@@ -147,7 +147,7 @@ func TestEnsureFilesFinishesAnInterruptedReplacement(t *testing.T) {
 				t.Fatalf("ensureFiles() error: %v", err)
 			}
 			want := old
-			if tc.new_ {
+			if tc.stagedWins {
 				want = next
 			}
 			if s := serialOf(t, f); s != want {

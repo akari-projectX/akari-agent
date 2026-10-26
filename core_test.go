@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -421,7 +422,7 @@ func TestGateDispatchPath(t *testing.T) {
 	}
 
 	// A different *MemoryUser with the same email (old/rotated credential).
-	if _, err := gate.Dispatch(ctxFor(&protocol.MemoryUser{Email: userA}), dest); err != errRevoked {
+	if _, err := gate.Dispatch(ctxFor(&protocol.MemoryUser{Email: userA}), dest); !errors.Is(err, errRevoked) {
 		t.Fatalf("stale identity admitted: %v", err)
 	}
 
@@ -453,7 +454,7 @@ func TestGateDispatchPath(t *testing.T) {
 		t.Fatal("revoked relay still carries data")
 	}
 	eventually(func() bool { return gate.Live(key) == 0 }, "revoked relay still tracked")
-	if _, err := gate.Dispatch(ctxFor(installed), dest); err != errRevoked {
+	if _, err := gate.Dispatch(ctxFor(installed), dest); !errors.Is(err, errRevoked) {
 		t.Fatalf("revoked identity admitted: %v", err)
 	}
 }

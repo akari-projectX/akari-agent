@@ -101,7 +101,9 @@ func TestManifestKernelIsLinkedXray(t *testing.T) {
 		want = release
 	} else {
 		var yy, mm, dd int
-		fmt.Sscanf(string(m[1])+" "+string(m[2])+" "+string(m[3]), "%d %d %d", &yy, &mm, &dd)
+		if _, err := fmt.Sscanf(string(m[1])+" "+string(m[2])+" "+string(m[3]), "%d %d %d", &yy, &mm, &dd); err != nil {
+			t.Fatalf("parse xray version %q: %v", m[0], err)
+		}
 		want = fmt.Sprintf("v%d.%d.%d", yy, mm, dd)
 	}
 	if got := manifest.kernelVersion("xray"); got != want {

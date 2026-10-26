@@ -38,19 +38,26 @@ func TestReadLicensesFailsClosed(t *testing.T) {
 	if err := m.readLicenses(); err == nil {
 		t.Fatal("module without a licence file accepted")
 	}
-	os.WriteFile(filepath.Join(dir, "LICENSE"), []byte("All rights reserved."), 0o644)
+	writeFile(t, filepath.Join(dir, "LICENSE"), []byte("All rights reserved."))
 	if err := m.readLicenses(); err == nil {
 		t.Fatal("unrecognised licence accepted")
 	}
 	m.Files = nil
-	os.WriteFile(filepath.Join(dir, "LICENSE"), []byte("GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007 TERMS AND CONDITIONS"), 0o644)
+	writeFile(t, filepath.Join(dir, "LICENSE"), []byte("GNU GENERAL PUBLIC LICENSE Version 3, 29 June 2007 TERMS AND CONDITIONS"))
 	if err := m.readLicenses(); err == nil {
 		t.Fatal("GPL text of unknown version accepted")
 	}
 	m.Files = nil
-	os.WriteFile(filepath.Join(dir, "LICENSE"), []byte("Permission is hereby granted, free of charge, to any person obtaining a copy"), 0o644)
-	os.WriteFile(filepath.Join(dir, "NOTICE"), []byte("notice"), 0o644)
+	writeFile(t, filepath.Join(dir, "LICENSE"), []byte("Permission is hereby granted, free of charge, to any person obtaining a copy"))
+	writeFile(t, filepath.Join(dir, "NOTICE"), []byte("notice"))
 	if err := m.readLicenses(); err != nil || m.License != "MIT" || len(m.Files) != 2 {
 		t.Fatalf("readLicenses = %v, license %q, files %d", err, m.License, len(m.Files))
+	}
+}
+
+func writeFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
