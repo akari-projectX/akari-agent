@@ -61,6 +61,7 @@ make build        # → ./agent（gitignored）；静态（CGO_ENABLED=0，无 l
 ./agent -version  # akari-agent <version> (<sha>) <go> <os/arch>
 make dist         # dist/akari-agent-linux-{amd64,arm64} + SHA256SUMS（发布同款构建，CI `reproducible` 校验字节一致）
 make vet fmt-check
+make lint         # golangci-lint v2.15.0 (pinned in the Makefile, built with the go.mod toolchain), config .golangci.yml: GO-STYLE machine enforcement; CI job `lint (golangci-lint)` (fast tier, not a required check yet)
 make test         # test-canary + go test -race ./...
 make test-canary  # rt_canary_test.go（build tag canary，不带 -race：xray 的 Vision 客户端在 -race 下触发 checkptr）
 make sync-proto   # 从 ../akari-panel 拷贝契约并 buf generate（worktree：PANEL_DIR=../<面板 worktree>）
@@ -80,6 +81,16 @@ make third-party        # 重新生成 THIRD_PARTY_LICENSES.txt（改 go.mod 后
 make check-third-party  # CI：清单是否最新
 ./agent -licenses       # 本二进制的许可声明 + 全部第三方许可原文
 ```
+
+## Lint（GO-STYLE 机器检查）
+
+`.golangci.yml`（v2）：govet（enable-all，除 `fieldalignment`、`shadow`）、staticcheck（all，含原 gosimple/stylecheck）、unused、errcheck、errorlint、ineffassign、revive（var-naming、receiver-naming、error-strings、error-return、context-as-argument、dot/blank-imports、exported、package-comments、indent-error-flow、unused-receiver 等）、misspell、bodyclose、nilerr、copyloopvar、unconvert、usestdlibvars；格式化 gofmt -s + goimports；`pb/` 排除。有意关闭/放宽的规则及原因：
+- `contextcheck` 关闭：`CoreManager` 的 xray 调用（AddUser、换 handler、Rebuild）在 applyMu 下必须一次做完，所以用脱离流的 context（`context.Background()`）；传流的 context 会让重连把一次应用中途取消。
+- `govet fieldalignment`（结构体内存对齐微优化）、`shadow`（短作用域里的 `err` 遮蔽是惯用写法）关闭。
+- `misspell` 不设 locale：代码与文档用英式拼写（behaviour、licence），只查真正的拼写错误。
+- 测试文件：`errcheck` 不查 `Close/SetDeadline` 等回环连接的丢弃，`nilerr` 不查假面板在 `Recv` 失败时结束处理函数。
+- 生产代码里有意丢弃的错误一律写 `_ =` 并带注释，或走 `closeRO`/`closeFd`（只读文件/错误路径上的 fd）；`//nolint` 必须带原因。
+- `revive exported` 对 `package main` 不报（导出名文档靠评审）。
 
 ## CI 分级（W37）
 
