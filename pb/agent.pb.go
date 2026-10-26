@@ -627,37 +627,36 @@ type Hello struct {
 	// field send 0. The panel serves agents below its MIN_AGENT_PROTOCOL the
 	// EMPTY desired state (no inbounds, no users) and never trusts their
 	// Hello/Ack for convergence. Revisions:
-	//
-	//	1 = UserDelta base/target + REPLACE semantics, Ack.reason/held_*,
-	//	    state_hash, LeaseGrant.
-	//	2 = renews its certificate (AgentChannel.Renew). Protocol 1 agents
-	//	    are served as before; they just never rotate their certificate.
-	//	3 = signed self-update (UpdateOffer, FetchArtifact, UpdateStatus).
-	//	    Protocol 1/2 agents are served as before; they are never
-	//	    offered an update.
-	//	4 = enforces UserOp.speed_limit_bytes_per_sec. Older agents run
-	//	    the same users unthrottled (the panel flags such nodes).
-	//	5 = removes Shadowsocks 2022 users in place (tombstones), so the
-	//	    panel sends removals on a Shadowsocks node as a UserDelta.
-	//	    Rotations there stay Snapshots; what the agent cannot apply in
-	//	    place (re-add with a new key, tombstone bound) it answers with
-	//	    BASE_MISMATCH. Older agents get a Snapshot for any removal there.
-	//	6 = obtains and renews the node's TLS certificate itself over ACME
-	//	    (ConfigSnapshot.acme) and reports it (Heartbeat.cert). Older
-	//	    agents ignore both: they keep reading the node certificate files
-	//	    the admin installs by hand (the panel flags such nodes).
-	//	7 = (W28-a) one user may be several UserOps: UserOp.user_id is
-	//	    "<account>" or "<account>#<n>" (one per entrance the user may use
-	//	    on this node; see UserOp). The agent treats every user_id as its
-	//	    own xray user and traffic key, but shares the speed limit and the
-	//	    online-user count per account (the part before '#'). Older agents
-	//	    limit and count each user_id on its own (a user on two entrances
-	//	    may get twice the limit; the panel flags such nodes).
-	//	8 = Shadowsocks 2022 removal and credential rotation are native
-	//	    deltas (the agent's xray looks users up by hash/email, so
-	//	    RemoveUser cannot hand an in-flight handshake to another user; no
-	//	    tombstones, no BASE_MISMATCH for a shrink). Agents 5..7 keep the
-	//	    tombstone rule above: removals are deltas, rotations Snapshots.
+	//   1 = UserDelta base/target + REPLACE semantics, Ack.reason/held_*,
+	//       state_hash, LeaseGrant.
+	//   2 = renews its certificate (AgentChannel.Renew). Protocol 1 agents
+	//       are served as before; they just never rotate their certificate.
+	//   3 = signed self-update (UpdateOffer, FetchArtifact, UpdateStatus).
+	//       Protocol 1/2 agents are served as before; they are never
+	//       offered an update.
+	//   4 = enforces UserOp.speed_limit_bytes_per_sec. Older agents run
+	//       the same users unthrottled (the panel flags such nodes).
+	//   5 = removes Shadowsocks 2022 users in place (tombstones), so the
+	//       panel sends removals on a Shadowsocks node as a UserDelta.
+	//       Rotations there stay Snapshots; what the agent cannot apply in
+	//       place (re-add with a new key, tombstone bound) it answers with
+	//       BASE_MISMATCH. Older agents get a Snapshot for any removal there.
+	//   6 = obtains and renews the node's TLS certificate itself over ACME
+	//       (ConfigSnapshot.acme) and reports it (Heartbeat.cert). Older
+	//       agents ignore both: they keep reading the node certificate files
+	//       the admin installs by hand (the panel flags such nodes).
+	//   7 = (W28-a) one user may be several UserOps: UserOp.user_id is
+	//       "<account>" or "<account>#<n>" (one per entrance the user may use
+	//       on this node; see UserOp). The agent treats every user_id as its
+	//       own xray user and traffic key, but shares the speed limit and the
+	//       online-user count per account (the part before '#'). Older agents
+	//       limit and count each user_id on its own (a user on two entrances
+	//       may get twice the limit; the panel flags such nodes).
+	//   8 = Shadowsocks 2022 removal and credential rotation are native
+	//       deltas (the agent's xray looks users up by hash/email, so
+	//       RemoveUser cannot hand an in-flight handshake to another user; no
+	//       tombstones, no BASE_MISMATCH for a shrink). Agents 5..7 keep the
+	//       tombstone rule above: removals are deltas, rotations Snapshots.
 	ProtocolVersion uint32 `protobuf:"varint,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	// State hash of what the agent actually runs (see "State hash" below),
 	// for config_version + the applied user set. Empty for protocol 0.
@@ -665,26 +664,24 @@ type Hello struct {
 	// Optional features the agent supports, independent of
 	// protocol_version (W11; older agents send none, the panel serves them
 	// as before):
-	//
-	//	"metrics" = fills Heartbeat.metrics;
-	//	"latency" = accepts LatencyProbeConfig and sends LatencyReport;
-	//	"updater" = applies UpdateOffers through the node's privileged
-	//	    updater unit (akari-agent-update.path/.service, W18): its state
-	//	    directory is noexec, so agents without it fail every update on
-	//	    systemd >= 256 (the panel tells the admin to reinstall once).
-	//	"metrics-presence" = (W23) an unset numeric Heartbeat/NodeMetrics
-	//	    value means "could not be read", not 0 (see NodeMetrics).
-	//	"stale-units" = (W23) a status flag rather than a feature: the
-	//	    node's installed systemd units (akari-agent.service,
-	//	    akari-agent-update.service, akari-agent-update.path) differ from
-	//	    the ones this agent release carries. Releases from W23 on carry
-	//	    their units and the updater installs them with the binary; a node
-	//	    whose units were installed by an older installer or updater (or
-	//	    edited by hand instead of with a drop-in) keeps the old ones until
-	//	    the panel's install command is run once (the panel says so).
-	//	"source-filter" = (W28-a) enforces ConfigSnapshot.source_filters and
-	//	    reports Heartbeat.source_filter.
-	//
+	//   "metrics" = fills Heartbeat.metrics;
+	//   "latency" = accepts LatencyProbeConfig and sends LatencyReport;
+	//   "updater" = applies UpdateOffers through the node's privileged
+	//       updater unit (akari-agent-update.path/.service, W18): its state
+	//       directory is noexec, so agents without it fail every update on
+	//       systemd >= 256 (the panel tells the admin to reinstall once).
+	//   "metrics-presence" = (W23) an unset numeric Heartbeat/NodeMetrics
+	//       value means "could not be read", not 0 (see NodeMetrics).
+	//   "stale-units" = (W23) a status flag rather than a feature: the
+	//       node's installed systemd units (akari-agent.service,
+	//       akari-agent-update.service, akari-agent-update.path) differ from
+	//       the ones this agent release carries. Releases from W23 on carry
+	//       their units and the updater installs them with the binary; a node
+	//       whose units were installed by an older installer or updater (or
+	//       edited by hand instead of with a drop-in) keeps the old ones until
+	//       the panel's install command is run once (the panel says so).
+	//   "source-filter" = (W28-a) enforces ConfigSnapshot.source_filters and
+	//       reports Heartbeat.source_filter.
 	// The panel only sends LatencyProbeConfig to agents that list "latency".
 	Capabilities  []string `protobuf:"bytes,20,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	unknownFields protoimpl.UnknownFields
