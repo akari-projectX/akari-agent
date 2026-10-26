@@ -193,8 +193,8 @@ func (f *failWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 	return io.ErrShortWrite
 }
 
-func (f *failWriter) Interrupt()   {}
-func (f *failWriter) Close() error { return nil }
+func (*failWriter) Interrupt()   {}
+func (*failWriter) Close() error { return nil }
 
 // The limited wrappers pass errors through unchanged: an empty read with
 // an error, data together with an error (the data first, then the error),
@@ -203,18 +203,18 @@ func TestLimitedWrappersErrors(t *testing.T) {
 	lim := newUserLimit(1 << 30)
 	ctx := context.Background()
 	r := &limitedReader{Reader: &errReader{err: io.ErrUnexpectedEOF}, ctx: ctx, b: &lim.up}
-	if mb, err := r.ReadMultiBuffer(); !mb.IsEmpty() || err != io.ErrUnexpectedEOF {
+	if mb, err := r.ReadMultiBuffer(); !mb.IsEmpty() || !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("empty read: %v %v", mb, err)
 	}
 	inner := &errReader{mb: buf.MergeBytes(nil, []byte("tail")), err: io.EOF}
 	r = &limitedReader{Reader: inner, ctx: ctx, b: &lim.up}
 	mb, err := r.ReadMultiBuffer()
-	if mb.String() != "tail" || err != io.EOF {
+	if mb.String() != "tail" || !errors.Is(err, io.EOF) {
 		t.Fatalf("data+error: %q %v", mb.String(), err)
 	}
 	buf.ReleaseMulti(mb)
 	r.Interrupt()
-	if inner.err != io.ErrClosedPipe || r.Close() != nil {
+	if !errors.Is(inner.err, io.ErrClosedPipe) || r.Close() != nil {
 		t.Fatal("Interrupt/Close not passed through")
 	}
 	// A wait cut short by the context: the read fails, nothing is kept.
@@ -232,7 +232,7 @@ func TestLimitedWrappersErrors(t *testing.T) {
 	}
 	fw := &failWriter{}
 	w := &limitedWriter{Writer: fw, ctx: ctx, b: &lim.down}
-	if err := w.WriteMultiBuffer(buf.MergeBytes(nil, make([]byte, 3*limitChunk))); err != io.ErrShortWrite || fw.calls != 1 {
+	if err := w.WriteMultiBuffer(buf.MergeBytes(nil, make([]byte, 3*limitChunk))); !errors.Is(err, io.ErrShortWrite) || fw.calls != 1 {
 		t.Fatalf("inner write error: %v after %d calls", err, fw.calls)
 	}
 	w.Interrupt()

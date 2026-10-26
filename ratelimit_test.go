@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -126,7 +127,7 @@ func TestLimitedReaderWriterPassData(t *testing.T) {
 		t.Fatalf("read %q %v", mb.String(), err)
 	}
 	buf.ReleaseMulti(mb)
-	if _, err := r.ReadMultiBuffer(); err != io.EOF {
+	if _, err := r.ReadMultiBuffer(); !errors.Is(err, io.EOF) {
 		t.Fatalf("EOF not passed: %v", err)
 	}
 	cw := &countWriter{}
@@ -165,7 +166,7 @@ func TestLimitedWrappersChunk(t *testing.T) {
 			got = append(got, x.Bytes()...)
 		}
 		buf.ReleaseMulti(mb)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

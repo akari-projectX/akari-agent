@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -41,7 +42,7 @@ func tlsEcho(t *testing.T, c tls.Certificate) int {
 			if err != nil {
 				return
 			}
-			go func() { defer cc.Close(); io.Copy(cc, cc) }()
+			go func() { defer cc.Close(); _, _ = io.Copy(cc, cc) }() // echo until the peer closes
 		}
 	}()
 	return l.Addr().(*net.TCPAddr).Port
@@ -90,7 +91,7 @@ func closedWithin(c net.Conn, d time.Duration) bool {
 	c.SetReadDeadline(time.Now().Add(d))
 	var b [1]byte
 	_, err := c.Read(b[:])
-	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+	if ne, ok := errors.AsType[net.Error](err); ok && ne.Timeout() {
 		return false
 	}
 	return err != nil

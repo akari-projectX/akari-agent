@@ -333,7 +333,7 @@ func TestApplyUnits(t *testing.T) {
 		}
 		func() {
 			defer func() {
-				if r := recover(); r != errStop {
+				if r := recover(); !errors.Is(asError(r), errStop) {
 					panic(r)
 				}
 			}()
@@ -382,7 +382,7 @@ func TestApplyInterruptedBeforeTheBinary(t *testing.T) {
 	t.Cleanup(func() { writeUnitFile = writeUnit })
 	func() {
 		defer func() {
-			if r := recover(); r != errStop {
+			if r := recover(); !errors.Is(asError(r), errStop) {
 				panic(r)
 			}
 		}()
@@ -525,15 +525,15 @@ func TestApplyRefusesBadRequests(t *testing.T) {
 			_ = os.WriteFile(filepath.Join(e.agentDir, stagedName), []byte("longer evil"), 0o600)
 		}},
 		{"staged symlink", "staged binary", func(e *updaterEnv) {
-			bin := []byte("the real thing")
+			bin := []byte("the target thing")
 			e.stage("v1.1.0", bin, nil)
-			real := filepath.Join(t.TempDir(), "real")
-			_ = os.WriteFile(real, bin, 0o600)
+			target := filepath.Join(t.TempDir(), "target")
+			_ = os.WriteFile(target, bin, 0o600)
 			_ = os.Remove(filepath.Join(e.agentDir, stagedName))
-			_ = os.Symlink(real, filepath.Join(e.agentDir, stagedName))
+			_ = os.Symlink(target, filepath.Join(e.agentDir, stagedName))
 		}},
 		{"staged hard link", "links", func(e *updaterEnv) {
-			bin := []byte("the real thing")
+			bin := []byte("the target thing")
 			e.stage("v1.1.0", bin, nil)
 			_ = os.Link(filepath.Join(e.agentDir, stagedName), filepath.Join(e.agentDir, "other"))
 		}},
@@ -605,16 +605,16 @@ func TestApplyRefusesPlantedLinks(t *testing.T) {
 	})
 	t.Run("request is a symlink", func(t *testing.T) {
 		e := newUpdaterEnv(t)
-		real := filepath.Join(t.TempDir(), "req")
-		_ = os.WriteFile(real, []byte("{}"), 0o600)
-		_ = os.Symlink(real, filepath.Join(e.agentDir, requestName))
+		target := filepath.Join(t.TempDir(), "req")
+		_ = os.WriteFile(target, []byte("{}"), 0o600)
+		_ = os.Symlink(target, filepath.Join(e.agentDir, requestName))
 		if err := e.p.run(); err == nil || !errors.Is(err, syscall.ELOOP) {
 			t.Fatalf("err %v", err)
 		}
 		if _, err := os.Lstat(filepath.Join(e.agentDir, requestName)); !os.IsNotExist(err) {
 			t.Fatal("planted request link not consumed")
 		}
-		if _, err := os.Stat(real); err != nil {
+		if _, err := os.Stat(target); err != nil {
 			t.Fatal("symlink target removed")
 		}
 	})
@@ -1010,4 +1010,11 @@ func TestUpdaterRecordsRanVersions(t *testing.T) {
 	if len(st.Ran) != maxRan || st.Ran[maxRan-1] != "v1.0."+strconv.Itoa(2*maxRan-1) {
 		t.Fatalf("ran history not bounded newest-last: %d", len(st.Ran))
 	}
+}
+
+// asError is r as an error (nil if it is not one), for matching recovered
+// panic values with errors.Is.
+func asError(r any) error {
+	err, _ := r.(error)
+	return err
 }

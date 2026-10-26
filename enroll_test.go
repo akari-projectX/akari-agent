@@ -273,7 +273,7 @@ func TestCSRShapeAndRenewAt(t *testing.T) {
 	if !ok || pub.Curve != elliptic.P256() || csr.SignatureAlgorithm != x509.ECDSAWithSHA256 {
 		t.Fatal("CSR must be P-256 / ecdsa-with-SHA256")
 	}
-	if len(csr.Extensions) != 0 || len(csr.DNSNames) != 0 || len(csr.Attributes) != 0 {
+	if len(csr.Extensions) != 0 || len(csr.DNSNames) != 0 || len(csr.Attributes) != 0 { //nolint:staticcheck // the point: the CSR must not carry the (deprecated) attributes field
 		t.Fatal("CSR must carry no extensions or attributes")
 	}
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -439,7 +439,12 @@ func runAgent(t *testing.T, a *Agent) (cancel func(), errc chan error) {
 	ctx, c := context.WithCancel(context.Background())
 	errc = make(chan error, 1)
 	go func() { errc <- a.Run(ctx) }()
-	return func() { c(); <-errc }, errc
+	return func() {
+		c()
+		if err := <-errc; err != nil {
+			t.Logf("Run returned %v", err)
+		}
+	}, errc
 }
 
 func tlsAgent(t *testing.T, addr, dir string, cfg *Config) *Agent {
