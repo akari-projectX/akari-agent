@@ -68,7 +68,10 @@ func main() {
 		os.Exit(1)
 	}
 	if *out == "" {
-		os.Stdout.Write(text)
+		if _, err := os.Stdout.Write(text); err != nil {
+			fmt.Fprintln(os.Stderr, "thirdparty:", err)
+			os.Exit(1)
+		}
 		return
 	}
 	if err := os.WriteFile(*out, text, 0o644); err != nil {

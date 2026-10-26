@@ -259,7 +259,7 @@ func blockDomain(s string) (*geodata.DomainRule, error) {
 	}
 	for i := 0; i < len(value); i++ {
 		c := value[i]
-		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '.') {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' && c != '.' {
 			return nil, fmt.Errorf("bad domain entry %q", s)
 		}
 	}

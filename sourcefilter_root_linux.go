@@ -78,7 +78,7 @@ func readNetSockets(udp bool) ([]netSocket, error) {
 			return nil, err
 		}
 		socks, err := parseNetSockets(f, udp)
-		f.Close()
+		closeRO(f)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
@@ -187,7 +187,7 @@ func (p *applier) applySourceFilters(d *agentDir) {
 	if err == nil {
 		var b []byte
 		b, err = io.ReadAll(io.LimitReader(f, maxFilterRequestSize))
-		f.Close()
+		closeRO(f)
 		if err == nil {
 			req, err = parseFilterRequest(b)
 		}

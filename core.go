@@ -145,6 +145,7 @@ type CoreManager struct {
 	onStart func(*core.Instance)
 }
 
+// NewCoreManager returns a CoreManager with no running xray instance.
 func NewCoreManager() *CoreManager {
 	m := &CoreManager{sessionID: newSessionID(), blocks: newBlockState()}
 	m.resetUsersLocked()
@@ -479,7 +480,7 @@ func (m *CoreManager) publishBlocksLocked() {
 	m.blocks.setApplied(p.Version)
 }
 
-// BlockStats: Heartbeat.block (nil before any policy and any hit).
+// BlockStats returns the Heartbeat.block counters (nil before any policy and any hit).
 func (m *CoreManager) BlockStats() *pb.BlockStats { return m.blocks.stats() }
 
 func tagSet(tags []string) map[string]bool {

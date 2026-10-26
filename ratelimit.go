@@ -76,7 +76,7 @@ func costNanos(n, r uint64) int64 {
 		return int64(^uint64(0) >> 1)
 	}
 	q, _ := bits.Div64(hi, lo, r)
-	if q > uint64(^uint64(0)>>1) {
+	if q > ^uint64(0)>>1 {
 		return int64(^uint64(0) >> 1)
 	}
 	return int64(q)

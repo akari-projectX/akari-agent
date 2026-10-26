@@ -172,8 +172,15 @@ func (a *Agent) runUpdate(ctx context.Context, gen uint64, send func(*pb.AgentUp
 	// request needs applyMu for gracefulStop).
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	if a.procCtx != nil {
-		defer context.AfterFunc(a.procCtx, cancel)()
+	if a.procDone != nil {
+		// Ends with wctx at the latest (the deferred cancel above).
+		go func() {
+			select {
+			case <-a.procDone:
+				cancel()
+			case <-wctx.Done():
+			}
+		}()
 	}
 	a.applyMu.Lock()
 	defer a.applyMu.Unlock()
@@ -241,7 +248,7 @@ func (a *Agent) download(ctx context.Context, conn grpc.ClientConnInterface, m *
 
 var errTooLarge = errors.New("artifact larger than its manifest")
 
-func (a *Agent) fetchOnce(ctx context.Context, conn grpc.ClientConnInterface, m *release.Manifest, f *os.File, h hash.Hash, n *int64) error {
+func (*Agent) fetchOnce(ctx context.Context, conn grpc.ClientConnInterface, m *release.Manifest, f *os.File, h hash.Hash, n *int64) error {
 	stream, err := pb.NewAgentChannelClient(conn).FetchArtifact(ctx,
 		&pb.FetchArtifactRequest{Sha256: m.SHA256, Offset: uint64(*n)})
 	if err != nil {

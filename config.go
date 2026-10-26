@@ -23,12 +23,16 @@ type Config struct {
 	Identity        IdentityConfig `toml:"identity"`
 }
 
+// IdentityConfig is the bootstrap file's [identity] table: the CA to trust and,
+// in the v1 format, the node's own certificate and key.
 type IdentityConfig struct {
 	CAPEM   string `toml:"ca_pem"`
 	CertPEM string `toml:"cert_pem"` // v1 only
 	KeyPEM  string `toml:"key_pem"`  // v1 only
 }
 
+// LoadConfig reads and strictly parses the bootstrap file at path (unknown
+// keys are an error).
 func LoadConfig(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {

@@ -345,7 +345,7 @@ func (p *applier) run() error {
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer closeRO(lock)
 	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
 		return fmt.Errorf("lock: %w", err)
 	}
@@ -519,7 +519,7 @@ func (p *applier) copyStaged(d *agentDir, m *release.Manifest) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("staged binary: %w", err)
 	}
-	defer src.Close()
+	defer closeRO(src)
 	if size != m.Size {
 		return "", fmt.Errorf("staged binary is %d bytes, the signed manifest says %d", size, m.Size)
 	}
@@ -735,7 +735,7 @@ func readUnit(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer closeRO(f)
 	fi, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -782,7 +782,7 @@ func fileDigest(path string, limit int64) (string, int64, error) {
 	if err != nil {
 		return "", 0, err
 	}
-	defer f.Close()
+	defer closeRO(f)
 	return digest(f, limit)
 }
 
@@ -801,7 +801,7 @@ func openAgentDir(stateDir string) (*agentDir, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(sfd)
+	defer closeFd(sfd)
 	var sst unix.Stat_t
 	if err := unix.Fstat(sfd, &sst); err != nil {
 		return nil, err
@@ -812,17 +812,17 @@ func openAgentDir(stateDir string) (*agentDir, error) {
 	}
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		unix.Close(fd)
+		closeFd(fd)
 		return nil, err
 	}
 	if st.Uid != sst.Uid {
-		unix.Close(fd)
+		closeFd(fd)
 		return nil, fmt.Errorf("%s/%s belongs to uid %d, the state dir to %d", stateDir, updateDirName, st.Uid, sst.Uid)
 	}
 	return &agentDir{fd: fd, uid: st.Uid, gid: st.Gid}, nil
 }
 
-func (d *agentDir) close() { unix.Close(d.fd) }
+func (d *agentDir) close() { closeFd(d.fd) }
 
 // open opens an agent file for reading: no symlink, regular, one link,
 // owned by the agent, at most limit bytes.
@@ -833,7 +833,7 @@ func (d *agentDir) open(name string, limit int64) (*os.File, int64, error) {
 	}
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		unix.Close(fd)
+		closeFd(fd)
 		return nil, 0, err
 	}
 	switch {
@@ -847,7 +847,7 @@ func (d *agentDir) open(name string, limit int64) (*os.File, int64, error) {
 		err = fmt.Errorf("%s is larger than %d bytes", name, limit)
 	}
 	if err != nil {
-		unix.Close(fd)
+		closeFd(fd)
 		return nil, 0, err
 	}
 	return os.NewFile(uintptr(fd), name), st.Size, nil
@@ -858,7 +858,7 @@ func (d *agentDir) read(name string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer closeRO(f)
 	return io.ReadAll(io.LimitReader(f, limit))
 }
 
@@ -887,7 +887,7 @@ func (d *agentDir) takeRequest() (*applyRequest, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer closeRO(f)
 	b, err := io.ReadAll(io.LimitReader(f, maxRequestSize))
 	if err != nil {
 		return nil, err
@@ -951,3 +951,10 @@ func (d *agentDir) writeFile(name string, b []byte) error {
 	}
 	return unix.Fsync(d.fd)
 }
+
+// closeRO closes a file that was only read from (or an fd on an error path):
+// the close error cannot lose data and there is nothing to act on.
+func closeRO(c io.Closer) { _ = c.Close() }
+
+// closeFd is closeRO for a raw descriptor.
+func closeFd(fd int) { _ = unix.Close(fd) }
