@@ -8,6 +8,10 @@ run:
   build-tags: [canary]   # the canary tests are part of the codebase (make vet does the same)
   tests: true
 
+# contextcheck is deliberately off: CoreManager's xray calls (AddUser, handler
+# swaps, Rebuild) run under applyMu and must complete atomically, so they take
+# a detached context instead of the stream's; passing the stream context would
+# let a reconnect abort an apply half-way (see CLAUDE.md "Lint").
 linters:
   default: none
   enable:
@@ -24,7 +28,6 @@ linters:
     - copyloopvar
     - unconvert
     - usestdlibvars
-    - contextcheck
   settings:
     govet:
       enable-all: true
@@ -61,6 +64,10 @@ linters:
     paths:
       - pb
     rules:
+      # Fake panels in tests end their handler when Recv fails: that is the
+      # test's normal exit, not a swallowed error.
+      - path: _test\.go
+        linters: [nilerr]
       # Tests: dropping the error of Close/SetDeadline on throwaway loopback
       # connections and listeners is noise (GO-STYLE allows it where the
       # failure cannot change the test's verdict).
@@ -79,3 +86,7 @@ formatters:
     generated: lax
     paths:
       - pb
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
