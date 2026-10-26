@@ -25,12 +25,15 @@ import (
 // (Hello.protocol_version; see agent.proto). 2 = renews its certificate
 // (AgentChannel.Renew); 3 = signed self-update (UpdateOffer/FetchArtifact);
 // 4 = per-user speed limits (UserOp.speed_limit_bytes_per_sec, ratelimit.go);
-// 5 = Shadowsocks 2022 removals apply in place as tombstones (W9: the panel
-// sends them as deltas; WouldShrinkUnsafe); 6 = automatic node certificate
+// 5 = Shadowsocks 2022 removals apply in place as tombstones (W9; retired by
+// 8); 6 = automatic node certificate
 // over ACME (ConfigSnapshot.acme, Heartbeat.cert; acme.go); 7 (W28-a) =
 // UserOp.user_id "<account>#<n>" per relay entrance: speed limits and the
-// online-user count are per account (gate.go accountOf).
-const agentProtocol = 7
+// online-user count are per account (gate.go accountOf); 8 = Shadowsocks
+// 2022 removal and credential rotation are native deltas like every other
+// protocol (xray's multi-user server resolves users through hash/email maps,
+// so RemoveUser cannot hand a stalled handshake to another user).
+const agentProtocol = 8
 
 // agentCapabilities: optional features independent of agentProtocol
 // (Hello.capabilities, W11): "metrics" = Heartbeat.metrics, "latency" =
@@ -848,10 +851,6 @@ func (a *Agent) applyDeltaLocked(ctx context.Context, gen uint64, send func(*pb.
 		return a.sendAckLocked(send, target[0], target[1], pb.Ack_REASON_BASE_MISMATCH, why)
 	case a.removeRebuild && a.core.WouldDropCredential(d.Ops):
 		why := fmt.Errorf("remove_mode=rebuild: removals/rotations need a snapshot")
-		slog.Warn("rejecting user delta", "error", why)
-		return a.sendAckLocked(send, target[0], target[1], pb.Ack_REASON_BASE_MISMATCH, why)
-	case a.core.WouldShrinkUnsafe(d.Ops):
-		why := fmt.Errorf("shadowsocks credential change (rotation, re-add with a new key, or tombstone bound) needs a snapshot")
 		slog.Warn("rejecting user delta", "error", why)
 		return a.sendAckLocked(send, target[0], target[1], pb.Ack_REASON_BASE_MISMATCH, why)
 	}

@@ -3,7 +3,7 @@ package main
 // Per-protocol handling of panel-managed inbounds (W8; W26: one module per
 // protocol behind protocolModule, the rules from proto/protocols.toml):
 // which inbounds take dynamic users, how a panel account becomes an xray
-// user, and protocol specifics (Shadowsocks 2022 multi-user, tombstones).
+// user, and protocol specifics (Shadowsocks 2022 multi-user).
 //
 // Managed protocols (the panel issues credentials, the xray "email" is the
 // panel user id, the gate admits by *MemoryUser); wire name = manifest
@@ -138,12 +138,4 @@ func buildUser(protocolName, accountJSON, userID string, kind inboundKind) (*pro
 		Email:   userID,
 		Account: commonserial.ToTypedMessage(account),
 	}, nil
-}
-
-// shrinkUnsafe: a user must never leave the user table of a running
-// inbound of this kind (manifest `shrink_unsafe`: Shadowsocks 2022, whose
-// xray multi-user inbound swap-deletes; see proto_ss2022.go). Removals
-// there are tombstones; rotations need a rebuild (BASE_MISMATCH).
-func shrinkUnsafe(k inboundKind) bool {
-	return k.protocol != "" && protocolSpec(k.protocol).ShrinkUnsafe
 }

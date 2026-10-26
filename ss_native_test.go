@@ -1,18 +1,21 @@
 package main
 
-// W9: Shadowsocks 2022 removal without a rebuild. A removed user's
-// credential stays in xray's multi-user table as a gate-refused tombstone,
-// so the service's user indices never move. These tests drive real SS2022
-// handshakes (sing-shadowsocks client, the library xray's own server uses)
-// that stall right after the fixed header — the server has resolved the
-// user index and waits for the variable header — across removals, and run
-// under -race (`make test`).
+// Shadowsocks 2022 removal and rotation are native deltas (protocol 8):
+// the agent calls xray's RemoveUser/AddUser like for every other protocol.
+// These tests drive real SS2022 handshakes (sing-shadowsocks client, the
+// library xray's own server uses) that stall right after the fixed header —
+// the server has resolved the user and waits for the variable header —
+// across removals, re-adds and rotations, and run under -race (`make test`).
 //
-// With xray's RemoveUser (swap-delete) a stalled handshake of a removed
-// user resumes as whichever user moved into its slot (admitted and billed
-// as them) or indexes past the end and panics the agent; here it must
-// resolve to its own tombstone and be refused, while every other user's
-// handshakes and established connections carry on.
+// xray v26.3.27 swap-deleted in RemoveUser, so a stalled handshake of a
+// removed user resumed as whichever user moved into its slot (admitted and
+// billed as them) or indexed past the end and panicked the agent; that is
+// why the agent once kept removed credentials as tombstones. From xray
+// v26.10.21 the multi-user server resolves users through hash/email maps and
+// keeps the user's own *MemoryUser for the connection: a removed user's
+// stalled handshake must be refused by the gate, never admitted as someone
+// else, while every other user's handshakes and established connections
+// carry on.
 
 import (
 	"bytes"
@@ -156,8 +159,8 @@ func countersByUser(m *CoreManager) map[string][2]uint64 {
 // handshakes are refused; the others' complete as themselves; an
 // established connection survives; per-user counters are exact (nothing
 // billed to the wrong user). Then the removed users are re-added with the
-// same keys (tombstones revived) and connect again.
-func TestSS2022TombstoneStalledHandshakes(t *testing.T) {
+// same keys and connect again.
+func TestSS2022NativeRemoveStalledHandshakes(t *testing.T) {
 	const users = 8
 	e, m, ops, inb := newSSEnv(t, users)
 	uid := func(i int) string { return ops[i].UserId }
@@ -189,15 +192,12 @@ func TestSS2022TombstoneStalledHandshakes(t *testing.T) {
 	for i := range removed {
 		rm = append(rm, &pb.UserOp{Op: pb.UserOp_REMOVE, UserId: uid(i)})
 	}
-	if m.WouldShrinkUnsafe(rm) {
-		t.Fatal("SS2022 removal refused")
-	}
 	session := m.SessionID()
 	if _, err := m.ApplyUserOps(rm); err != nil {
 		t.Fatal(err)
 	}
-	if m.SessionID() != session || m.Tombstones("ss") != len(removed) {
-		t.Fatalf("removal rebuilt or lost tombstones (tombstones %d)", m.Tombstones("ss"))
+	if m.SessionID() != session || m.UserCount() != users-len(removed) {
+		t.Fatalf("removal rebuilt the instance or left users behind (users %d)", m.UserCount())
 	}
 	// The state hash is the remaining users only.
 	var keep []*pb.UserOp
@@ -212,7 +212,7 @@ func TestSS2022TombstoneStalledHandshakes(t *testing.T) {
 		t.Fatal(err)
 	}
 	if m.StateHash(1) != stateHash(1, inb, hashRecordsOf(ref)) {
-		t.Fatal("state hash includes tombstones")
+		t.Fatal("state hash differs from the remaining users")
 	}
 
 	close(release)
@@ -240,19 +240,16 @@ func TestSS2022TombstoneStalledHandshakes(t *testing.T) {
 		}
 	}
 
-	// Re-add (same keys): the tombstones revive in place, no rebuild.
+	// Re-add (same keys): delta, no rebuild.
 	var readd []*pb.UserOp
 	for i := range removed {
 		readd = append(readd, ops[i])
 	}
-	if m.WouldShrinkUnsafe(readd) {
-		t.Fatal("re-add of the same SS keys refused")
-	}
 	if _, err := m.ApplyUserOps(readd); err != nil {
 		t.Fatal(err)
 	}
-	if m.SessionID() != session || m.Tombstones("ss") != 0 || m.UserCount() != users {
-		t.Fatalf("re-add: tombstones %d users %d", m.Tombstones("ss"), m.UserCount())
+	if m.SessionID() != session || m.UserCount() != users {
+		t.Fatalf("re-add: users %d", m.UserCount())
 	}
 	for i := range removed {
 		c, _ := e.handshake(t, ssKeyOf(ops[i]), closedChan())
@@ -267,10 +264,10 @@ func TestSS2022TombstoneStalledHandshakes(t *testing.T) {
 }
 
 // Concurrent: handshakes of every user stall for random times while a
-// subset is removed and re-added over and over (deltas, tombstones). Users
+// subset is removed and re-added over and over (deltas). Users
 // never touched never fail, their established connection survives, and
 // their counters are exact; nothing panics; -race is clean.
-func TestSS2022TombstoneRace(t *testing.T) {
+func TestSS2022NativeRemoveRace(t *testing.T) {
 	const users = 8
 	e, m, ops, _ := newSSEnv(t, users)
 	toggled := map[int]bool{0: true, 3: true, 5: true, 7: true}
@@ -304,10 +301,6 @@ func TestSS2022TombstoneRace(t *testing.T) {
 			default:
 			}
 			for _, batch := range [][]*pb.UserOp{rm, add} {
-				if m.WouldShrinkUnsafe(batch) {
-					t.Error("toggle refused")
-					return
-				}
 				if _, err := m.ApplyUserOps(batch); err != nil {
 					t.Error(err)
 					return
@@ -378,8 +371,61 @@ func TestSS2022TombstoneRace(t *testing.T) {
 			t.Fatalf("toggled user %d counters %v exceed the %d bytes it sent", i, got[u], attempted[u])
 		}
 	}
-	if m.Tombstones("ss") != 0 {
-		t.Fatalf("%d tombstones after the last re-add", m.Tombstones("ss"))
+}
+
+// Rotation (same user, new key) is one delta: a handshake stalled with the
+// old key is refused once the new key is in, new handshakes with the old key
+// are refused, the new key connects, and other users and their established
+// connections are not disturbed; counters stay exact.
+func TestSS2022NativeRotation(t *testing.T) {
+	const users = 4
+	e, m, ops, _ := newSSEnv(t, users)
+	session := m.SessionID()
+	est, _ := e.handshake(t, ssKeyOf(ops[1]), closedChan())
+	defer est.Close()
+	if err := exchange(est, []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+
+	release := make(chan struct{})
+	oldKey := ssKeyOf(ops[0])
+	stalled, on := e.handshake(t, oldKey, release)
+	defer stalled.Close()
+	res := make(chan error, 1)
+	go func() { res <- exchange(stalled, bytes.Repeat([]byte("o"), 500)) }()
+	<-on
+	time.Sleep(300 * time.Millisecond)
+
+	rotated := ssOp(ops[0].UserId, "ss", b64key(16, 0x70))
+	if _, err := m.ApplyUserOps([]*pb.UserOp{rotated}); err != nil {
+		t.Fatal(err)
+	}
+	if m.SessionID() != session || m.UserCount() != users {
+		t.Fatalf("rotation rebuilt the instance or lost users (users %d)", m.UserCount())
+	}
+	close(release)
+	if err := <-res; err == nil {
+		t.Fatal("handshake stalled with the old key relayed after the rotation")
+	}
+	old, _ := e.handshake(t, oldKey, closedChan())
+	if err := exchange(old, []byte("old")); err == nil {
+		t.Fatal("old key opened a new connection after the rotation")
+	}
+	old.Close()
+	fresh, _ := e.handshake(t, ssKeyOf(rotated), closedChan())
+	defer fresh.Close()
+	if err := exchange(fresh, bytes.Repeat([]byte("n"), 300)); err != nil {
+		t.Fatalf("new key cannot connect: %v", err)
+	}
+	if err := exchange(est, []byte("still-here")); err != nil {
+		t.Fatalf("established connection of another user cut by the rotation: %v", err)
+	}
+	got := countersByUser(m)
+	if want := [2]uint64{300, 300}; got[ops[0].UserId] != want {
+		t.Fatalf("rotated user counters %v, want %v", got[ops[0].UserId], want)
+	}
+	if want := [2]uint64{15, 15}; got[ops[1].UserId] != want {
+		t.Fatalf("other user counters %v, want %v", got[ops[1].UserId], want)
 	}
 }
 

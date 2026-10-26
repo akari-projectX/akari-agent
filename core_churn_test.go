@@ -124,38 +124,6 @@ func TestSweepGoneBoundsChurn(t *testing.T) {
 	}
 }
 
-// Tombstones of Shadowsocks 2022 tags stay in xray's table and in issued
-// whatever the age; only counters follow the general rule.
-func TestSweepGoneKeepsTombstones(t *testing.T) {
-	m := NewCoreManager()
-	defer m.Teardown()
-	clock := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
-	m.now = func() time.Time { return clock }
-	inb := "[" + ssInbound("ss", freePort(t), "2022-blake3-aes-128-gcm", b64key(16, 1), true) + "]"
-	op := ssOp("user-00", "ss", b64key(16, 10))
-	if _, err := m.Rebuild(inb, []*pb.UserOp{op, ssOp("user-01", "ss", b64key(16, 11))}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := m.ApplyUserOps([]*pb.UserOp{{Op: pb.UserOp_REMOVE, UserId: "user-00"}}); err != nil {
-		t.Fatal(err)
-	}
-	clock = clock.Add(staleIssuedTTL + time.Hour)
-	m.SweepGone()
-	if n := m.Tombstones("ss"); n != 1 {
-		t.Fatalf("Tombstones() = %d, want 1", n)
-	}
-	if _, _, issued, stale := m.sizes(); issued != 2 || stale != 0 {
-		t.Fatalf("issued/stale = %d/%d, want 2/0 (the tombstone's credential is kept)", issued, stale)
-	}
-	// Reviving the tombstone still works after the sweep.
-	if _, err := m.ApplyUserOps([]*pb.UserOp{op}); err != nil {
-		t.Fatalf("reviving the tombstone: %v", err)
-	}
-	if n := m.Tombstones("ss"); n != 0 {
-		t.Errorf("Tombstones() after the revival = %d, want 0", n)
-	}
-}
-
 // SweepGone runs on the traffic tick while deltas and reports run on other
 // goroutines.
 func TestSweepGoneRace(t *testing.T) {

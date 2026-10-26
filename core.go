@@ -112,19 +112,14 @@ type CoreManager struct {
 	// the identical credential reuses its *MemoryUser, so sessions a
 	// client kept across the removal (a Hysteria 2 QUIC connection, a mux
 	// connection: authenticated once, their streams carry that pointer)
-	// are admitted again. On shrink-unsafe (Shadowsocks 2022) tags every
-	// issued credential is still in xray's user table: the ones not live
-	// are tombstones (see shrinkUnsafe). Reset with the instance.
+	// are admitted again. Reset with the instance.
 	issued map[string]map[string]appliedCred
-	// tombs: shrink-unsafe tag -> number of tombstones on it.
-	tombs map[string]int
 	// counted: every email with counters in this instance, including users
 	// removed since (xray keeps their counters; the tail is still billed).
 	counted map[string]*userCounters
 	// goneCounters: users in counted with nothing installed any more -> since
-	// when; staleIssued: issued credentials of removed users on tags where
-	// removal really removes (not tombstones) -> since when. SweepGone
-	// drops both after a grace period, so user churn on a long-lived
+	// when; staleIssued: issued credentials of removed users -> since when.
+	// SweepGone drops both after a grace period, so user churn on a long-lived
 	// instance does not grow the maps without bound (audit P3-4).
 	goneCounters map[string]time.Time
 	staleIssued  map[issuedKey]time.Time
@@ -159,7 +154,6 @@ func NewCoreManager() *CoreManager {
 func (m *CoreManager) resetUsersLocked() {
 	m.applied = make(map[string]map[string]appliedCred)
 	m.issued = make(map[string]map[string]appliedCred)
-	m.tombs = make(map[string]int)
 	m.counted = make(map[string]*userCounters)
 	m.goneCounters = make(map[string]time.Time)
 	m.staleIssued = make(map[issuedKey]time.Time)
@@ -179,7 +173,7 @@ const (
 	// *MemoryUser a client that kept its authenticated connection across
 	// the removal (Hysteria 2 QUIC, mux) still carries (W9). Hysteria
 	// clients can keep such a connection for days, hence a day, not
-	// minutes. Tombstones of shrink-unsafe tags are never dropped.
+	// minutes.
 	staleIssuedTTL = 24 * time.Hour
 )
 
@@ -526,87 +520,6 @@ func (m *CoreManager) WouldDropCredential(ops []*pb.UserOp) bool {
 	return false
 }
 
-// WouldShrinkUnsafe reports whether ops cannot be applied in place on an
-// inbound whose users must not leave its user table while it runs
-// (shrinkUnsafe: Shadowsocks 2022 multi-user). There a removal only
-// tombstones the credential (gate-revoked, kept in xray's table) and a
-// re-add of the SAME credential revives it, but the table holds one entry
-// per user (xray refuses a duplicate email), so a different credential for
-// a user the table already holds (rotation; re-add with a new key) cannot
-// be installed. Neither can a removal that would push a tag's tombstones
-// past maxTombstones. Such deltas are refused whatever the remove mode; the
-// Snapshot that follows rebuilds (and compacts).
-func (m *CoreManager) WouldShrinkUnsafe(ops []*pb.UserOp) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	// The ops in order, over a scratch view of the shrink-unsafe tags.
-	type entry struct {
-		cred   appliedCred
-		issued bool
-		live   bool
-	}
-	view := map[gateKey]entry{}
-	tombs := map[string]int{}
-	size := map[string]int{}
-	for _, tag := range m.tags {
-		if shrinkUnsafe(m.kinds[tag]) {
-			tombs[tag] = m.tombs[tag]
-			size[tag] = len(m.issued[tag])
-		}
-	}
-	for _, op := range ops {
-		uid := op.GetUserId()
-		want := map[string]*pb.InboundUser{}
-		if op.GetOp() == pb.UserOp_ADD {
-			for _, iu := range op.GetInboundUsers() {
-				want[iu.GetInboundTag()] = iu
-			}
-		}
-		for tag := range tombs {
-			key := gateKey{tag: tag, email: uid}
-			e, seen := view[key]
-			if !seen {
-				e.cred, e.issued = m.issued[tag][uid]
-				_, e.live = m.applied[uid][tag]
-			}
-			w, wanted := want[tag]
-			same := wanted && e.issued && w.GetProtocol() == e.cred.protocol && w.GetAccountJson() == e.cred.account
-			switch {
-			case wanted && e.issued && !same:
-				return true // rotation, or re-add with another credential
-			case wanted && e.issued && !e.live:
-				tombs[tag]-- // revive the tombstone
-				e.live = true
-			case wanted && !e.issued:
-				size[tag]++ // appended
-				e.cred = appliedCred{protocol: w.GetProtocol(), account: w.GetAccountJson()}
-				e.issued, e.live = true, true
-			case !wanted && e.live:
-				tombs[tag]++
-				e.live = false
-			}
-			view[key] = e
-		}
-	}
-	for tag, n := range tombs {
-		if n > m.tombs[tag] && n > maxTombstones(size[tag]-n) {
-			return true
-		}
-	}
-	return false
-}
-
-// tombstoneFloor: tombstones a shrink-unsafe tag may always hold. A test
-// seam (var), constant in production.
-var tombstoneFloor = 1024
-
-// maxTombstones bounds a tag's tombstones by its live users: at most
-// max(tombstoneFloor, live). Each costs a MemoryUser and a sing-shadowsocks
-// key entry (~1 KB) and inflates the O(table) rebuild xray does on every
-// AddUser; the handshake lookup is a hash map, so it costs no CPU there.
-// Past the bound a removal is refused and the panel's Snapshot compacts.
-func maxTombstones(live int) int { return max(tombstoneFloor, live) }
-
 // ApplyUserOps applies UserDelta ops to the running instance, continuing
 // past failures (every op is idempotent; `applied` records what really took
 // effect). Users who lost a live credential get their final counters
@@ -674,17 +587,12 @@ func (m *CoreManager) applyOpLocked(op *pb.UserOp, fresh bool) (lost bool, err e
 				continue
 			}
 			lost = true
-			if shrinkUnsafe(m.kinds[tag]) {
-				m.tombs[tag]++ // stays in xray's table, refused by the gate
-			} else if _, had := m.issued[tag][uid]; had {
+			if _, had := m.issued[tag][uid]; had {
 				m.staleIssued[issuedKey{tag, uid}] = m.clock()
 			}
 		}
 		m.gate.Revoke(gateKey{tag: tag, email: uid})
 		delete(cur, tag)
-		if shrinkUnsafe(m.kinds[tag]) {
-			continue // never RemoveUser here: it moves other users' indices
-		}
 		if store, e := m.store(tag); e == nil {
 			_ = store.RemoveUser(context.Background(), uid) // not-found is fine
 		}
@@ -741,23 +649,8 @@ func (m *CoreManager) store(tag string) (userManager, error) {
 
 func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, cur map[string]appliedCred) error {
 	key := gateKey{tag: tag, email: uid}
-	unsafe := shrinkUnsafe(m.kinds[tag])
 	prev, had := m.issued[tag][uid]
 	same := had && prev.protocol == iu.GetProtocol() && prev.account == iu.GetAccountJson()
-	if unsafe && had {
-		if !same {
-			// One table entry per user: a new credential needs a new
-			// instance (WouldShrinkUnsafe refuses such deltas first).
-			return fmt.Errorf("inbound %q: user %s already has another shadowsocks credential in this instance; needs a snapshot", tag, uid)
-		}
-		// Revive the tombstone: it never left xray's table.
-		m.gate.Allow(key, prev.user)
-		delete(m.staleIssued, issuedKey{tag, uid})
-		m.tombs[tag]--
-		cur[tag] = prev
-		m.registerCountersLocked(uid)
-		return nil
-	}
 	var memoryUser *protocol.MemoryUser
 	if same {
 		memoryUser = prev.user
@@ -776,9 +669,7 @@ func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, 
 	}
 	// Admit the new identity before the validator can authenticate it.
 	m.gate.Allow(key, memoryUser)
-	if !unsafe {
-		_ = store.RemoveUser(context.Background(), uid)
-	}
+	_ = store.RemoveUser(context.Background(), uid)
 	if err := store.AddUser(context.Background(), memoryUser); err != nil {
 		m.gate.Revoke(key)
 		return fmt.Errorf("add user to inbound %q: %w", tag, err)
@@ -857,13 +748,6 @@ func (m *CoreManager) SweepGone() *pb.TrafficReport {
 		return nil
 	}
 	return &pb.TrafficReport{Users: rows, SessionId: m.sessionID}
-}
-
-// Tombstones returns the number of tombstones on tag (tests, bench).
-func (m *CoreManager) Tombstones(tag string) int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.tombs[tag]
 }
 
 func (m *CoreManager) manager() (inbound.Manager, error) {

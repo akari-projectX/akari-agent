@@ -217,8 +217,8 @@ func TestCredentialRulesFollowManifest(t *testing.T) {
 }
 
 // Every manifest Shadowsocks 2022 method builds xray's multi-user server
-// with the manifest's key length; only shrink_unsafe protocols tombstone.
-func TestManifestMethodsAndShrinkRules(t *testing.T) {
+// with the manifest's key length.
+func TestManifestMethods(t *testing.T) {
 	ss := protocolSpec("shadowsocks")
 	methods := ss.option("method")
 	if methods == nil || len(methods.Values) == 0 {
@@ -231,17 +231,9 @@ func TestManifestMethodsAndShrinkRules(t *testing.T) {
 		if _, err := m.Rebuild(inb, []*pb.UserOp{ssOp(userA, "ss", b64key(n, 2))}); err != nil {
 			t.Fatalf("%s: %v", method, err)
 		}
-		if k := m.kinds["ss"]; k.ssKeyLen != n || !shrinkUnsafe(k) {
-			t.Fatalf("%s: kind %+v shrinkUnsafe=%v", method, k, shrinkUnsafe(k))
+		if k := m.kinds["ss"]; k.ssKeyLen != n {
+			t.Fatalf("%s: kind %+v", method, k)
 		}
 		m.Teardown()
-	}
-	for _, p := range manifest.Protocol {
-		if got := shrinkUnsafe(inboundKind{protocol: p.Wire}); got != p.ShrinkUnsafe {
-			t.Fatalf("%s: shrinkUnsafe %v, manifest %v", p.ID, got, p.ShrinkUnsafe)
-		}
-	}
-	if shrinkUnsafe(inboundKind{}) {
-		t.Fatal("an unmanaged inbound is shrink-unsafe")
 	}
 }

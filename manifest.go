@@ -4,8 +4,7 @@ package main
 // byte-identical copy of akari-panel's canonical file (`make sync-proto`,
 // `make check-proto`). The agent takes from it what it enforces: the
 // managed protocols (wire names), the credential rules (VLESS flows,
-// Shadowsocks 2022 methods and key lengths, minimum lengths), which
-// protocols are shrink-unsafe (tombstones), and the canary scenarios
+// Shadowsocks 2022 methods and key lengths, minimum lengths), and the canary scenarios
 // (rt_matrix_test.go). Per-protocol behaviour lives in the protocol
 // modules (proto_*.go); everything kernel-specific (xray types and field
 // names) stays there.
@@ -57,7 +56,6 @@ type manifestProtocol struct {
 	Security            []string             `toml:"security"`
 	L4                  string               `toml:"l4"`
 	TemplateRequiresTLS bool                 `toml:"template_requires_tls"`
-	ShrinkUnsafe        bool                 `toml:"shrink_unsafe"`
 	ALPN                []string             `toml:"alpn"`
 	Credential          []manifestCredential `toml:"credential"`
 	Option              []manifestField      `toml:"option"`

@@ -218,9 +218,7 @@ func runMatrixCase(t *testing.T, e *matrixEnv, tc matrixCase) {
 			}
 		}
 	}
-	// Revocation is a delta for every protocol, Shadowsocks 2022 included
-	// (W9: the credential stays in xray's table as a gate-refused
-	// tombstone, see shrinkUnsafe).
+	// Revocation is a delta for every protocol, Shadowsocks 2022 included.
 	remove(c, "first removal")
 	t.Logf("RT-%s: handshake ok, cut and refused after revoke", tc.name)
 
