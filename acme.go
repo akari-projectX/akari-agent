@@ -204,7 +204,7 @@ func validDomain(d string) bool {
 		}
 		for i := 0; i < len(l); i++ {
 			c := l[i]
-			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
 				return false
 			}
 		}
@@ -936,7 +936,7 @@ func newALPNSolver(ln net.Listener) *alpnSolver {
 				return
 			}
 			go func() {
-				defer c.Close()
+				defer func() { _ = c.Close() }() // probe connection, error is irrelevant
 				_ = c.SetDeadline(time.Now().Add(10 * time.Second))
 				_ = tls.Server(c, cfg).Handshake()
 			}()

@@ -255,7 +255,7 @@ func Sign(manifest []byte, priv ed25519.PrivateKey) Signature {
 	return Signature{KeyID: KeyID(pub), Sig: ed25519.Sign(priv, msg)}
 }
 
-// ErrNoValidSignature: no signature verifies under any pinned key.
+// ErrNoValidSignature is returned when no signature verifies under any pinned key.
 var ErrNoValidSignature = errors.New("no valid signature by a pinned release key")
 
 // Verify returns the id of a pinned key with a valid signature over the

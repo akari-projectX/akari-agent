@@ -1,3 +1,6 @@
+// Command akari-agent is the node agent: it dials the panel over mTLS, applies
+// the desired state to an embedded xray-core, meters per-user traffic and
+// enforces revocation and the failsafe lease.
 package main
 
 import (

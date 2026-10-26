@@ -359,7 +359,8 @@ func (r *cutReader) ReadMultiBuffer() (buf.MultiBuffer, error) {
 	return mb, err
 }
 
-func (r *cutReader) Interrupt() { common.Interrupt(r.Reader) }
+// Interrupt forwards to the wrapped reader; its error has no caller.
+func (r *cutReader) Interrupt() { _ = common.Interrupt(r.Reader) }
 
 type cutWriter struct {
 	buf.Writer
@@ -376,4 +377,5 @@ func (w *cutWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 
 func (w *cutWriter) Close() error { return common.Close(w.Writer) }
 
-func (w *cutWriter) Interrupt() { common.Interrupt(w.Writer) }
+// Interrupt forwards to the wrapped writer; its error has no caller.
+func (w *cutWriter) Interrupt() { _ = common.Interrupt(w.Writer) }

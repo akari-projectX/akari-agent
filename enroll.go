@@ -66,7 +66,7 @@ func (a *Agent) ensureEnrolled(ctx context.Context) error {
 			return nil
 		}
 		if ctx.Err() != nil {
-			return nil
+			return nil //nolint:nilerr // shutdown during enrolment is not an enrolment failure
 		}
 		// The panel accepted the request (its one-time token is spent) but
 		// this machine cannot keep the result: retrying can only fail with
@@ -154,7 +154,7 @@ func (a *Agent) enrollPanel(ctx context.Context, req *pb.EnrollRequest) (*pb.Iss
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }() // client conn, nothing left to flush
 	return pb.NewAgentEnrollmentClient(conn).Enroll(ctx, req)
 }
 

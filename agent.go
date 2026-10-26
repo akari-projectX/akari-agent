@@ -106,10 +106,10 @@ type Agent struct {
 	// process runs a binary on probation.
 	upd   *updater
 	trial *trialState
-	// procCtx: the process lifetime (Run's context). A stream's context
-	// outlives a stop request (gracefulStop), so waits that hold applyMu
-	// must also end on this one.
-	procCtx context.Context
+	// procDone: closed when Run's context ends (the process lifetime). A
+	// stream's context outlives a stop request (gracefulStop), so waits that
+	// hold applyMu must also end on this one. Nil until Run starts.
+	procDone <-chan struct{}
 	// finalsPersisted: final counters were loaded from the update state
 	// dir; the file goes once the queue has drained.
 	finalsPersisted atomic.Bool
@@ -168,6 +168,8 @@ type dialed struct {
 	close  func()
 }
 
+// NewAgent returns an Agent for cfg that reports agentVersion in its Hello and
+// authenticates with ids.
 func NewAgent(cfg *Config, agentVersion string, ids *identities) *Agent {
 	a := &Agent{
 		cfg:             cfg,
@@ -226,7 +228,7 @@ func (a *Agent) setDirty(d bool) {
 // capped exponential backoff. The lease is enforced independently of any
 // stream.
 func (a *Agent) Run(ctx context.Context) error {
-	a.procCtx = ctx
+	a.procDone = ctx.Done()
 	err := a.run(ctx)
 	if ctx.Err() != nil {
 		// Graceful stop (SIGTERM): whatever the stream could not carry is
@@ -241,7 +243,7 @@ func (a *Agent) run(ctx context.Context) error {
 		return err
 	}
 	if ctx.Err() != nil {
-		return nil
+		return nil //nolint:nilerr // shutdown while enrolling: the process is stopping, not failing
 	}
 	go a.leaseLoop(ctx)
 	go a.renewLoop(ctx)
@@ -262,7 +264,7 @@ func (a *Agent) run(ctx context.Context) error {
 		// the backoff (G4 - timing after the sleep could count the wait).
 		lived := time.Since(start)
 		if ctx.Err() != nil {
-			return nil
+			return nil //nolint:nilerr // the session ended because the process is stopping
 		}
 		wait := fullJitter(backoff)
 		slog.Warn("channel closed", "error", err, "retry_in", wait)
