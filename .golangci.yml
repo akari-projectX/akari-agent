@@ -1,0 +1,81 @@
+# golangci-lint v2 (pinned in the Makefile / CI). Rules follow briefs/GO-STYLE.md
+# (Google Go Style Guide). Deliberately disabled rules are explained inline and
+# in CLAUDE.md ("Lint").
+version: "2"
+
+run:
+  timeout: 10m
+  build-tags: [canary]   # the canary tests are part of the codebase (make vet does the same)
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck      # includes the former gosimple (S*) and stylecheck (ST*) checks
+    - unused
+    - errcheck
+    - errorlint
+    - ineffassign
+    - revive
+    - misspell
+    - bodyclose
+    - nilerr
+    - copyloopvar
+    - unconvert
+    - usestdlibvars
+    - contextcheck
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment   # struct padding micro-optimisation; fights readable field order
+        - shadow           # `err` shadowing in short scopes is idiomatic here
+    staticcheck:
+      checks: ["all"]
+    errcheck:
+      check-type-assertions: false
+    revive:
+      rules:
+        - name: var-naming
+        - name: receiver-naming
+        - name: error-strings
+        - name: error-return
+        - name: context-as-argument
+        - name: dot-imports
+        - name: blank-imports
+        - name: exported
+        - name: package-comments
+        - name: indent-error-flow
+        - name: unused-receiver
+        - name: increment-decrement
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: redefines-builtin-id
+    misspell:
+      # No locale: the codebase and its docs use British spelling
+      # (behaviour, licence); only genuine typos are flagged.
+      locale: ""
+  exclusions:
+    generated: lax
+    paths:
+      - pb
+    rules:
+      # Tests: dropping the error of Close/SetDeadline on throwaway loopback
+      # connections and listeners is noise (GO-STYLE allows it where the
+      # failure cannot change the test's verdict).
+      - path: _test\.go
+        linters: [errcheck]
+        text: "Error return value of .*(Close|CloseWithError|SetDeadline|SetReadDeadline|SetWriteDeadline)` is not checked"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+  exclusions:
+    generated: lax
+    paths:
+      - pb
