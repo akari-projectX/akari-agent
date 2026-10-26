@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/xtls/xray-core/proxy/vless"
@@ -34,12 +33,17 @@ var vlessFlows = func() map[string]bool {
 }()
 
 func (vlessModule) account(accountJSON string, _ inboundKind) (proto.Message, error) {
-	a := &vless.Account{}
-	if err := json.Unmarshal([]byte(accountJSON), a); err != nil {
+	// Only id and flow: vless.Account also carries reverse, encryption and
+	// xorMode, which the panel never issues (reverse bypasses the gate).
+	var in struct {
+		ID   string `json:"id"`
+		Flow string `json:"flow"`
+	}
+	if err := decodeStrict(accountJSON, &in); err != nil {
 		return nil, fmt.Errorf("vless account: %w", err)
 	}
-	if !vlessFlows[a.Flow] {
-		return nil, fmt.Errorf("vless account: unsupported flow %q", a.Flow)
+	if !vlessFlows[in.Flow] {
+		return nil, fmt.Errorf("vless account: unsupported flow %q", in.Flow)
 	}
-	return a, nil
+	return &vless.Account{Id: in.ID, Flow: in.Flow}, nil
 }

@@ -174,6 +174,12 @@ func TestBuildUserAccounts(t *testing.T) {
 	if _, err := buildUser("vless", fmt.Sprintf(`{"id":%q,"flow":"xtls-rprx-direct"}`, idA), userA, vl); err == nil {
 		t.Fatal("accepted a retired flow")
 	}
+	for _, extra := range []string{`"reverse":{"tag":"r"}`, `"encryption":"none"`, `"xorMode":1`, `"x":1`} {
+		acct := fmt.Sprintf(`{"id":%q,"flow":"",%s}`, idA, extra)
+		if _, err := buildUser("vless", acct, userA, vl); err == nil {
+			t.Fatalf("accepted a vless account with extra field: %s", acct)
+		}
+	}
 	if _, err := buildUser("vless", fmt.Sprintf(`{"id":%q}`, idA), userA, inboundKind{}); err == nil {
 		t.Fatal("added a user to an unmanaged inbound")
 	}
