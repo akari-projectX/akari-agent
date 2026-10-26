@@ -103,6 +103,9 @@ J
 cat >"$W/filter3.json" <<'J'
 {"schema":1,"id":"a3","filters":[]}
 J
+cat >"$W/filter4.json" <<'J'
+{"schema":1,"id":"a4","filters":[{"port":20443,"tcp":true,"cidrs":["203.0.113.0/24"]},{"port":22022,"tcp":true,"cidrs":["203.0.113.0/24"]}]}
+J
 chmod -R a+rX "$W"
 
 docker build -q -t akari-agent-openrc-test:alpine3.22 scripts/openrc-test >/dev/null
@@ -296,6 +299,19 @@ table | grep -q 'tcp dport 20443' || fail "hostile request changed the table: $(
 # Not `x … | grep -q .`: grep stops at the first line and the docker exec
 # writer's EPIPE fails the pipeline (pipefail) now and then.
 [ -n "$(x 'nft list ruleset')" ] || fail "ruleset flushed"
+# P2-1: a port another user holds (a root listener standing in for sshd) is
+# never filtered, even if the agent asks; the rest of the request is applied.
+x 'setsid nohup nc -l -p 22022 >/dev/null 2>&1 &'
+for _ in $(seq 1 20); do x 'grep -qi ":5606 .* 0A " /proc/net/tcp /proc/net/tcp6' && break; sleep 0.5; done
+x 'grep -qi ":5606 .* 0A " /proc/net/tcp /proc/net/tcp6' || fail "test listener on 22022 not up"
+filter_req 4
+wait_fresult a4
+fresult | grep -q '"applied":true' || fail "partial allowlist not applied: $(fresult)"
+fresult | grep -q '"skipped":\[22022\]' || fail "held port not reported as skipped: $(fresult)"
+t=$(table)
+grep -q 'tcp dport 20443 ct state new' <<<"$t" || fail "allowed port missing from the table: $t"
+grep -q 'dport 22022' <<<"$t" && fail "a port another user holds was filtered: $t"
+x 'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = nc ] && kill ${p#/proc/}; done; true'
 filter_req 3
 wait_fresult a3
 fresult | grep -q '"applied":true' || fail "removal failed: $(fresult)"

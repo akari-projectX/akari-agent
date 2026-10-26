@@ -82,6 +82,11 @@ type filterResult struct {
 	Applied bool   `json:"applied"`
 	Ports   int    `json:"ports"`
 	Error   string `json:"error,omitempty"`
+	// Skipped lists the requested ports the updater left alone because
+	// another user's process holds them (the rest was applied); Note says
+	// so in words for the heartbeat.
+	Skipped []uint32 `json:"skipped,omitempty"`
+	Note    string   `json:"note,omitempty"`
 }
 
 // specsOf converts the Snapshot's filters.
@@ -308,6 +313,13 @@ func (s *sourceFilters) poll() {
 		case r.Applied && s.ports == 0:
 			s.status = nil
 			slog.Info("source filters removed")
+		case r.Applied && len(r.Skipped) > 0:
+			// Part of the request was refused (a port another user holds):
+			// the rest is enforced, but the entrances on the skipped ports
+			// are not, which the panel must show as "not applied".
+			s.status = &pb.SourceFilterStatus{Error: truncate(r.Note, 512)}
+			slog.Warn("source filters partly NOT enforced; those relay entrances rely on their credentials only",
+				"skipped", r.Skipped, "applied", r.Ports)
 		case r.Applied:
 			s.status = &pb.SourceFilterStatus{Applied: true}
 			slog.Info("source filters applied", "ports", s.ports)

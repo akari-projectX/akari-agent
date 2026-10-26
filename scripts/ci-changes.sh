@@ -36,13 +36,13 @@ groups_of() {
       echo smoke ;;
   esac
   case "$1" in
-    update*.go | units*.go | manifest*.go | releasekeys*.go | release/* | \
+    update*.go | sourcefilter*.go | procnet*.go | units*.go | manifest*.go | releasekeys*.go | release/* | \
       sysstat*.go | statfs*.go | boottime*.go | main.go | release-keys.txt | systemd/* | \
       scripts/systemd-test/* | go.mod | go.sum | Makefile)
       echo systemd ;;
   esac
   case "$1" in
-    update*.go | units*.go | manifest*.go | releasekeys*.go | release/* | \
+    update*.go | sourcefilter*.go | procnet*.go | units*.go | manifest*.go | releasekeys*.go | release/* | \
       sysstat*.go | statfs*.go | boottime*.go | main.go | release-keys.txt | openrc/* | \
       scripts/openrc-test/* | go.mod | go.sum | Makefile)
       echo openrc ;;
