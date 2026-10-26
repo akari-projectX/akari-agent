@@ -662,3 +662,31 @@ func TestHeartbeatCarriesConnectionsAndUptime(t *testing.T) {
 		t.Fatalf("stats %+v", st)
 	}
 }
+
+// A crash between writeSecret's temp file and its rename leaves a 0600 copy
+// of the private key; the next start removes it, and only the identity
+// store's own leftovers.
+func TestLoadIdentitiesRemovesStaleSecretTemps(t *testing.T) {
+	c := newTestCA(t)
+	dir := t.TempDir()
+	stale := []string{".identity.pem.123.tmp", ".identity.next.pem.9.tmp", ".enroll.key.pem.42.tmp"}
+	keep := []string{".other.json.1.tmp", "identity.pem.tmp", ".identity.pem"}
+	for _, n := range append(append([]string{}, stale...), keep...) {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := loadIdentities(dir, &Config{Identity: IdentityConfig{CAPEM: c.pem}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range stale {
+		if _, err := os.Lstat(filepath.Join(dir, n)); !os.IsNotExist(err) {
+			t.Errorf("stale temp %s still present (err=%v)", n, err)
+		}
+	}
+	for _, n := range keep {
+		if _, err := os.Lstat(filepath.Join(dir, n)); err != nil {
+			t.Errorf("unrelated file %s was removed: %v", n, err)
+		}
+	}
+}

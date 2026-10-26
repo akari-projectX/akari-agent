@@ -9,8 +9,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -64,6 +66,7 @@ func loadIdentities(dir string, cfg *Config) (*identities, error) {
 		return nil, fmt.Errorf("cannot parse identity.ca_pem")
 	}
 	s := &identities{dir: dir, caPEM: []byte(cfg.Identity.CAPEM), pool: pool}
+	removeStaleSecretTemps(dir)
 	cur, err := s.readFile(identityFile, "state")
 	if err != nil {
 		return nil, err
@@ -268,6 +271,32 @@ func (s *identities) bundle(key *ecdsa.PrivateKey, certPEM []byte, source string
 func renewAt(leaf *x509.Certificate) time.Time {
 	life := leaf.NotAfter.Sub(leaf.NotBefore)
 	return leaf.NotAfter.Add(-life / 3)
+}
+
+// removeStaleSecretTemps deletes the temporary files writeSecret leaves behind
+// when the process dies between creating one and renaming it. The identity
+// files carry the private key, so a crash must not leave a copy around. It
+// runs before anything in this process writes, and only touches the names the
+// identity store itself writes through writeSecret.
+func removeStaleSecretTemps(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return // loadIdentities reports an unreadable state dir itself
+	}
+	for _, e := range entries {
+		n := e.Name()
+		if !strings.HasSuffix(n, ".tmp") {
+			continue
+		}
+		for _, base := range []string{identityFile, nextFile, enrollFile} {
+			if strings.HasPrefix(n, "."+base+".") {
+				if err := os.Remove(filepath.Join(dir, n)); err != nil {
+					slog.Warn("cannot remove a stale temporary identity file", "name", n, "error", err)
+				}
+				break
+			}
+		}
+	}
 }
 
 // writeSecret writes a 0600 file atomically.
