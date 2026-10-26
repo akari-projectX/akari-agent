@@ -283,6 +283,31 @@ func TestCSRShapeAndRenewAt(t *testing.T) {
 	}
 }
 
+func TestDefaultServerName(t *testing.T) {
+	for _, tc := range []struct{ addr, want string }{
+		{"panel.example.com:8443", "panel.example.com"},
+		{"[2001:db8::1]:8443", "2001:db8::1"},
+		{"panel.example.com", "panel.example.com"},
+		{":8443", ":8443"},
+	} {
+		if got := defaultServerName(tc.addr); got != tc.want {
+			t.Errorf("defaultServerName(%q) = %q, want %q", tc.addr, got, tc.want)
+		}
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.toml")
+	if err := os.WriteFile(p, []byte("panel_addr = \"panel.example.com:8443\"\n[identity]\nca_pem = \"c\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServerName != "panel.example.com" {
+		t.Errorf("LoadConfig ServerName = %q, want panel.example.com", cfg.ServerName)
+	}
+}
+
 func TestConfigVersions(t *testing.T) {
 	dir := t.TempDir()
 	write := func(s string) string {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 
 	"github.com/BurntSushi/toml"
@@ -56,7 +57,17 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("identity.cert_pem and identity.key_pem go together (v1 bootstrap file)")
 	}
 	if cfg.ServerName == "" {
-		cfg.ServerName = cfg.PanelAddr
+		cfg.ServerName = defaultServerName(cfg.PanelAddr)
 	}
 	return &cfg, nil
+}
+
+// defaultServerName is the TLS server name for a panel_addr without an
+// explicit server_name: the host part of "host:port" (a TLS server name never
+// carries a port), or addr itself when it has no host to extract.
+func defaultServerName(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil && host != "" {
+		return host
+	}
+	return addr
 }
