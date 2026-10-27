@@ -76,7 +76,7 @@ func TestModulesMatchManifest(t *testing.T) {
 // pseudo-version's base is the previous tag, so its date part names the
 // OLD release. Drop the entry when go.mod moves to the v1.* tag.
 // go.mod also replaces the module with the akari-projectX/xray-core fork
-// (upstream v26.10.21 + the ActivityTimer fix, CLAUDE.md); the require line
+// (upstream v26.10.21 + the ActivityTimer fix; README "xray-core 分支"); the require line
 // still names the upstream commit, which is what this test reads.
 var xrayCommitReleases = map[string]string{
 	"1b1647cd9ddf": "v26.10.21",
