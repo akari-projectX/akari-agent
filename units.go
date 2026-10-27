@@ -12,10 +12,6 @@ package main
 //   - the agent compares the installed copies with its own at start and
 //     reports a mismatch (capability "stale-units"): the panel then asks
 //     for one reinstall.
-// akari-panel keeps a byte-identical copy of the systemd units
-// (deploy/systemd/, the installer's fallback for releases that predate
-// -print-unit): `make check-units`. The OpenRC scripts need no copy: a
-// release without them cannot run under OpenRC anyway.
 
 import (
 	"bytes"
