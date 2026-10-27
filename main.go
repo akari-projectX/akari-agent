@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -190,12 +189,6 @@ func main() {
 	}
 	a.upd = upd
 	a.trial = newTrialState(trial)
-	// W23: units installed by an older installer/updater (or edited).
-	if stale := initSys.staleUnits(*unitDir); len(stale) > 0 {
-		a.capabilities = append(slices.Clone(agentCapabilities), capStaleUnits)
-		slog.Warn("the installed "+initSys.name+" units are not the ones this release carries; run the panel's "+
-			"install command (重装命令) once (local changes belong in a drop-in or /etc/conf.d)", "units", stale, "dir", *unitDir)
-	}
 	logMetricsAvailability()
 	a.finalsStore = &finalsStore{dir: dir}
 	// Final counters a previous process persisted when it stopped (SIGTERM

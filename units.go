@@ -9,20 +9,14 @@ package main
 //   - `-print-units` prints all of them as JSON (the privileged updater
 //     reads the NEW release's files from the verified binary and installs
 //     those of its init system with it, updater_linux.go);
-//   - the agent compares the installed copies with its own at start and
-//     reports a mismatch (capability "stale-units"): the panel then asks
-//     for one reinstall.
 
 import (
 	"bytes"
 	"embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
-	"path/filepath"
 	"unicode/utf8"
 )
 
@@ -117,7 +111,7 @@ func printUnit(w io.Writer, name string) error {
 }
 
 // printUnits is main's -print-units: every init system's files (an updater
-// takes those of its own; older updaters ignore names they do not know).
+// takes those of its own).
 func printUnits(w io.Writer) error {
 	doc := unitsDoc{Units: map[string]string{}}
 	for _, n := range allUnitNames() {
@@ -148,28 +142,4 @@ func (s *initSys) parseUnits(b []byte) (map[string][]byte, error) {
 		out[n] = []byte(u)
 	}
 	return out, nil
-}
-
-// staleUnits: the installed files (in dir) that differ from this
-// release's. Only checked when the agent runs as the installed service
-// (systemd sets INVOCATION_ID; only the OpenRC script passes -init openrc)
-// and dir holds the agent's own file; a missing updater file counts (the
-// "updater" capability covers it too), unreadable files do not (nothing
-// to report).
-func (s *initSys) staleUnits(dir string) []string {
-	if s == systemdInit && os.Getenv("INVOCATION_ID") == "" {
-		return nil
-	}
-	if _, err := os.Stat(filepath.Join(dir, s.units[0])); err != nil {
-		return nil
-	}
-	var stale []string
-	for _, n := range s.units {
-		want, _ := embeddedUnit(n)
-		got, err := os.ReadFile(filepath.Join(dir, n))
-		if errors.Is(err, os.ErrNotExist) || (err == nil && !bytes.Equal(got, want)) {
-			stale = append(stale, n)
-		}
-	}
-	return stale
 }
