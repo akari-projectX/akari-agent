@@ -467,9 +467,6 @@ func FuzzLoadConfig(f *testing.F) {
 		if cfg.PanelAddr == "" || cfg.ServerName == "" || cfg.Identity.CAPEM == "" {
 			t.Fatalf("incomplete config accepted: %+v", cfg)
 		}
-		if (cfg.Identity.CertPEM == "") != (cfg.Identity.KeyPEM == "") {
-			t.Fatal("half a v1 identity accepted")
-		}
 	})
 }
 

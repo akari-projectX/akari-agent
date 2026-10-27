@@ -226,36 +226,6 @@ func TestIdentityFilesLifecycle(t *testing.T) {
 	}
 }
 
-// v1 bootstrap files (panel-generated key in the config) keep working; the
-// state dir wins once it holds an identity (after the first renewal).
-func TestV1ConfigIdentity(t *testing.T) {
-	ca := newTestCA(t)
-	key, _ := newKey()
-	kp, _ := keyPEM(key)
-	cfg := &Config{Identity: IdentityConfig{
-		CAPEM: ca.pem, CertPEM: string(ca.issue(t, &key.PublicKey, time.Now(), time.Hour)), KeyPEM: string(kp),
-	}}
-	dir := t.TempDir()
-	ids, err := loadIdentities(dir, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ids.current() == nil || ids.current().source != "config" {
-		t.Fatal("v1 identity not used")
-	}
-	k2, _ := newKey()
-	if err := ids.storeNext(k2, ca.issue(t, &k2.PublicKey, time.Now(), time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if err := ids.promote(ids.pending()); err != nil {
-		t.Fatal(err)
-	}
-	re, _ := loadIdentities(dir, cfg)
-	if re.current().source != "state" || !re.current().cert.PrivateKey.(*ecdsa.PrivateKey).Equal(k2) {
-		t.Fatal("after renewal the locally generated key must win over the config's")
-	}
-}
-
 func TestCSRShapeAndRenewAt(t *testing.T) {
 	key, _ := newKey()
 	der, err := csrFor(key)
@@ -308,7 +278,7 @@ func TestDefaultServerName(t *testing.T) {
 	}
 }
 
-func TestConfigVersions(t *testing.T) {
+func TestConfigStrict(t *testing.T) {
 	dir := t.TempDir()
 	write := func(s string) string {
 		p := filepath.Join(dir, "c.toml")
@@ -319,7 +289,7 @@ func TestConfigVersions(t *testing.T) {
 		t.Fatalf("v2: %v", err)
 	}
 	if _, err := LoadConfig(write("panel_addr = \"x:1\"\n[identity]\nca_pem = \"c\"\ncert_pem = \"a\"\n")); err == nil {
-		t.Fatal("cert without key accepted")
+		t.Fatal("v1 cert_pem key accepted")
 	}
 	if _, err := LoadConfig(write("panel_addr = \"x:1\"\nbogus = 1\n[identity]\nca_pem = \"c\"\n")); err == nil {
 		t.Fatal("unknown key accepted")

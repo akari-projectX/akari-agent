@@ -27,7 +27,7 @@ import (
 // other than the one this state directory last enrolled with (the admin
 // issued a new one: lost state, expired certificate).
 //
-// Renewal (protocol 2): once less than a third of the current
+// Renewal: once less than a third of the current
 // certificate's lifetime is left, a NEW key and CSR go to the panel over the
 // live mTLS connection (AgentChannel.Renew). The answer is stored as
 // identity.next.pem; the current identity stays on disk and in use. The
@@ -55,7 +55,7 @@ func (a *Agent) ensureEnrolled(ctx context.Context) error {
 	fresh := token != "" && strings.TrimSpace(string(marker)) != tokenDigest(token)
 	switch {
 	case cur == nil && token == "":
-		return errors.New("no identity: the bootstrap file has neither an enrollment_token nor a v1 key")
+		return errors.New("no identity: the bootstrap file has no enrollment_token")
 	case cur != nil && !fresh:
 		return nil
 	}
@@ -211,12 +211,6 @@ func (a *Agent) renewTick(ctx context.Context) {
 	}
 	if err := a.renewOnce(ctx, conn); err != nil {
 		backoff := a.renewFailed()
-		if status.Code(err) == codes.Unimplemented {
-			backoff = time.Hour // the panel predates renewal
-			a.renewMu.Lock()
-			a.renewRetryAt = now.Add(backoff)
-			a.renewMu.Unlock()
-		}
 		slog.Warn("certificate renewal failed", "error", err, "retry_in", backoff,
 			"cert_not_after", cur.leaf.NotAfter)
 		return

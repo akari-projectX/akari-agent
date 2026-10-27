@@ -38,8 +38,7 @@ const (
 type nodeIdentity struct {
 	cert tls.Certificate
 	leaf *x509.Certificate
-	// source: "state" (identity.pem), "next" (identity.next.pem) or
-	// "config" (v1 bootstrap file with an embedded key).
+	// source: "state" (identity.pem) or "next" (identity.next.pem).
 	source string
 }
 
@@ -55,8 +54,7 @@ type identities struct {
 }
 
 // loadIdentities opens the state directory (created 0700 if missing) and
-// loads what is there. Precedence for the current identity: identity.pem
-// (enrolled or renewed) over the v1 key in the config file.
+// loads what is there.
 func loadIdentities(dir string, cfg *Config) (*identities, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("state dir: %w", err)
@@ -70,12 +68,6 @@ func loadIdentities(dir string, cfg *Config) (*identities, error) {
 	cur, err := s.readFile(identityFile, "state")
 	if err != nil {
 		return nil, err
-	}
-	if cur == nil && cfg.Identity.KeyPEM != "" {
-		cur, err = parseIdentity([]byte(cfg.Identity.CertPEM), []byte(cfg.Identity.KeyPEM), "config")
-		if err != nil {
-			return nil, fmt.Errorf("identity in config: %w", err)
-		}
 	}
 	s.cur = cur
 	next, err := s.readFile(nextFile, "next")
