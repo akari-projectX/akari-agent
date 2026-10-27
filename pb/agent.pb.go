@@ -651,7 +651,9 @@ type Hello struct {
 	//   "block-rules" = enforces PanelDown.block_policy and reports
 	//       Heartbeat.block;
 	//   "source-filter" = enforces ConfigSnapshot.source_filters and
-	//       reports Heartbeat.source_filter.
+	//       reports Heartbeat.source_filter;
+	//   "private-destinations" = honours
+	//       ConfigSnapshot.allow_private_destinations.
 	// The panel only sends LatencyProbeConfig to agents that list "latency".
 	Capabilities  []string `protobuf:"bytes,20,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1960,8 +1962,18 @@ type ConfigSnapshot struct {
 	// without the capability ignore them (per-entrance credentials still
 	// isolate the entrances; the panel flags such nodes).
 	SourceFilters []*SourceFilter `protobuf:"bytes,30,rep,name=source_filters,json=sourceFilters,proto3" json:"source_filters,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Operator switch (capability "private-destinations"): users may reach the
+	// machine's own private, loopback and link-local addresses (cloud metadata
+	// 169.254.169.254, local services, the host's private network) through
+	// the proxy. false = the xray default, whose freedom outbound refuses them
+	// for proxied connections. It changes the running xray configuration, so a
+	// change bumps config_version and arrives with a Snapshot (which rebuilds
+	// xray). Not part of the state hash, which covers the inbounds and users
+	// only (like acme and source_filters, the version carries it). Agents
+	// without the capability ignore it and keep the default.
+	AllowPrivateDestinations bool `protobuf:"varint,31,opt,name=allow_private_destinations,json=allowPrivateDestinations,proto3" json:"allow_private_destinations,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *ConfigSnapshot) Reset() {
@@ -2034,6 +2046,13 @@ func (x *ConfigSnapshot) GetSourceFilters() []*SourceFilter {
 		return x.SourceFilters
 	}
 	return nil
+}
+
+func (x *ConfigSnapshot) GetAllowPrivateDestinations() bool {
+	if x != nil {
+		return x.AllowPrivateDestinations
+	}
+	return false
 }
 
 // One port's source allowlist (W28-a).
@@ -3345,7 +3364,7 @@ const file_agent_proto_rawDesc = "" +
 	"\x02Op\x12\a\n" +
 	"\x03ADD\x10\x00\x12\n" +
 	"\n" +
-	"\x06REMOVE\x10\x01\"\x90\x02\n" +
+	"\x06REMOVE\x10\x01\"\xce\x02\n" +
 	"\x0eConfigSnapshot\x12%\n" +
 	"\x0econfig_version\x18\x01 \x01(\x04R\rconfigVersion\x12#\n" +
 	"\rinbounds_json\x18\x02 \x01(\tR\finboundsJson\x12!\n" +
@@ -3353,7 +3372,8 @@ const file_agent_proto_rawDesc = "" +
 	"\x05users\x18\x04 \x03(\v2\x10.akari.v1.UserOpR\x05users\x12(\n" +
 	"\x04acme\x18\n" +
 	" \x01(\v2\x14.akari.v1.AcmeConfigR\x04acme\x12=\n" +
-	"\x0esource_filters\x18\x1e \x03(\v2\x16.akari.v1.SourceFilterR\rsourceFilters\"\\\n" +
+	"\x0esource_filters\x18\x1e \x03(\v2\x16.akari.v1.SourceFilterR\rsourceFilters\x12<\n" +
+	"\x1aallow_private_destinations\x18\x1f \x01(\bR\x18allowPrivateDestinations\"\\\n" +
 	"\fSourceFilter\x12\x12\n" +
 	"\x04port\x18\x01 \x01(\rR\x04port\x12\x10\n" +
 	"\x03tcp\x18\x02 \x01(\bR\x03tcp\x12\x10\n" +

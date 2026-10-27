@@ -118,7 +118,9 @@ message Hello {
   //   "block-rules" = enforces PanelDown.block_policy and reports
   //       Heartbeat.block;
   //   "source-filter" = enforces ConfigSnapshot.source_filters and
-  //       reports Heartbeat.source_filter.
+  //       reports Heartbeat.source_filter;
+  //   "private-destinations" = honours
+  //       ConfigSnapshot.allow_private_destinations.
   // The panel only sends LatencyProbeConfig to agents that list "latency".
   repeated string capabilities = 20;
 }
@@ -428,6 +430,16 @@ message ConfigSnapshot {
   // without the capability ignore them (per-entrance credentials still
   // isolate the entrances; the panel flags such nodes).
   repeated SourceFilter source_filters = 30;
+  // Operator switch (capability "private-destinations"): users may reach the
+  // machine's own private, loopback and link-local addresses (cloud metadata
+  // 169.254.169.254, local services, the host's private network) through
+  // the proxy. false = the xray default, whose freedom outbound refuses them
+  // for proxied connections. It changes the running xray configuration, so a
+  // change bumps config_version and arrives with a Snapshot (which rebuilds
+  // xray). Not part of the state hash, which covers the inbounds and users
+  // only (like acme and source_filters, the version carries it). Agents
+  // without the capability ignore it and keep the default.
+  bool allow_private_destinations = 31;
 }
 
 // One port's source allowlist (W28-a).

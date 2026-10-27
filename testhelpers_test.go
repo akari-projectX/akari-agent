@@ -27,7 +27,7 @@ func newInstance(inboundsJSON string) (*built, error) {
 // buildConfig turns the inbounds into xray's config (gate in place of the
 // dispatcher), with node certificate entries pointed at cert (if set).
 func buildConfig(inbounds []json.RawMessage, cert *certFiles) (*core.Config, map[string]inboundKind, []string, error) {
-	b, err := buildConfigFor(inbounds, cert, nil)
+	b, err := buildConfigFor(inbounds, cert, nil, false)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -35,7 +35,7 @@ func buildConfig(inbounds []json.RawMessage, cert *certFiles) (*core.Config, map
 }
 
 func newInstanceWith(inboundsJSON string, cert *certFiles) (*built, error) {
-	return newInstanceFor(inboundsJSON, cert, nil)
+	return newInstanceFor(inboundsJSON, cert, nil, false)
 }
 
 // kernelVersion: the xray-core version the manifest was verified against.
