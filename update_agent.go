@@ -282,7 +282,7 @@ func permanentFetchError(err error) bool {
 		return true
 	}
 	switch status.Code(err) {
-	case codes.NotFound, codes.InvalidArgument, codes.Unauthenticated, codes.PermissionDenied, codes.Unimplemented:
+	case codes.NotFound, codes.InvalidArgument, codes.Unauthenticated, codes.PermissionDenied:
 		return true
 	}
 	return false
@@ -353,7 +353,7 @@ func (a *Agent) flushStream(gen uint64, timeout time.Duration) {
 }
 
 // sendPendingReport delivers an UpdateStatus the update state owes the
-// panel (e.g. a launcher rollback) on a fresh stream. Caller holds applyMu.
+// panel (e.g. a rollback by the updater) on a fresh stream. Caller holds applyMu.
 func (a *Agent) sendPendingReportLocked(gen uint64, send func(*pb.AgentUp) error) {
 	if a.upd == nil {
 		return
