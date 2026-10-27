@@ -370,3 +370,21 @@ func TestAccountSharesLimitAndOnlineCount(t *testing.T) {
 	// Dropping a limit nobody carried is a no-op.
 	g.SetLimit("w", 0)
 }
+
+// UDP inbounds (proxyman worker.go:352) record no Conn: the gate has no
+// connection to close for them and must cope.
+func TestGateKillWithoutAClientConnection(t *testing.T) {
+	ctx := session.ContextWithInbound(context.Background(), &session.Inbound{Tag: "ss"})
+	if clientConn(ctx) != nil {
+		t.Fatal("a UDP inbound has no Conn")
+	}
+	g := newBareGate()
+	key := gateKey{tag: "ss", email: "a"}
+	u := &protocol.MemoryUser{Email: "a"}
+	g.Allow(key, u)
+	_, done, _ := liveFor(t, g, key, u)
+	g.Revoke(key)
+	if !cancelled(done) {
+		t.Fatal("dispatch not cancelled")
+	}
+}
