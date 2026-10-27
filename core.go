@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -906,22 +905,21 @@ type builtConfig struct {
 	sniffed  []string
 }
 
-// allowPrivateDestinationsHook is a test and integration hook:
-// AKARI_ALLOW_PRIVATE_DESTINATIONS=1 in the agent's environment lifts the
-// private-destination rule whatever the panel says (smoke and the unit tests
-// relay to loopback echo servers; TestMain sets it). The operator's switch is
-// the per-server setting ConfigSnapshot.allow_private_destinations.
-var allowPrivateDestinations = os.Getenv("AKARI_ALLOW_PRIVATE_DESTINATIONS") == "1"
+// testAllowPrivateDestinations is a test seam, not an operator control: the
+// unit tests relay to loopback echo servers and set it in TestMain. Nothing
+// in production sets it; the operator's switch is the per-server setting
+// ConfigSnapshot.allow_private_destinations.
+var testAllowPrivateDestinations bool
 
 // freedomOutbound is the single outbound: direct. Since xray 26.4 freedom
 // blocks connections that vless, vmess, trojan, hysteria and shadowsocks
 // inbounds make to private, loopback and link-local addresses (a user must
 // not reach the node's own network, cloud metadata included). Unless allow
-// (the panel's per-server setting) or the test hook is set, the outbound
+// (the panel's per-server setting) or the test seam is set, the outbound
 // carries no settings, so xray's default final rules stay in force.
 func freedomOutbound(allow bool) map[string]any {
 	out := map[string]any{"protocol": "freedom"}
-	if allow || allowPrivateDestinations {
+	if allow || testAllowPrivateDestinations {
 		out["settings"] = map[string]any{"finalRules": []any{map[string]any{"action": "allow"}}}
 	}
 	return out
