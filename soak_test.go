@@ -35,6 +35,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"math/rand/v2"
@@ -170,7 +171,7 @@ type soakEvents struct {
 	ackNotOK, hashMismatch, fallbackSnapshots                             atomic.Int64
 	revokes, revokedLive, cutOK, newRefused, rotations, restores, limits  atomic.Int64
 	collateralChecked, collateralCut                                      atomic.Int64
-	unverified                                                            atomic.Int64
+	unverified, stalled                                                   atomic.Int64
 	ghostBatches, ghostOps, freshAdded, freshRemoved                      atomic.Int64
 	trafficReports, trafficRows, heartbeats                               atomic.Int64
 }
@@ -202,17 +203,20 @@ type soak struct {
 	a        *Agent
 
 	// model (driver goroutine mutates; mu guards readers)
-	mu        sync.Mutex
-	users     map[string]*sUser
-	live      []*liveUser
-	ghostIDs  []string // direct ghosts
-	ghostRel  []string // relay ghosts
-	ghostGen  map[string]int
-	fresh     []freshUser
-	freshSeq  int
-	unique    atomic.Int64 // distinct user ids ever installed
-	pairs     atomic.Int64 // distinct (user id, inbound) pairs ever installed
-	seenUsers map[string]bool
+	mu       sync.Mutex
+	users    map[string]*sUser
+	live     []*liveUser
+	ghostIDs []string // direct ghosts
+	ghostRel []string // relay ghosts
+	ghostGen map[string]int
+	fresh    []freshUser
+	freshSeq int
+	unique   atomic.Int64 // distinct user ids ever installed
+	pairs    atomic.Int64 // distinct (user id, inbound) pairs ever installed
+	// seenUsers: 64-bit hashes of every user key and (user, inbound) pair
+	// ever installed (the harness's own memory: 8 B per entry, not the
+	// strings, so the end-of-run heap comparison stays about the agent).
+	seenUsers map[uint64]struct{}
 
 	// versions the panel believes the agent holds / is being sent
 	txMu        sync.Mutex // model mutation + its delta/snapshot (lock order: txMu, opMu)
@@ -241,6 +245,7 @@ type soak struct {
 	ev         soakEvents
 	violations []string
 	vmu        sync.Mutex
+	cutLat     []cutSample // guarded by vmu
 }
 
 type freshUser struct {
@@ -283,16 +288,26 @@ func (h *soak) expectedHash() string {
 	return stateHash(h.cfgV, h.inbounds, h.recs())
 }
 
+// markSeen records key and reports whether it is new (callers hold h.mu).
+func (h *soak) markSeen(key string) bool {
+	f := fnv.New64a()
+	_, _ = f.Write([]byte(key))
+	k := f.Sum64()
+	if _, ok := h.seenUsers[k]; ok {
+		return false
+	}
+	h.seenUsers[k] = struct{}{}
+	return true
+}
+
 func (h *soak) setUser(u *sUser) {
 	h.mu.Lock()
 	h.users[u.key] = u
-	if !h.seenUsers[u.key] {
-		h.seenUsers[u.key] = true
+	if h.markSeen(u.key) {
 		h.unique.Add(1)
 	}
 	for tag := range u.tags {
-		if k := u.key + "|" + tag; !h.seenUsers[k] {
-			h.seenUsers[k] = true
+		if h.markSeen(u.key + "|" + tag) {
 			h.pairs.Add(1)
 		}
 	}
@@ -652,6 +667,9 @@ type procSample struct {
 	NumGC       uint32
 	AgentCPU    float64 // cumulative CPU seconds of this process (agent + fake panel)
 	ChildCPU    float64
+	// StuckTimers: goroutines deadlocked inside xray's ActivityTimer (see
+	// stuckTimers).
+	StuckTimers int
 	ClientMB    float64 // cumulative bytes the clients wrote, MiB
 	ShortOK     int64
 	ShortFail   int64
@@ -685,6 +703,7 @@ func (h *soak) sample(t0 time.Time) procSample {
 		c, u := g.LiveStats()
 		s.GateConns, s.GateUsers = c, u
 	}
+	s.StuckTimers = stuckTimers()
 	s.AgentCPU = procCPU("/proc/self/stat")
 	if h.child != nil {
 		s.ChildCPU = procCPU("/proc/" + strconv.Itoa(h.childPID) + "/stat")
@@ -713,15 +732,38 @@ func (h *soak) sample(t0 time.Time) procSample {
 func (s procSample) csvHeader() string {
 	return "t_s,heap_live,heap_inuse,heap_sys,rss,goroutines,fds,gate_conns,gate_users,gate_allowed,gate_live_keys,gate_limits," +
 		"counted,gone,applied,issued,stale_issued,finals,traffic_rows,model_users,unique_users,child_rss,child_fds,mallocs,frees,stack_inuse,num_gc," +
-		"agent_cpu_s,child_cpu_s,client_written_mib,short_ok,short_fail,short_mean_ms"
+		"agent_cpu_s,child_cpu_s,client_written_mib,short_ok,short_fail,short_mean_ms,stuck_timers"
 }
 
 func (s procSample) csv() string {
-	return fmt.Sprintf("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%d,%d,%.2f",
+	return fmt.Sprintf("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%d,%d,%.2f,%d",
 		int(s.T.Seconds()), s.HeapLive, s.HeapInuse, s.HeapSys, s.RSS, s.Goroutines, s.FDs, s.GateConns, s.GateUsers, s.GateAllowed,
 		s.GateLive, s.GateLimits, s.Counted, s.Gone, s.Applied, s.Issued, s.StaleIssued, s.Finals, s.Rows, s.ModelUsers, s.Unique,
 		s.ChildRSS, s.ChildFDs, s.Mallocs, s.Frees, s.StackInuse, s.NumGC,
-		s.AgentCPU, s.ChildCPU, s.ClientMB, s.ShortOK, s.ShortFail, s.ShortMeanMs)
+		s.AgentCPU, s.ChildCPU, s.ClientMB, s.ShortOK, s.ShortFail, s.ShortMeanMs, s.StuckTimers)
+}
+
+// stuckTimers counts the goroutines blocked in xray's ActivityTimer.finish:
+// SetTimeout holds the timer's lock while its first, synchronous check can
+// call finish, which locks it again (common/signal/timer.go; the check of
+// the task SetTimeout just replaced can take the activity token the
+// synchronous one expects). The handler goroutine never returns, so its
+// connection stays open, its task.Run never finishes, and everything the
+// goroutine references (after a Rebuild: the whole old xray instance)
+// stays reachable. Each is one connection that ended the way a connection
+// ends, so they are a measure of the bug, not of the load.
+func stuckTimers() int {
+	var b strings.Builder
+	if err := pprof.Lookup("goroutine").WriteTo(&b, 2); err != nil {
+		return -1
+	}
+	n := 0
+	for _, g := range strings.Split(b.String(), "\n\n") {
+		if strings.Contains(g, "signal.(*ActivityTimer).finish") && strings.Contains(g, "sync.(*RWMutex).Lock") {
+			n++
+		}
+	}
+	return n
 }
 
 func (h *soak) profiles(tag string) {
@@ -761,7 +803,7 @@ func TestSoak(t *testing.T) {
 
 	h := &soak{
 		t: t, cfg: cfg, log: logf, rng: rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 7)), rng2: rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 11)),
-		users: map[string]*sUser{}, ghostGen: map[string]int{}, seenUsers: map[string]bool{},
+		users: map[string]*sUser{}, ghostGen: map[string]int{}, seenUsers: map[uint64]struct{}{},
 		ready: make(chan struct{}), acks: make(chan *pb.Ack, 64), acct: map[[2]string][2]uint64{},
 	}
 	h.logf("soak: duration %v, live users %d, ghosts %d, out %s", cfg.duration, cfg.live, cfg.ghosts, cfg.out)
@@ -910,9 +952,9 @@ func TestSoak(t *testing.T) {
 			samples = append(samples, s)
 			smu.Unlock()
 			fmt.Fprintln(csv, s.csv())
-			h.logf("t=%v heap=%dKiB inuse=%dKiB rss=%dMiB gor=%d fds=%d gate=%d/%d counted=%d gone=%d issued=%d stale=%d fin=%d rows=%d users=%d uniq=%d cpu=%.0fs short=%dms moved=%.0fMiB child(rss=%dMiB fds=%d cpu=%.0fs)",
+			h.logf("t=%v heap=%dKiB inuse=%dKiB rss=%dMiB gor=%d fds=%d gate=%d/%d counted=%d gone=%d issued=%d stale=%d fin=%d rows=%d users=%d uniq=%d cpu=%.0fs short=%dms moved=%.0fMiB stuck=%d child(rss=%dMiB fds=%d cpu=%.0fs)",
 				s.T, s.HeapLive>>10, s.HeapInuse>>10, s.RSS>>20, s.Goroutines, s.FDs, s.GateConns, s.GateLive, s.Counted, s.Gone,
-				s.Issued, s.StaleIssued, s.Finals, s.Rows, s.ModelUsers, s.Unique, s.AgentCPU, int(s.ShortMeanMs), s.ClientMB,
+				s.Issued, s.StaleIssued, s.Finals, s.Rows, s.ModelUsers, s.Unique, s.AgentCPU, int(s.ShortMeanMs), s.ClientMB, s.StuckTimers,
 				s.ChildRSS>>20, s.ChildFDs, s.ChildCPU)
 			if !midDone && time.Since(loadStart) >= cfg.duration/2 {
 				midDone = true

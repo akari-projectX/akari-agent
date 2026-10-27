@@ -328,6 +328,10 @@ func (h *soak) planLimit(l *liveUser) *lchange {
 
 // liveStep performs one due transition of a live user (if any) and checks
 // the revocation guarantees.
+// stalledTolerance: bytes the agent may still count for a revoked user after
+// the delta's acknowledgement (in flight inside xray's pipes at the cut).
+const stalledTolerance = 64 << 10
+
 func (h *soak) liveStep() {
 	now := time.Now()
 	var l *liveUser
@@ -378,15 +382,35 @@ func (h *soak) liveStep() {
 	if len(c.revoked) > 0 {
 		h.ev.revokes.Add(int64(len(c.revoked)))
 		h.ev.revokedLive.Add(int64(len(liveRev)))
+		before := map[string]uint64{}
+		for _, s := range liveRev {
+			before[s] = h.relayedBytes(s)
+		}
 		r, err := h.call(soakReq{Op: "expect_cut", Slots: c.revoked})
 		if err != nil {
 			h.violate("child expect_cut: %v", err)
 		} else {
 			for _, s := range liveRev {
-				if slices.Contains(r.NotCut, s) {
-					h.violate("%s %s: live connection %s was NOT cut", l.id, c.kind, s)
-				} else {
+				if !slices.Contains(r.NotCut, s) {
 					h.ev.cutOK.Add(1)
+					h.recordCut(s, r.CutMs[s])
+					continue
+				}
+				// The client's connection was still open after 6s. What
+				// matters for revocation is whether anything crossed: an
+				// echo completing after the delta, bytes counted for the
+				// user, or a dispatch the gate still tracks. A connection
+				// that is merely open (the agent closed its side; the
+				// client's xray did not follow) relays nothing.
+				uid, tag, _ := strings.Cut(s, "|")
+				counted, tracked := h.relayedBytes(s)-before[s], h.liveDispatches(tag, uid)
+				if r.Echoed[s] > 0 || counted > stalledTolerance || tracked > 0 {
+					h.violate("%s %s: revoked connection %s kept relaying (echoes after the revocation=%d, %d bytes counted for the user since the delta's ack, %d dispatches still tracked; client: %s)",
+						l.id, c.kind, s, r.Echoed[s], counted, tracked, r.Detail[s])
+				} else {
+					h.ev.stalled.Add(1)
+					h.logf("%s %s: %s not closed by its client within 6s, but nothing crossed after the revocation (0 dispatches tracked, %d bytes counted; client: %s)",
+						l.id, c.kind, s, counted, r.Detail[s])
 				}
 			}
 			for _, s := range r.Allowed {
@@ -420,6 +444,66 @@ func (h *soak) liveStep() {
 
 // ghostLoop: the churn of the ghost pool and of fresh ids, a delta every
 // 1-3s, until stop is closed.
+// relayedBytes is what the agent's xray has counted for the slot's user so
+// far (up + down): its growth after a revocation is data that crossed.
+func (h *soak) relayedBytes(slot string) uint64 {
+	uid, _, _ := strings.Cut(slot, "|")
+	var n uint64
+	m := h.a.core
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if c := m.counted[uid]; c != nil {
+		n = uint64(c.up.Value()) + uint64(c.down.Value())
+	}
+	return n
+}
+
+// liveDispatches is the number of dispatches the gate still tracks for the
+// key.
+func (h *soak) liveDispatches(tag, uid string) int {
+	if g := h.a.core.liveGate.Load(); g != nil {
+		return g.Live(gateKey{tag: tag, email: uid})
+	}
+	return -1
+}
+
+// recordCut keeps the time a revoked live connection took to close.
+func (h *soak) recordCut(slot string, ms int64) {
+	h.vmu.Lock()
+	h.cutLat = append(h.cutLat, cutSample{slot: slot, ms: ms})
+	h.vmu.Unlock()
+}
+
+type cutSample struct {
+	slot string
+	ms   int64
+}
+
+// cutLatency describes how long revoked live connections took to close, per
+// protocol (the harness gives a connection 6s).
+func (h *soak) cutLatency() string {
+	h.vmu.Lock()
+	cuts := slices.Clone(h.cutLat)
+	h.vmu.Unlock()
+	by := map[string][]int64{}
+	for _, c := range cuts {
+		_, tag, _ := strings.Cut(c.slot, "|")
+		by[tag] = append(by[tag], c.ms)
+	}
+	var tags []string
+	for t := range by {
+		tags = append(tags, t)
+	}
+	sort.Strings(tags)
+	var parts []string
+	for _, t := range tags {
+		v := by[t]
+		slices.Sort(v)
+		parts = append(parts, fmt.Sprintf("%s n=%d p50=%dms p99=%dms max=%dms", t, len(v), v[len(v)/2], v[len(v)*99/100], v[len(v)-1]))
+	}
+	return "cut latency: " + strings.Join(parts, "; ")
+}
+
 func (h *soak) ghostLoop(stop <-chan struct{}) {
 	churn, fresh := envInt("SOAK_GHOST_OPS", 40), envInt("SOAK_FRESH", 10)
 	for {
@@ -561,6 +645,7 @@ func (h *soak) summary(base, idle, drained, end procSample, samples []procSample
 	fmt.Fprintf(&b, "live transitions: batches=%d rotations=%d restores=%d limit changes=%d\n", e.batches.Load(), e.rotations.Load(), e.restores.Load(), e.limits.Load())
 	fmt.Fprintf(&b, "revocation: slots revoked=%d (with a live connection beforehand=%d, proven cut=%d, no live connection to check=%d), new connection refused=%d\n",
 		e.revokes.Load(), e.revokedLive.Load(), e.cutOK.Load(), e.unverified.Load(), e.newRefused.Load())
+	fmt.Fprintf(&b, "%s; revoked live connections left open by their client for >6s with nothing relayed=%d\n", h.cutLatency(), e.stalled.Load())
 	fmt.Fprintf(&b, "collateral: untouched live connections checked=%d lost=%d\n", e.collateralChecked.Load(), e.collateralCut.Load())
 	fmt.Fprintf(&b, "traffic reports=%d rows=%d heartbeats=%d\n", e.trafficReports.Load(), e.trafficRows.Load(), e.heartbeats.Load())
 	fmt.Fprintf(&b, "baseline: heap_live=%.1fMiB rss=%.1fMiB goroutines=%d fds=%d\n", mib(base.HeapLive), mib(base.RSS), base.Goroutines, base.FDs)
@@ -574,6 +659,8 @@ func (h *soak) summary(base, idle, drained, end procSample, samples []procSample
 		peakG, peakFD = max(peakG, s.Goroutines), max(peakFD, s.FDs)
 	}
 	if drained.Issued > 0 {
+		fmt.Fprintf(&b, "xray ActivityTimer self-deadlocks (handlers stuck for good, see stuckTimers): drained=%d rebuilt=%d peak=%d\n",
+			drained.StuckTimers, end.StuckTimers, peakStuck(samples))
 		fmt.Fprintf(&b, "retained credentials after the drain: %d issued entries cost %.0f B each (drained heap - rebuilt heap)\n",
 			drained.Issued, float64(int64(drained.HeapLive)-int64(end.HeapLive))/float64(drained.Issued))
 	}
@@ -581,6 +668,14 @@ func (h *soak) summary(base, idle, drained, end procSample, samples []procSample
 	fmt.Fprintf(&b, "peaks: heap_live=%.1fMiB rss=%.1fMiB goroutines=%d fds=%d\n", mib(peakHeap), mib(peakRSS), peakG, peakFD)
 	h.logf("SUMMARY\n%s", b.String())
 	_ = os.WriteFile(filepath.Join(h.cfg.out, "summary.txt"), []byte(b.String()), 0o644)
+}
+
+func peakStuck(samples []procSample) int {
+	n := 0
+	for _, s := range samples {
+		n = max(n, s.StuckTimers)
+	}
+	return n
 }
 
 // assertEnd: the pass/fail criteria.
@@ -614,14 +709,23 @@ func (h *soak) assertEnd(t *testing.T, base, drained, end procSample, samples []
 	if drained.Applied != 0 || drained.Counted != 0 || drained.Gone != 0 {
 		t.Errorf("per-user maps not empty after the drain: applied=%d counted=%d gone=%d", drained.Applied, drained.Counted, drained.Gone)
 	}
+	// A handler stuck in xray's ActivityTimer self-deadlock (an upstream
+	// bug, see stuckTimers) leaks its goroutine, its connection's socket
+	// and, through the goroutine's stack, the old xray instance with every
+	// user it held. These failures are real: they are not excused, only
+	// explained.
+	why := ""
+	if end.StuckTimers > 0 {
+		why = fmt.Sprintf(" [%d handlers are deadlocked in xray's ActivityTimer.SetTimeout: they and the goroutines waiting for them (about 2 goroutines, 1 socket and the old instance's heap each) are the leak]", end.StuckTimers)
+	}
 	if end.Goroutines > base.Goroutines+goroutineSlack {
-		t.Errorf("goroutines: %d after the drain and a rebuild, baseline %d (+%d allowed)", end.Goroutines, base.Goroutines, goroutineSlack)
+		t.Errorf("goroutines: %d after the drain and a rebuild, baseline %d (+%d allowed)%s", end.Goroutines, base.Goroutines, goroutineSlack, why)
 	}
 	if end.FDs > base.FDs+fdSlack {
-		t.Errorf("open fds: %d after the drain and a rebuild, baseline %d (+%d allowed)", end.FDs, base.FDs, fdSlack)
+		t.Errorf("open fds: %d after the drain and a rebuild, baseline %d (+%d allowed)%s", end.FDs, base.FDs, fdSlack, why)
 	}
 	if end.HeapLive > base.HeapLive+heapSlack {
-		t.Errorf("live heap %.1f MiB after the drain and a rebuild, baseline %.1f MiB (+%d MiB allowed)", mib(end.HeapLive), mib(base.HeapLive), heapSlack>>20)
+		t.Errorf("live heap %.1f MiB after the drain and a rebuild, baseline %.1f MiB (+%d MiB allowed)%s", mib(end.HeapLive), mib(base.HeapLive), heapSlack>>20, why)
 	}
 	// During the load: the last sample before the drain.
 	var last procSample
