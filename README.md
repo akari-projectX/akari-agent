@@ -1,6 +1,6 @@
 # akari-agent
 
-Akari 控制面板的节点端 agent。内嵌 **xray-core**（release v26.10.21，Go 模块形式为其提交的伪版本 `v1.260327.1-0.20261021115930-1b1647cd9ddf`），并与面板保持一条仅出站的 mTLS gRPC 长连接。节点上没有管理端口，也不保存协议凭据——由面板 CA 签发的 TLS 客户端证书就是节点的身份。
+Akari 控制面板的节点端 agent。内嵌 **xray-core**（release v26.10.21，Go 模块形式为其提交的伪版本 `v1.260327.1-0.20261021115930-1b1647cd9ddf`；实际编译的是带一处修复的分支 [akari-projectX/xray-core](https://github.com/akari-projectX/xray-core)，见下文「xray-core 分支」），并与面板保持一条仅出站的 mTLS gRPC 长连接。节点上没有管理端口，也不保存协议凭据——由面板 CA 签发的 TLS 客户端证书就是节点的身份。
 
 职责：
 
@@ -36,6 +36,40 @@ make third-party      # regenerate THIRD_PARTY_LICENSES.txt (after go.mod change
 发布（tag `v*`）由 `.github/workflows/release.yml` 构建、生成 SBOM 并用 cosign 签名。以加固的 systemd 服务安装，单元文件在 `systemd/`（已编译进二进制：`./agent -print-unit akari-agent.service`；面板的安装器会安装所装发布版自带的单元，每次自更新也会安装新发布版的单元）。在 Alpine Linux（W32）上，同一个静态二进制通过 OpenRC 运行，脚本在 `openrc/`（同样已编译进二进制：`./agent -print-unit akari-agent`；agent 与 updater 使用 `-init openrc`）；与 systemd 方案的差异及已知缺口见 akari-panel 的 `docs/DEPLOY.md` §3h。
 
 同级检出约定：akari-panel 与 akari-agent 并排放置（`../akari-panel` / `../akari-agent`），与面板 smoke 测试的预期一致。
+
+## xray-core 分支（每次升级 xray 都要手动做）
+
+agent 编译的不是官方 xray-core，而是 [akari-projectX/xray-core](https://github.com/akari-projectX/xray-core) 上的分支：官方版本 + **一处补丁**。`go.mod` 用 `replace` 指过去：
+
+```
+require github.com/xtls/xray-core <官方提交的伪版本或 tag>        # 仍写官方版本（manifest_test.go 读它）
+replace github.com/xtls/xray-core => github.com/akari-projectX/xray-core <分支提交的伪版本>
+```
+
+**为什么**：官方 `common/signal/timer.go` 的 `ActivityTimer.SetTimeout` 有自死锁。它持锁调用 `Periodic.Start`，而 `Start` 会同步执行第一次检查；如果上一个任务的检查恰好抢走了活动令牌，同步检查就会调用 `finish()`，再去锁自己已经持有的锁，这个 goroutine 从此卡死。trojan、VMess、SS2022 与 freedom 在每条连接结束时都调用 `SetTimeout`，卡住的连接永远不释放：goroutine、socket、内核重建后的整个旧 xray 实例都泄漏（2026-10-27 的 60 分钟浸泡测试泄漏了 77 个连接处理器）。补丁让同步的第一次执行只清掉令牌、不做检查（之后的检查由定时器在释放锁之后执行），其余语义不变。
+
+**上游已拒绝这个修复**（2026-10-27，PR 由 mwnydev/Xray-core 提交），所以分支是长期的。`go build -overlay` 不能替换模块缓存里的文件，只能用分支。
+
+**补丁本身**：分支 `akari/v26.10.21` 上的提交 `ce7424b`（在官方 v26.10.21 `1b1647c` 之上），只改 `common/signal/timer.go`；补丁文件与说明另存于 akari-workspace `upstream/xray-activitytimer-deadlock.{patch,md}`。
+
+**每次升级 xray-core 的步骤**（升级 xray 的其他前提见 CLAUDE.md「升级 xray-core 的前提」：撤权金丝雀全绿）：
+
+1. 在 `akari-projectX/xray-core`：从新的官方 tag 开分支 `akari/<版本>`，把补丁提交摘过来（`git cherry-pick ce7424b`，有冲突就按上面的原理手工改），`go test ./common/signal/...` 通过后推送这个分支。
+2. 在本仓库：`require` 改为新的官方版本（官方伪版本或 tag，规则见 CLAUDE.md 开头）；`replace` 指向新分支的提交：
+   ```
+   go mod edit -replace github.com/xtls/xray-core=github.com/akari-projectX/xray-core@<新分支提交>
+   go mod tidy
+   ```
+   需要时更新 `manifest_test.go` 的 `xrayCommitReleases`。
+3. `make third-party`（改了 go.mod 必须做并提交）、`make test`（含金丝雀）。
+4. **必须单独跑**补丁的回归测试（它是 canary 标签，不在 `make test` 的 -race 套件里）：
+   ```
+   go test -tags canary -run TestXrayActivityTimerSelfDeadlock .
+   ```
+   官方版本上它在 8 秒内大约四次有三次挂住，打了补丁必须一次都不挂。
+5. 若改动大，再跑一次 `make soak`（默认 60 分钟），确认 `stuck_timers` 为 0、goroutine 与 fd 回到基线。
+
+如果将来官方自己修了这个问题（新版本上第 4 步的测试在**不打补丁**时也通过），就删掉 `replace`、改回官方模块，并删除本节与 CLAUDE.md 的对应说明。
 
 ## Automatic node certificate (protocol 6)（节点证书自动签发）
 

@@ -30,8 +30,10 @@ import (
 // drains the token in the synchronous run instead of calling check. The
 // test aims SetTimeout at the moment the previous task's check fires; on
 // stock xray an 8 s run hangs a call about three times in four, with the
-// fork never. Drop the replace (and this note in CLAUDE.md) once an
-// upstream release has the fix; this test must pass then too.
+// fork never. Upstream declined the fix (2026-10-27), so the fork stays:
+// every xray upgrade carries the patch to a new fork branch and runs this
+// test (README "xray-core 分支"). Drop the replace only if a stock release
+// passes it without the patch.
 func TestXrayActivityTimerSelfDeadlock(t *testing.T) {
 	const interval = 4 * time.Millisecond
 	var hung atomic.Int64
