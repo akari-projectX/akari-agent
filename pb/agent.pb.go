@@ -221,7 +221,7 @@ func (CertStatus_ErrorKind) EnumDescriptor() ([]byte, []int) {
 type Ack_Reason int32
 
 const (
-	Ack_REASON_UNSPECIFIED Ack_Reason = 0 // protocol 0 agent: use `ok`
+	Ack_REASON_UNSPECIFIED Ack_Reason = 0 // use `ok`
 	Ack_REASON_OK          Ack_Reason = 1
 	// The apply was attempted and failed (possibly partially). The panel
 	// falls back to a Snapshot under its failure backoff.
@@ -623,64 +623,34 @@ type Hello struct {
 	ConfigVersion uint64                 `protobuf:"varint,2,opt,name=config_version,json=configVersion,proto3" json:"config_version,omitempty"` // inbound config the agent currently holds
 	UserVersion   uint64                 `protobuf:"varint,3,opt,name=user_version,json=userVersion,proto3" json:"user_version,omitempty"`       // user set the agent currently holds
 	Info          *AgentInfo             `protobuf:"bytes,4,opt,name=info,proto3" json:"info,omitempty"`
-	// Control-protocol revision the agent speaks. Agents that predate the
-	// field send 0. The panel serves agents below its MIN_AGENT_PROTOCOL the
-	// EMPTY desired state (no inbounds, no users) and never trusts their
-	// Hello/Ack for convergence. Revisions:
-	//   1 = UserDelta base/target + REPLACE semantics, Ack.reason/held_*,
-	//       state_hash, LeaseGrant.
-	//   2 = renews its certificate (AgentChannel.Renew). Protocol 1 agents
-	//       are served as before; they just never rotate their certificate.
-	//   3 = signed self-update (UpdateOffer, FetchArtifact, UpdateStatus).
-	//       Protocol 1/2 agents are served as before; they are never
-	//       offered an update.
-	//   4 = enforces UserOp.speed_limit_bytes_per_sec. Older agents run
-	//       the same users unthrottled (the panel flags such nodes).
-	//   5 = removes Shadowsocks 2022 users in place (tombstones), so the
-	//       panel sends removals on a Shadowsocks node as a UserDelta.
-	//       Rotations there stay Snapshots; what the agent cannot apply in
-	//       place (re-add with a new key, tombstone bound) it answers with
-	//       BASE_MISMATCH. Older agents get a Snapshot for any removal there.
-	//   6 = obtains and renews the node's TLS certificate itself over ACME
-	//       (ConfigSnapshot.acme) and reports it (Heartbeat.cert). Older
-	//       agents ignore both: they keep reading the node certificate files
-	//       the admin installs by hand (the panel flags such nodes).
-	//   7 = (W28-a) one user may be several UserOps: UserOp.user_id is
-	//       "<account>" or "<account>#<n>" (one per entrance the user may use
-	//       on this node; see UserOp). The agent treats every user_id as its
-	//       own xray user and traffic key, but shares the speed limit and the
-	//       online-user count per account (the part before '#'). Older agents
-	//       limit and count each user_id on its own (a user on two entrances
-	//       may get twice the limit; the panel flags such nodes).
-	//   8 = Shadowsocks 2022 removal and credential rotation are native
-	//       deltas (the agent's xray looks users up by hash/email, so
-	//       RemoveUser cannot hand an in-flight handshake to another user; no
-	//       tombstones, no BASE_MISMATCH for a shrink). Agents 5..7 keep the
-	//       tombstone rule above: removals are deltas, rotations Snapshots.
+	// Control-protocol revision the agent speaks (8). The panel serves agents
+	// below its MIN_AGENT_PROTOCOL the EMPTY desired state (no inbounds, no
+	// users) and never trusts their Hello/Ack for convergence. From 8 on: the
+	// agent's xray looks Shadowsocks 2022 users up by hash/email, so user
+	// removal and credential rotation are ordinary deltas (no tombstones, no
+	// BASE_MISMATCH for a shrink); one user may be several UserOps
+	// (UserOp.user_id "<account>" or "<account>#<n>", one per entrance on the
+	// node), sharing the speed limit and the online-user count per account
+	// (the part before '#'); the agent obtains and renews the node's TLS
+	// certificate itself over ACME (ConfigSnapshot.acme, Heartbeat.cert),
+	// enforces UserOp.speed_limit_bytes_per_sec, renews its own certificate
+	// (AgentChannel.Renew) and applies signed self-updates (UpdateOffer,
+	// FetchArtifact, UpdateStatus).
 	ProtocolVersion uint32 `protobuf:"varint,5,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	// State hash of what the agent actually runs (see "State hash" below),
-	// for config_version + the applied user set. Empty for protocol 0.
+	// for config_version + the applied user set.
 	StateHash string `protobuf:"bytes,6,opt,name=state_hash,json=stateHash,proto3" json:"state_hash,omitempty"`
 	// Optional features the agent supports, independent of
-	// protocol_version (W11; older agents send none, the panel serves them
-	// as before):
+	// protocol_version:
 	//   "metrics" = fills Heartbeat.metrics;
 	//   "latency" = accepts LatencyProbeConfig and sends LatencyReport;
 	//   "updater" = applies UpdateOffers through the node's privileged
-	//       updater unit (akari-agent-update.path/.service, W18): its state
-	//       directory is noexec, so agents without it fail every update on
-	//       systemd >= 256 (the panel tells the admin to reinstall once).
-	//   "metrics-presence" = (W23) an unset numeric Heartbeat/NodeMetrics
-	//       value means "could not be read", not 0 (see NodeMetrics).
-	//   "stale-units" = (W23) a status flag rather than a feature: the
-	//       node's installed systemd units (akari-agent.service,
-	//       akari-agent-update.service, akari-agent-update.path) differ from
-	//       the ones this agent release carries. Releases from W23 on carry
-	//       their units and the updater installs them with the binary; a node
-	//       whose units were installed by an older installer or updater (or
-	//       edited by hand instead of with a drop-in) keeps the old ones until
-	//       the panel's install command is run once (the panel says so).
-	//   "source-filter" = (W28-a) enforces ConfigSnapshot.source_filters and
+	//       updater unit (akari-agent-update.path/.service);
+	//   "metrics-presence" = an unset numeric Heartbeat/NodeMetrics value
+	//       means "could not be read", not 0 (see NodeMetrics);
+	//   "block-rules" = enforces PanelDown.block_policy and reports
+	//       Heartbeat.block;
+	//   "source-filter" = enforces ConfigSnapshot.source_filters and
 	//       reports Heartbeat.source_filter.
 	// The panel only sends LatencyProbeConfig to agents that list "latency".
 	Capabilities  []string `protobuf:"bytes,20,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
@@ -769,10 +739,9 @@ func (x *Hello) GetCapabilities() []string {
 
 type Heartbeat struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// W23: explicit presence (wire-identical to the former implicit fields).
-	// Agents with the "metrics-presence" capability leave a value UNSET when
-	// they could not read it (e.g. /proc/stat hidden by the sandbox) and set
-	// it, zero included, when they did; for older agents unset means 0.
+	// Explicit presence: the agent leaves a value UNSET when it could not
+	// read it (e.g. /proc/stat hidden by the sandbox) and sets it, zero
+	// included, when it did.
 	CpuPercent    *float64 `protobuf:"fixed64,1,opt,name=cpu_percent,json=cpuPercent,proto3,oneof" json:"cpu_percent,omitempty"`
 	MemUsedBytes  *uint64  `protobuf:"varint,2,opt,name=mem_used_bytes,json=memUsedBytes,proto3,oneof" json:"mem_used_bytes,omitempty"`
 	MemTotalBytes *uint64  `protobuf:"varint,3,opt,name=mem_total_bytes,json=memTotalBytes,proto3,oneof" json:"mem_total_bytes,omitempty"`
@@ -784,13 +753,13 @@ type Heartbeat struct {
 	// Seconds left on the fail-closed lease (see LeaseGrant); unset while no
 	// lease is armed (no grant received since the agent started).
 	LeaseRemainingSeconds *uint64 `protobuf:"varint,6,opt,name=lease_remaining_seconds,json=leaseRemainingSeconds,proto3,oneof" json:"lease_remaining_seconds,omitempty"`
-	// ACME certificate state (protocol >= 6); unset while the panel asks for
+	// ACME certificate state; unset while the panel asks for
 	// no automatic certificate (ConfigSnapshot.acme unset).
 	Cert *CertStatus `protobuf:"bytes,10,opt,name=cert,proto3" json:"cert,omitempty"`
-	// Machine status (W11, capability "metrics"); unset from older agents.
+	// Machine status (capability "metrics").
 	Metrics *NodeMetrics `protobuf:"bytes,20,opt,name=metrics,proto3" json:"metrics,omitempty"`
-	// Block rule hit counters and the policy in force (W29, capability
-	// "block-rules"); unset from older agents.
+	// Block rule hit counters and the policy in force (capability
+	// "block-rules").
 	Block *BlockStats `protobuf:"bytes,41,opt,name=block,proto3" json:"block,omitempty"`
 	// Source-IP allowlist state (W28-a, capability "source-filter"); unset
 	// while the held Snapshot has no source_filters.
@@ -899,7 +868,7 @@ func (x *Heartbeat) GetSourceFilter() *SourceFilterStatus {
 	return nil
 }
 
-// The automatic certificate as the agent sees it (protocol >= 6). Sent on
+// The automatic certificate as the agent sees it. Sent on
 // every heartbeat while ConfigSnapshot.acme is set.
 type CertStatus struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
@@ -1016,14 +985,11 @@ func (x *CertStatus) GetFailures() uint32 {
 }
 
 // Machine status sampled at each heartbeat (W11). Linux /proc and statfs.
-// W23: the numeric fields have explicit presence (wire-identical to the
-// former implicit fields): an agent with the "metrics-presence" capability
-// leaves a value UNSET when it could not read its source (the file is
-// missing, hidden by the sandbox or unparsable; rates also on the first
-// heartbeat and after a counter reset or an interface change) and sets it,
-// zero included, when it did. For agents without that capability unset
-// means 0 (W11 semantics: unreadable values were sent as 0). Rates are
-// averages since the previous heartbeat.
+// The numeric fields have explicit presence: the agent leaves a value UNSET
+// when it could not read its source (the file is missing, hidden by the
+// sandbox or unparsable; rates also on the first heartbeat and after a
+// counter reset or an interface change) and sets it, zero included, when it
+// did. Rates are averages since the previous heartbeat.
 type NodeMetrics struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	Load1          *float64               `protobuf:"fixed64,1,opt,name=load1,proto3,oneof" json:"load1,omitempty"`
@@ -1344,8 +1310,8 @@ type Ack struct {
 	UserVersion   uint64                 `protobuf:"varint,2,opt,name=user_version,json=userVersion,proto3" json:"user_version,omitempty"`
 	Ok            bool                   `protobuf:"varint,3,opt,name=ok,proto3" json:"ok,omitempty"`
 	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
-	Reason        Ack_Reason             `protobuf:"varint,5,opt,name=reason,proto3,enum=akari.v1.Ack_Reason" json:"reason,omitempty"` // protocol >= 1
-	// What the agent holds AFTER handling the message (protocol >= 1).
+	Reason        Ack_Reason             `protobuf:"varint,5,opt,name=reason,proto3,enum=akari.v1.Ack_Reason" json:"reason,omitempty"`
+	// What the agent holds AFTER handling the message.
 	HeldConfigVersion uint64 `protobuf:"varint,6,opt,name=held_config_version,json=heldConfigVersion,proto3" json:"held_config_version,omitempty"`
 	HeldUserVersion   uint64 `protobuf:"varint,7,opt,name=held_user_version,json=heldUserVersion,proto3" json:"held_user_version,omitempty"`
 	// State hash of the held state (see Hello.state_hash).
@@ -1567,7 +1533,7 @@ type AgentUp_Ack struct {
 }
 
 type AgentUp_UpdateStatus struct {
-	UpdateStatus *UpdateStatus `protobuf:"bytes,5,opt,name=update_status,json=updateStatus,proto3,oneof"` // protocol >= 3
+	UpdateStatus *UpdateStatus `protobuf:"bytes,5,opt,name=update_status,json=updateStatus,proto3,oneof"`
 }
 
 type AgentUp_Latency struct {
@@ -1880,7 +1846,7 @@ func (x *InboundUser) GetProtocol() string {
 	return ""
 }
 
-// ADD has REPLACE semantics (protocol >= 1): the user ends up on EXACTLY
+// ADD has REPLACE semantics: the user ends up on EXACTLY
 // the listed inbounds; tags not listed are removed, a changed account is
 // swapped (and that user's live connections on the changed/removed tags are
 // closed), an identical account is left untouched. REMOVE removes the user
@@ -1896,15 +1862,15 @@ type UserOp struct {
 	// 64 bytes.
 	UserId       string         `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	InboundUsers []*InboundUser `protobuf:"bytes,3,rep,name=inbound_users,json=inboundUsers,proto3" json:"inbound_users,omitempty"` // ignored for REMOVE
-	// Per-user rate limit (protocol >= 4), bytes per second, applied to each
+	// Per-user rate limit, bytes per second, applied to each
 	// direction separately and shared by ALL of the user's connections on
-	// this node (every inbound; protocol >= 7: every UserOp of the account,
+	// this node (every inbound; every UserOp of the account,
 	// which all carry the same limit). 0 = unlimited. Ignored for REMOVE (a removed
 	// user has no limit). Part of the op like the credentials: a version the
 	// agent holds always carries that version's limits, so it is not part of
 	// the state hash. A limit that appears where there was none closes the
 	// user's live connections (they reconnect throttled); any other change
-	// applies to live connections in place. Agents < 4 ignore the field.
+	// applies to live connections in place.
 	SpeedLimitBytesPerSec uint64 `protobuf:"varint,4,opt,name=speed_limit_bytes_per_sec,json=speedLimitBytesPerSec,proto3" json:"speed_limit_bytes_per_sec,omitempty"`
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
@@ -1977,10 +1943,10 @@ type ConfigSnapshot struct {
 	InboundsJson  string                 `protobuf:"bytes,2,opt,name=inbounds_json,json=inboundsJson,proto3" json:"inbounds_json,omitempty"` // xray "inbounds" array JSON
 	UserVersion   uint64                 `protobuf:"varint,3,opt,name=user_version,json=userVersion,proto3" json:"user_version,omitempty"`
 	Users         []*UserOp              `protobuf:"bytes,4,rep,name=users,proto3" json:"users,omitempty"` // complete desired user set
-	// Automatic certificate for the node's TLS domain (protocol >= 6). Not
+	// Automatic certificate for the node's TLS domain. Not
 	// part of the state hash: a change of the domain bumps config_version, so
 	// it always arrives with a Snapshot. Unset = no automatic certificate
-	// (inbounds read the files the admin installs, as before).
+	// (inbounds read the files the admin installs).
 	Acme *AcmeConfig `protobuf:"bytes,10,opt,name=acme,proto3" json:"acme,omitempty"`
 	// Source-IP allowlists (W28-a, capability "source-filter"): new
 	// connections to each listed port are accepted only from the listed
@@ -2267,7 +2233,7 @@ func (x *AcmeConfig) GetEmail() string {
 	return ""
 }
 
-// Incremental user-set change (protocol >= 1). Applies only on top of
+// Incremental user-set change. Applies only on top of
 // base: the agent applies it iff it holds exactly (base_config_version,
 // base_user_version); if it already holds the target (config_version,
 // user_version) it acks ok without changing anything (idempotent resend);
@@ -2352,7 +2318,7 @@ func (x *UserDelta) GetConfigVersion() uint64 {
 	return 0
 }
 
-// Fail-closed lease (protocol >= 1). Sent only after the panel successfully
+// Fail-closed lease. Sent only after the panel successfully
 // read this node's desired state from its database for this stream
 // (initial sync and every reconcile). The agent measures it on a clock that
 // keeps running during suspend (CLOCK_BOOTTIME), accepts grants only from
@@ -2450,7 +2416,7 @@ func (*Noop) Descriptor() ([]byte, []int) {
 	return file_agent_proto_rawDescGZIP(), []int{23}
 }
 
-// --- Agent self-update (protocol >= 3, M6) --------------------------------
+// --- Agent self-update --------------------------------
 //
 // Trust: the agent runs only binaries described by a manifest signed with
 // an Ed25519 release key PINNED in the agent binary (never the panel's key,
@@ -2913,7 +2879,7 @@ type PanelDown_Lease struct {
 }
 
 type PanelDown_UpdateOffer struct {
-	UpdateOffer *UpdateOffer `protobuf:"bytes,5,opt,name=update_offer,json=updateOffer,proto3,oneof"` // protocol >= 3
+	UpdateOffer *UpdateOffer `protobuf:"bytes,5,opt,name=update_offer,json=updateOffer,proto3,oneof"`
 }
 
 type PanelDown_LatencyProbe struct {
