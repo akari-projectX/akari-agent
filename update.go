@@ -133,8 +133,7 @@ type pendingReport struct {
 	Error     string                `json:"error"`
 }
 
-// updState is the agent's own record. Files of the exec-launcher era
-// (current/previous/trial slots) load fine: unknown fields are dropped.
+// updState is the agent's own record.
 type updState struct {
 	Schema     int            `json:"schema"`
 	RolledBack []string       `json:"rolled_back,omitempty"`
@@ -175,10 +174,6 @@ func newUpdater(stateDir, version string, keys []release.PublicKey) (*updater, e
 	}
 	if err := os.MkdirAll(u.dir, 0o700); err != nil {
 		return nil, fmt.Errorf("update dir: %w", err)
-	}
-	// The exec-launcher era staged executables in bin/ (never run again).
-	if err := os.RemoveAll(filepath.Join(u.dir, "bin")); err != nil {
-		slog.Warn("cannot remove the old staged binaries", "error", err)
 	}
 	if err := u.load(); err != nil {
 		return nil, err
