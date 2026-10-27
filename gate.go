@@ -45,10 +45,13 @@ func accountOf(email string) string {
 }
 
 // liveConn is one admitted dispatch: cancelling its context stops the
-// outbound side; interrupting its link stops the inbound side.
+// outbound side; interrupting its link stops the inbound side; closing the
+// client's connection (conn, when xray recorded it) ends the connection
+// itself.
 type liveConn struct {
 	cancel context.CancelFunc
 	link   *transport.Link
+	conn   net.Conn
 }
 
 // gateDispatcher replaces xray's routing.Dispatcher feature (it wraps a
@@ -145,11 +148,26 @@ func (g *gateDispatcher) Close() error {
 	return nil
 }
 
+// kill cuts the dispatch and then closes the client's connection. Closing
+// the connection is not redundant: cancelling and interrupting only end the
+// relay, and a protocol handler (trojan, VMess, Shadowsocks 2022 keep their
+// own copy tasks) closes the socket when its tasks return. The tasks of
+// xray's ActivityTimer.SetTimeout can deadlock against themselves
+// (soak 2026-10-27: 77 connections in an hour), and a handler stuck there
+// holds the revoked client's socket open for good, with the client left
+// waiting on a connection that relays nothing.
+//
+// The close runs in its own goroutine: kill is called under the core's
+// apply lock and a TLS connection's Close may wait up to 5s to send its
+// alert to a stalled peer.
 func (c *liveConn) kill() {
 	c.cancel()
 	if c.link != nil {
 		_ = common.Interrupt(c.link.Reader)
 		_ = common.Interrupt(c.link.Writer)
+	}
+	if c.conn != nil {
+		go func() { _ = c.conn.Close() }()
 	}
 }
 
@@ -237,6 +255,15 @@ func identity(ctx context.Context) (gateKey, *protocol.MemoryUser, bool) {
 	return gateKey{tag: in.Tag, email: in.User.Email}, in.User, true
 }
 
+// clientConn is the accepted connection the dispatch belongs to (nil when
+// xray did not record one).
+func clientConn(ctx context.Context) net.Conn {
+	if in := session.InboundFromContext(ctx); in != nil {
+		return in.Conn
+	}
+	return nil
+}
+
 // admit registers c under key iff user is the key's current identity, and
 // returns the user's rate limit (nil = unlimited).
 func (g *gateDispatcher) admit(key gateKey, user *protocol.MemoryUser, c *liveConn) (*userLimit, bool) {
@@ -296,7 +323,7 @@ func (g *gateDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*t
 	downR, downW := pipe.New(opt...)
 	in := &transport.Link{Reader: downR, Writer: upW}
 	out := &transport.Link{Reader: upR, Writer: downW}
-	c := &liveConn{cancel: cancel, link: in}
+	c := &liveConn{cancel: cancel, link: in, conn: clientConn(ctx)}
 	lim, ok := g.admit(key, user, c)
 	if !ok {
 		cancel()
@@ -323,7 +350,7 @@ func (g *gateDispatcher) DispatchLink(ctx context.Context, dest net.Destination,
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	c := &liveConn{cancel: cancel, link: link}
+	c := &liveConn{cancel: cancel, link: link, conn: clientConn(ctx)}
 	lim, ok := g.admit(key, user, c)
 	if !ok {
 		return errRevoked

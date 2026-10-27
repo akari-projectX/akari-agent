@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"net"
 	"testing"
 	"time"
 
@@ -94,6 +95,75 @@ func TestGateAllowRotationKillsOnlyThatKey(t *testing.T) {
 	if g.LiveTotal() != 0 {
 		t.Fatalf("live %d after revoke", g.LiveTotal())
 	}
+}
+
+// closeProbe is a client connection that reports its Close.
+type closeProbe struct {
+	net.Conn
+	closed chan struct{}
+}
+
+func (c *closeProbe) Close() error {
+	close(c.closed)
+	return c.Conn.Close()
+}
+
+// A revoked client's connection is closed, not just its relay cut: the
+// protocol handler that owns the socket closes it when its copy tasks end,
+// and a handler stuck in xray's ActivityTimer self-deadlock never gets
+// there (soak 2026-10-27). Revoke, rotation,
+// a new limit and teardown all kill; each closes the connection.
+func TestGateKillClosesTheClientConnection(t *testing.T) {
+	user := &protocol.MemoryUser{Email: "a#1"}
+	key := gateKey{tag: "e1", email: "a#1"}
+	probe := func(g *gateDispatcher) (*closeProbe, *liveConn) {
+		srv, cli := net.Pipe()
+		t.Cleanup(func() { _ = srv.Close(); _ = cli.Close() })
+		cp := &closeProbe{Conn: srv, closed: make(chan struct{})}
+		r, w := pipe.New()
+		c := &liveConn{cancel: func() {}, link: &transport.Link{Reader: r, Writer: w}, conn: cp}
+		if _, ok := g.admit(key, user, c); !ok {
+			t.Fatal("admit refused")
+		}
+		return cp, c
+	}
+	wasClosed := func(cp *closeProbe) bool {
+		select {
+		case <-cp.closed:
+			return true
+		case <-time.After(2 * time.Second):
+			return false
+		}
+	}
+	for name, kill := range map[string]func(g *gateDispatcher){
+		"revoke": func(g *gateDispatcher) { g.Revoke(key) },
+		"rotate": func(g *gateDispatcher) { g.Allow(key, &protocol.MemoryUser{Email: "a#1"}) },
+		"close":  func(g *gateDispatcher) { _ = g.Close() },
+		"limit":  func(g *gateDispatcher) { g.SetLimit("a", 1<<20) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newBareGate()
+			g.Allow(key, user)
+			cp, _ := probe(g)
+			kill(g)
+			if !wasClosed(cp) {
+				t.Fatal("the client connection of a killed dispatch stayed open")
+			}
+		})
+	}
+	t.Run("untouched", func(t *testing.T) {
+		g := newBareGate()
+		g.Allow(key, user)
+		other := gateKey{tag: "e1", email: "b#1"}
+		g.Allow(other, &protocol.MemoryUser{Email: "b#1"})
+		cp, _ := probe(g)
+		g.Revoke(other)
+		select {
+		case <-cp.closed:
+			t.Fatal("another key's revocation closed this connection")
+		case <-time.After(100 * time.Millisecond):
+		}
+	})
 }
 
 // Close (instance teardown) kills everything and forgets every identity.
