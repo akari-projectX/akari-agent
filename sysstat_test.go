@@ -249,7 +249,7 @@ func TestSamplerMissingProc(t *testing.T) {
 	}
 }
 
-// W23: ProcSubset=pid (the pre-W23 unit) leaves only the per-process
+// W23: ProcSubset=pid in the unit leaves only the per-process
 // entries (/proc/self/...): everything machine-wide is unknown, the RSS is
 // still read.
 func TestSamplerPidOnlyProc(t *testing.T) {

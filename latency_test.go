@@ -240,12 +240,6 @@ func TestAgentLatencyCapabilityAndConfig(t *testing.T) {
 	if !slices.Equal(h.Capabilities, []string{"metrics", "latency", "updater", "metrics-presence", "block-rules", "source-filter"}) {
 		t.Fatalf("capabilities %v", h.Capabilities)
 	}
-	// W23: stale units add the status flag.
-	a.capabilities = append(slices.Clone(agentCapabilities), capStaleUnits)
-	if h := a.helloLocked().GetHello(); !slices.Contains(h.Capabilities, "stale-units") {
-		t.Fatalf("capabilities %v", h.Capabilities)
-	}
-	a.capabilities = nil
 	out, send := collect()
 	msg := &pb.PanelDown{Msg: &pb.PanelDown_LatencyProbe{LatencyProbe: &pb.LatencyProbeConfig{
 		IntervalSeconds: 7200, Urls: []string{"https://probe.example/204"}, RunToken: 3}}}

@@ -46,10 +46,6 @@ const agentProtocol = 8
 // nftables, Heartbeat.source_filter (sourcefilter.go).
 var agentCapabilities = []string{"metrics", "latency", "updater", "metrics-presence", "block-rules", "source-filter"}
 
-// capStaleUnits (W23): a status flag added to the capabilities when the
-// installed systemd units differ from this release's (units.go).
-const capStaleUnits = "stale-units"
-
 // Agent is the node-side supervisor: one persistent mTLS gRPC stream to the
 // panel, an embedded xray-core, and periodic heartbeat/traffic reporting.
 type Agent struct {
@@ -58,9 +54,6 @@ type Agent struct {
 	agentVersion string
 	ids          *identities
 	startedAt    time.Time
-	// capabilities: Hello.capabilities when not the default
-	// agentCapabilities (W23: plus "stale-units"). Set before Run.
-	capabilities []string
 
 	// applyMu serializes everything that changes the running state: panel
 	// messages (handleDown) and lease expiry.
@@ -693,13 +686,6 @@ func (a *Agent) current() (uint64, func(*pb.AgentUp) error) {
 	return a.streamGen, a.curSend
 }
 
-func (a *Agent) helloCapabilities() []string {
-	if a.capabilities != nil {
-		return a.capabilities
-	}
-	return agentCapabilities
-}
-
 // helloLocked describes the agent's current state: the session its traffic
 // counters belong to, the versions it holds and the hash of what it runs.
 // Sent first on every stream and again after every Rebuild/teardown.
@@ -712,7 +698,7 @@ func (a *Agent) helloLocked() *pb.AgentUp {
 		UserVersion:     userVersion,
 		ProtocolVersion: agentProtocol,
 		StateHash:       a.core.StateHash(configVersion),
-		Capabilities:    a.helloCapabilities(),
+		Capabilities:    agentCapabilities,
 		Info: &pb.AgentInfo{
 			AgentVersion: a.agentVersion,
 			CoreVersion:  core.Version(),

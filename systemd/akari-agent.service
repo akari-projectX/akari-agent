@@ -33,9 +33,7 @@
 # re-verifies it, replaces /usr/local/bin/akari-agent (keeping
 # akari-agent.prev) and these units (from the new release), restarts this
 # service and rolls back both if the new binary does not pass its
-# self-check. Nodes installed before W18 lack the updater units, and nodes
-# whose updater unit predates W23 cannot refresh units: run the panel's
-# install command (重装命令) once (the panel says when).
+# self-check.
 [Unit]
 Description=Akari node agent (xray-core)
 Documentation=https://github.com/akari-projectX/akari-agent

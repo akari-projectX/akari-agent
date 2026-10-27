@@ -11,7 +11,7 @@
 #      binary, bootstrap, scripts from -print-unit): the agent runs as
 #      akari-agent with only CAP_NET_BIND_SERVICE and no_new_privs, its
 #      state dir is noexec, credentials are in /run, every machine metric
-#      is readable, nothing stale, the updater is detected;
+#      is readable, the updater is detected;
 #   2. a good release v900.0.1: installed, on probation, confirmed;
 #   3. a broken release with its own scripts: respawn loop -> binary AND
 #      scripts rolled back (supervise-daemon's respawn counter);
@@ -157,14 +157,6 @@ import json, sys
 m = json.loads(sys.stdin.read())
 assert m["level"] == "INFO" and m["unavailable"] == [], m
 assert m["cpu_count"] > 0 and m["mem_total_bytes"] > 0, m' || fail "machine metrics not readable: $(metrics_line)"
-alog | grep -q 'units are not the ones' && fail "current scripts reported stale"
-# A hand-edited script is reported stale (and the conf.d is the place for changes).
-x "printf '# local edit\n' >>$ID/akari-agent && rc-service akari-agent restart" >/dev/null 2>&1
-wait_alog '"msg":"machine metrics'
-alog | grep '"msg":"the installed openrc units are not the ones' | grep -q '"akari-agent"' || fail "edited script not reported stale"
-x "/usr/local/bin/akari-agent -print-unit akari-agent >$ID/akari-agent && rc-service akari-agent restart" >/dev/null 2>&1
-wait_alog '"msg":"machine metrics'
-alog | grep -q 'units are not the ones' && fail "restored script reported stale"
 # Stop removes the credentials from /run.
 x "rc-service akari-agent stop" >/dev/null 2>&1
 x "test ! -e /run/credentials/akari-agent.service" || fail "credentials left after stop"
@@ -232,7 +224,6 @@ for u in akari-agent akari-agent-update; do
 done
 wait_alog '"agent_version":"v900.0.3"'
 alog | grep '"on_probation":true' | grep -q . || fail "new binary not on probation"
-alog | grep -q 'units are not the ones' && fail "v900.0.3 reports its own scripts stale"
 confirm v900.0.3
 wait_result confirmed
 [ -z "$(x 'find /var/lib/akari-agent -type f -perm /111')" ] || fail "executable file in the agent state dir"

@@ -8,8 +8,7 @@
 # writes them) and checks what the privileged updater does:
 #
 #   1. a node installed with the units from the binary (-print-unit):
-#      every machine metric is readable under the shipped unit, nothing
-#      stale;
+#      every machine metric is readable under the shipped unit;
 #   3. a broken release with its own units: crash loop -> binary AND units
 #      rolled back;
 #   4. a good release with different units: installed with the binary
@@ -151,7 +150,6 @@ m = json.loads(sys.stdin.read())
 assert m["level"] == "INFO" and m["unavailable"] == [], m
 assert m["cpu_count"] > 0 and m["mem_total_bytes"] > 0 and m["net_interface"], m' \
   || fail "shipped unit: machine metrics not readable: $(metrics_line)"
-alog | grep -q 'the installed systemd units are not the ones' && fail "current units reported stale"
 x "/usr/local/bin/akari-agent -version" | grep -q 'v900.0.1 ' || fail "binary"
 
 stage() { # N: what the agent does (staged file, then the request: the trigger), as the agent's on-disk owner
@@ -212,7 +210,6 @@ done
 [ "$(x 'systemctl show -p NeedDaemonReload --value akari-agent-update.service')" = no ] || fail "systemd not reloaded (updater)"
 wait_alog '"agent_version":"v900.0.3"'
 alog | grep '"on_probation":true' | grep -q . || fail "new binary not on probation"
-alog | grep -q 'the installed systemd units are not the ones' && fail "v900.0.3 reports its own units stale"
 confirm v900.0.3
 wait_result confirmed
 [ -z "$(x 'find /var/lib/private/akari-agent -type f -perm /111')" ] || fail "executable file in the agent state dir"
