@@ -677,12 +677,8 @@ func (m *CoreManager) addUserLocked(tag string, iu *pb.InboundUser, uid string, 
 }
 
 // registerCountersLocked creates the user's xray traffic counters up front.
-// Older xray registered them lazily per connection with a non-atomic
-// check-then-register: of two first connections of a user racing, the loser
-// got a nil counter and relayed uncounted — bytes never billed. Upstream
-// made Manager.GetOrRegisterCounter atomic; we keep registering here, under
-// mu and before the user can connect, so each report resolves the counters
-// once and the race cannot occur whatever the kernel does.
+// xray registers them lazily per connection; registering here, under mu and
+// before the user can connect, lets each report resolve the counters once.
 // The counters are kept in m.counted (resolved once: a report reads two
 // atomics per user, no name building or lookup). Idempotent.
 func (m *CoreManager) registerCountersLocked(uid string) {
@@ -919,7 +915,7 @@ func freedomOutbound() map[string]any {
 }
 
 // buildConfigFor is buildConfig plus W29 sniffing on the inbounds in sniff
-// (nil: the config is exactly what buildConfig produced before W29).
+// (nil: no inbound gets sniffing added).
 func buildConfigFor(inbounds []json.RawMessage, cert *certFiles, sniff map[string]bool) (*builtConfig, error) {
 	var acmeTags []string
 	if cert != nil {

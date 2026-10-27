@@ -36,8 +36,7 @@ func clampLease(seconds uint64) time.Duration {
 }
 
 // leaseState is the fail-closed lease: while armed, xray may only run until
-// expiresAt on the boot clock. It is armed by the first LeaseGrant (a panel
-// that predates leases never arms it — rollout is agents first) and renewed
+// expiresAt on the boot clock. It is armed by the first LeaseGrant and renewed
 // by every later one.
 type leaseState struct {
 	mu        sync.Mutex

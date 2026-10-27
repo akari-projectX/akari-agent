@@ -161,7 +161,7 @@ func (s *blockState) counter(id uint64) *atomic.Uint64 {
 }
 
 // stats: Heartbeat.block (nil until the panel sent a policy and nothing was
-// ever counted: an old panel never sees the field).
+// ever counted).
 func (s *blockState) stats() *pb.BlockStats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
