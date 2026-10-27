@@ -27,14 +27,14 @@ import (
 // handlers (goroutines 186 vs 43 after the drain, fds 93 vs 24).
 //
 // The test aims SetTimeout at the moment the previous task's check fires.
-// While the bug is there it hangs a few calls (about one in ten thousand
-// at this aim) and SKIPs, saying so; when an xray bump fixes it the test
+// While the bug is there it hangs a call (about one trial in 10^5 to 10^6 at this aim; three
+// of four 8-second runs hit it) and SKIPs, saying so; when an xray bump fixes it the test
 // passes and the workarounds named in CLAUDE.md can go.
 func TestXrayActivityTimerSelfDeadlock(t *testing.T) {
-	const interval = 20 * time.Millisecond
+	const interval = 4 * time.Millisecond
 	var hung atomic.Int64
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 64)
+	sem := make(chan struct{}, 512)
 	trials := 0
 	for deadline := time.Now().Add(8 * time.Second); time.Now().Before(deadline) && hung.Load() == 0; trials++ {
 		sem <- struct{}{}
@@ -47,7 +47,7 @@ func TestXrayActivityTimerSelfDeadlock(t *testing.T) {
 			timer := signal.CancelAfterInactivity(ctx, cancel, 5*time.Minute)
 			timer.SetTimeout(interval) // the first direction of a connection ended
 			// The second one ends just as that task's check is due.
-			time.Sleep(interval - 150*time.Microsecond + time.Duration(rand.IntN(300))*time.Microsecond)
+			time.Sleep(interval - 100*time.Microsecond + time.Duration(rand.IntN(200))*time.Microsecond)
 			done := make(chan struct{})
 			go func() { timer.SetTimeout(interval); close(done) }()
 			select {
@@ -61,5 +61,5 @@ func TestXrayActivityTimerSelfDeadlock(t *testing.T) {
 	if n := hung.Load(); n > 0 {
 		t.Skipf("xray's ActivityTimer.SetTimeout self-deadlocked (%d of %d trials): the upstream bug is still in the pinned xray", n, trials)
 	}
-	t.Logf("no self-deadlock in %d trials: the pinned xray may have the fix", trials)
+	t.Logf("no self-deadlock in %d trials: the pinned xray may have the fix (run again: the aim hits about 3 times in 4)", trials)
 }
