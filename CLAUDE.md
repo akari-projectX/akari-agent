@@ -52,6 +52,7 @@ Go 1.27 单包（`package main`，模块名 `akari/agent`），内嵌 xray-core 
 | `gate_unit_test.go` | gate 记账（轮换只断该 key 的活连接、Close、拒绝不触达内层 dispatcher）与限速边界（饱和、包装器错误透传）的单元测试 |
 | `scripts/cover-gate.sh` | `make cover`：`go test -tags canary -coverprofile` 后按文件统计 gate.go/ratelimit.go/core.go 语句覆盖率，低于 `COVER_MIN`（85）失败；CI job `coverage` |
 | `bench_test.go` | M2-6 开销基准（每节点 10k 用户 × 2 inbound）：Rebuild、实例堆、单用户 delta、流量快照、state hash、gate admit/release、心跳连接数、W29 新连接握手+往返（`BenchmarkConnectEcho`）；W28-a：`Rebuild10kEntrances`（同样 2 万个凭据按入口拆成 2 万个 user_id）、`NftScript16x64`（更新器侧）、`SourceFilterRequest16x64`（agent 每次 Snapshot 的规范化 + id + 请求编码）；`make bench`，结果记录在 `akari-panel/docs/PERF.md` |
+| `soak_common_test.go` / `soak_test.go` / `soak_drive_test.go` / `soak_client_test.go` | 稳定性浸泡测试（构建标签 `canary soak`，`make soak`，**不属于** `make test` 与 CI；`SOAK_DURATION` 默认 60m，`SOAK_OUT` 输出目录；设计与结果见 `akari-workspace/research/agent-soak-2026-10.md`）。父进程跑**真实的** `Agent`（会话、gate、限速、流量循环、checkpoint、最终计数队列）对一个进程内假面板（gRPC `AgentChannel`；面板侧账目按“每 session 取最大值再求和”，与真面板一致，并比对每次 Ack 的 state hash）；子进程（同一个测试二进制，`AKARI_SOAK_CHILD=1`，`TestSoakChild`）跑真实 xray 客户端（每个活用户 × 6 个入站：VLESS+REALITY+Vision、VMess、Trojan/TLS、SS2022 多用户、Hysteria 2、中转派生入站 `e1`（用户 `<id>#1`）），每个槽位一条长连接 + 持续的短连接，并数原始字节——客户端放在另一个进程里，agent 的堆/goroutine/fd 数字才是它自己的。面板持续搅动用户集（几千个幽灵用户的增删/轮换/改入站集合/改限速，短命的全新用户 id，每隔数秒撤销或轮换一个活用户并由子进程证明旧连接被切断、新连接被拒、未受影响的连接不被误伤），定期 Snapshot（重建 xray）、断开面板流（agent 重连）、续租约。每 30s 记录堆（GC 后）、RSS、goroutine、fd、gate 与 `counted`/`issued` 等映射的大小，开头/中点/结尾抓 pprof；负载停止后先清空再对比基线（goroutine、fd、堆），并断言面板账目与客户端搬运的字节吻合（上限 = 客户端写入，下限 = 客户端读回）。需要 `canary` 标签（复用 `rt_*` 的辅助函数） |
 | `pb/` | buf 生成物（已提交，`buf generate proto`） |
 
 ## 命令
@@ -63,6 +64,7 @@ make dist         # dist/akari-agent-linux-{amd64,arm64} + SHA256SUMS（发布�
 make vet fmt-check
 make lint         # golangci-lint v2.15.0 (pinned in the Makefile, built with the go.mod toolchain), config .golangci.yml: GO-STYLE machine enforcement; CI job `lint (golangci-lint)` (fast tier, not a required check yet)
 make test         # test-canary + go test -race ./...
+make soak         # 稳定性浸泡测试（默认 60 分钟，SOAK_DURATION=5m 做冒烟；输出在 SOAK_OUT，不进 CI）
 make test-canary  # rt_canary_test.go（build tag canary，不带 -race：xray 的 Vision 客户端在 -race 下触发 checkptr）
 make sync-proto   # 从 ../akari-panel 拷贝契约并 buf generate（worktree：PANEL_DIR=../<面板 worktree>）
 make check-proto  # 契约漂移校验（agent.proto + W26 protocols.toml；同上 PANEL_DIR）

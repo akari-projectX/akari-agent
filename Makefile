@@ -1,7 +1,7 @@
 FUZZ_MAIN = FuzzBuildConfig FuzzRewriteCertPaths FuzzBuildUser FuzzInboundTCPPorts FuzzACMEConfig FuzzProcParsers FuzzStateHash FuzzLoadConfig FuzzApplyRequest FuzzNftScript FuzzFilterRequest
 FUZZ_RELEASE = FuzzParseManifest FuzzCompareVersions FuzzVerify FuzzParseKeys
 
-.PHONY: lint fuzz cover third-party check-third-party bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb sync-units check-units openrc-test vet fmt-check test test-canary vulncheck ci
+.PHONY: lint fuzz cover third-party check-third-party bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb sync-units check-units openrc-test vet fmt-check test test-canary soak vulncheck ci
 
 # Canonical contract lives in akari-panel/proto/agent.proto. This repo vendors
 # a copy: `make sync-proto` pulls the sibling checkout's version and
@@ -148,6 +148,18 @@ test: test-canary
 # Bump xray-core only when these are green.
 test-canary:
 	go test -tags canary -count=1 -run 'TestRT_' .
+
+# Soak test (soak_*_test.go, build tags `canary soak`; never part of `make test`
+# or CI): the real Agent against a fake panel, real xray clients in a child
+# process, sustained user churn; samples heap/RSS/goroutines/fds, takes pprof
+# profiles, checks revocation and byte accounting, then drains and compares
+# with the baseline. Output (samples.csv, soak.log, profiles) goes to SOAK_OUT.
+#   make soak                      # 60 minutes
+#   make soak SOAK_DURATION=5m     # harness shake-out (about 9 minutes in all)
+SOAK_DURATION ?= 60m
+SOAK_OUT ?= soak-out
+soak:
+	SOAK_DURATION=$(SOAK_DURATION) SOAK_OUT=$(abspath $(SOAK_OUT)) go test -tags 'canary soak' -count=1 -run '^TestSoak$$' -timeout 0 -v .
 
 # Native Go fuzzing (fuzz_test.go, release/fuzz_test.go): each target in
 # turn for FUZZTIME (seeds alone already run in `make test`). CI: nightly
