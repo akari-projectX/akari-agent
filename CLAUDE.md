@@ -84,6 +84,8 @@ make check-third-party  # CI：清单是否最新
 
 ## Lint（GO-STYLE 机器检查）
 
+工程规则（单一事实源、分层、错误处理、SQL/计费、安全默认、前端数据层、测试、文档同步、无兼容层、PR 规模）见工作区 `akari-workspace/briefs/ENGINEERING.md`；评审清单见 `briefs/DEFECT-CHECKLIST.md`。
+
 `.golangci.yml`（v2）：govet（enable-all，除 `fieldalignment`、`shadow`）、staticcheck（all，含原 gosimple/stylecheck）、unused、errcheck、errorlint、ineffassign、revive（var-naming、receiver-naming、error-strings、error-return、context-as-argument、dot/blank-imports、exported、package-comments、indent-error-flow、unused-receiver 等）、misspell、bodyclose、nilerr、copyloopvar、unconvert、usestdlibvars；格式化 gofmt -s + goimports；`pb/` 排除。有意关闭/放宽的规则及原因：
 - `contextcheck` 关闭：`CoreManager` 的 xray 调用（AddUser、换 handler、Rebuild）在 applyMu 下必须一次做完，所以用脱离流的 context（`context.Background()`）；传流的 context 会让重连把一次应用中途取消。
 - `govet fieldalignment`（结构体内存对齐微优化）、`shadow`（短作用域里的 `err` 遮蔽是惯用写法）关闭。
