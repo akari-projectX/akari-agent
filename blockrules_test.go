@@ -166,7 +166,7 @@ func TestBlockSniffingConfig(t *testing.T) {
 		return b
 	}
 	for _, sniff := range []map[string]bool{nil, {}, {"absent": true}} {
-		off, err := buildConfigFor(inbounds, nil, sniff)
+		off, err := buildConfigFor(inbounds, nil, sniff, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -174,7 +174,7 @@ func TestBlockSniffingConfig(t *testing.T) {
 			t.Fatalf("config without block rules differs (sniff %v)", sniff)
 		}
 	}
-	on, err := buildConfigFor(inbounds, nil, map[string]bool{"in-a": true, "in-c": true})
+	on, err := buildConfigFor(inbounds, nil, map[string]bool{"in-a": true, "in-c": true}, false)
 	if err != nil {
 		t.Fatal(err)
 	}

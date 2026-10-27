@@ -41,10 +41,12 @@ const agentProtocol = 8
 // by the privileged updater unit (W18, updater_linux.go), never by
 // executing from the noexec state directory, "metrics-presence" (W23) = an
 // unset numeric heartbeat value means "could not be read", not 0,
-// "block-rules" (W29) = PanelDown.block_policy / Heartbeat.block.
+// "block-rules" (W29) = PanelDown.block_policy / Heartbeat.block,
 // "source-filter" (W28-a) = ConfigSnapshot.source_filters enforced with
-// nftables, Heartbeat.source_filter (sourcefilter.go).
-var agentCapabilities = []string{"metrics", "latency", "updater", "metrics-presence", "block-rules", "source-filter"}
+// nftables, Heartbeat.source_filter (sourcefilter.go),
+// "private-destinations" = ConfigSnapshot.allow_private_destinations
+// (the operator's per-server switch; core.go freedomOutbound).
+var agentCapabilities = []string{"metrics", "latency", "updater", "metrics-presence", "block-rules", "source-filter", "private-destinations"}
 
 // Agent is the node-side supervisor: one persistent mTLS gRPC stream to the
 // panel, an embedded xray-core, and periodic heartbeat/traffic reporting.
@@ -771,6 +773,7 @@ func (a *Agent) applySnapshotLocked(ctx context.Context, gen uint64, send func(*
 		"user_version", snap.UserVersion,
 		"users", len(snap.Users))
 	a.configureCert(snap)
+	a.core.SetAllowPrivateDestinations(snap.GetAllowPrivateDestinations())
 	// The allowlists go to the root updater first (R44: applied within
 	// about a second; until then a new derived inbound relies on its
 	// per-entrance credentials alone).

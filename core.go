@@ -129,6 +129,8 @@ type CoreManager struct {
 	// files read the ACME-managed certificate (protocol 6); nil = no
 	// rewrite (the files the admin installs). Set before each Rebuild.
 	nodeCert *certFiles
+	// allowPrivate: the panel's per-server switch for the next Rebuild.
+	allowPrivate bool
 	// acmeTags: inbounds of the running instance that serve nodeCert;
 	// acmePlaceholder: nodeCert held the self-signed placeholder when the
 	// instance was built (the first CA certificate swaps those inbounds,
@@ -261,7 +263,7 @@ func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) (*pb.Traf
 
 	final := m.stopLocked()
 
-	b, err := newInstanceFor(inboundsJSON, m.nodeCert, m.blocks.sniffTags())
+	b, err := newInstanceFor(inboundsJSON, m.nodeCert, m.blocks.sniffTags(), m.allowPrivate)
 	if err != nil {
 		return final, err
 	}
@@ -287,6 +289,15 @@ func (m *CoreManager) Rebuild(inboundsJSON string, users []*pb.UserOp) (*pb.Traf
 		}
 	}
 	return final, firstErr
+}
+
+// SetAllowPrivateDestinations sets whether the next Rebuild lets users reach
+// private, loopback and link-local addresses (ConfigSnapshot.
+// allow_private_destinations; false keeps xray's default rule).
+func (m *CoreManager) SetAllowPrivateDestinations(allow bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.allowPrivate = allow
 }
 
 // SetNodeCert sets where the next Rebuild points TLS inbounds that name
@@ -343,7 +354,7 @@ func (m *CoreManager) configLocked(sniff map[string]bool) (*builtConfig, error) 
 	if err := json.Unmarshal([]byte(m.inboundsJSON), &inbounds); err != nil {
 		return nil, fmt.Errorf("parse inbounds: %w", err)
 	}
-	return buildConfigFor(inbounds, m.nodeCert, sniff)
+	return buildConfigFor(inbounds, m.nodeCert, sniff, m.allowPrivate)
 }
 
 // reloadInboundsLocked swaps the handlers of tags for fresh ones built from
@@ -895,20 +906,22 @@ type builtConfig struct {
 	sniffed  []string
 }
 
-// allowPrivateDestinations lifts xray's default final rules on the freedom
-// outbound. Since xray 26.4 freedom blocks connections that vless, vmess,
-// trojan, hysteria and shadowsocks inbounds make to private, loopback and
-// link-local addresses (a user must not reach the node's own network).
-// Production keeps that default. AKARI_ALLOW_PRIVATE_DESTINATIONS=1 in the
-// agent's environment lifts it (smoke and integration setups relay to
-// loopback echo servers; the unit tests set the variable in TestMain).
+// allowPrivateDestinationsHook is a test and integration hook:
+// AKARI_ALLOW_PRIVATE_DESTINATIONS=1 in the agent's environment lifts the
+// private-destination rule whatever the panel says (smoke and the unit tests
+// relay to loopback echo servers; TestMain sets it). The operator's switch is
+// the per-server setting ConfigSnapshot.allow_private_destinations.
 var allowPrivateDestinations = os.Getenv("AKARI_ALLOW_PRIVATE_DESTINATIONS") == "1"
 
-// freedomOutbound is the single outbound: direct, with xray's safe default
-// final rules unless allowPrivateDestinations.
-func freedomOutbound() map[string]any {
+// freedomOutbound is the single outbound: direct. Since xray 26.4 freedom
+// blocks connections that vless, vmess, trojan, hysteria and shadowsocks
+// inbounds make to private, loopback and link-local addresses (a user must
+// not reach the node's own network, cloud metadata included). Unless allow
+// (the panel's per-server setting) or the test hook is set, the outbound
+// carries no settings, so xray's default final rules stay in force.
+func freedomOutbound(allow bool) map[string]any {
 	out := map[string]any{"protocol": "freedom"}
-	if allowPrivateDestinations {
+	if allow || allowPrivateDestinations {
 		out["settings"] = map[string]any{"finalRules": []any{map[string]any{"action": "allow"}}}
 	}
 	return out
@@ -916,7 +929,7 @@ func freedomOutbound() map[string]any {
 
 // buildConfigFor is buildConfig plus W29 sniffing on the inbounds in sniff
 // (nil: no inbound gets sniffing added).
-func buildConfigFor(inbounds []json.RawMessage, cert *certFiles, sniff map[string]bool) (*builtConfig, error) {
+func buildConfigFor(inbounds []json.RawMessage, cert *certFiles, sniff map[string]bool, allowPrivate bool) (*builtConfig, error) {
 	var acmeTags []string
 	if cert != nil {
 		var err error
@@ -931,7 +944,7 @@ func buildConfigFor(inbounds []json.RawMessage, cert *certFiles, sniff map[strin
 		// connection, at any log level. Nothing reads them.
 		"log":       map[string]any{"loglevel": "warning", "access": "none"},
 		"inbounds":  inbounds,
-		"outbounds": []any{freedomOutbound()},
+		"outbounds": []any{freedomOutbound(allowPrivate)},
 		// Per-user traffic counters live behind these policy switches.
 		// No per-inbound counters (W8): nothing reads them, and with them
 		// on proxyman wraps every accepted connection in a
@@ -993,7 +1006,7 @@ func buildConfigFor(inbounds []json.RawMessage, cert *certFiles, sniff map[strin
 }
 
 // newInstanceFor: newInstanceWith with W29 sniffing on the inbounds in sniff.
-func newInstanceFor(inboundsJSON string, cert *certFiles, sniff map[string]bool) (*built, error) {
+func newInstanceFor(inboundsJSON string, cert *certFiles, sniff map[string]bool, allowPrivate bool) (*built, error) {
 	var inbounds []json.RawMessage
 	if err := json.Unmarshal([]byte(inboundsJSON), &inbounds); err != nil {
 		return nil, fmt.Errorf("parse inbounds: %w", err)
@@ -1001,7 +1014,7 @@ func newInstanceFor(inboundsJSON string, cert *certFiles, sniff map[string]bool)
 	if len(inbounds) == 0 {
 		inbounds = []json.RawMessage{}
 	}
-	bc, err := buildConfigFor(inbounds, cert, sniff)
+	bc, err := buildConfigFor(inbounds, cert, sniff, allowPrivate)
 	if err != nil {
 		return nil, err
 	}
