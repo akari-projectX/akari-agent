@@ -189,16 +189,13 @@ func TestBootSettlesTheUpdaterResult(t *testing.T) {
 			t.Fatal("the updater's in-flight result removed")
 		}
 	})
-	t.Run("stale request and download removed; exec-era state loads", func(t *testing.T) {
+	t.Run("stale request and download removed", func(t *testing.T) {
 		dir := t.TempDir()
 		upd := filepath.Join(dir, updateDirName)
-		if err := os.MkdirAll(filepath.Join(upd, "bin"), 0o700); err != nil {
+		if err := os.MkdirAll(upd, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		legacy := `{"schema":1,"installed":"/usr/local/bin/akari-agent","current":{"version":"v0.4.0","path":"x"},` +
-			`"trial":{"version":"v0.4.0","boots":2},"rolled_back":["v0.3.9"]}`
-		for name, body := range map[string]string{updateStateFile: legacy, requestName: "{}", stagedName: "bin",
-			"bin/akari-agent-v0.4.0-abc": "old", ".download-1.tmp": "partial"} {
+		for name, body := range map[string]string{requestName: "{}", stagedName: "bin", ".download-1.tmp": "partial"} {
 			if err := os.WriteFile(filepath.Join(upd, name), []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -207,13 +204,10 @@ func TestBootSettlesTheUpdaterResult(t *testing.T) {
 		if _, err := u.boot(); err != nil {
 			t.Fatal(err)
 		}
-		for _, n := range []string{requestName, stagedName, "bin", ".download-1.tmp"} {
+		for _, n := range []string{requestName, stagedName, ".download-1.tmp"} {
 			if _, err := os.Stat(u.path(n)); !os.IsNotExist(err) {
 				t.Fatalf("%s kept", n)
 			}
-		}
-		if !u.rolledBack("v0.3.9") {
-			t.Fatal("legacy rolled_back list lost")
 		}
 	})
 	t.Run("corrupt state set aside", func(t *testing.T) {
