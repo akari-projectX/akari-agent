@@ -19,7 +19,7 @@ service AgentChannel {
   // Persistent bidirectional stream. The agent keeps it open for its whole
   // lifetime; the panel pushes config / user deltas on the same stream.
   rpc OpenChannel(stream AgentUp) returns (stream PanelDown);
-  // Certificate rotation (protocol >= 2). The caller is identified by its
+  // Certificate rotation. The caller is identified by its
   // client certificate; the CSR carries a NEW key (same rules as
   // EnrollRequest.csr_der). The panel records the new serial; the calling
   // certificate stays valid until the new one is first seen on a
@@ -30,7 +30,7 @@ service AgentChannel {
   // FAILED_PRECONDITION (node being deleted), INVALID_ARGUMENT (bad CSR),
   // RESOURCE_EXHAUSTED (rate limited), UNAVAILABLE (retry later).
   rpc Renew(RenewRequest) returns (IssuedCertificate);
-  // Agent self-update artifact download (protocol >= 3, M6). Streams the
+  // Agent self-update artifact download. Streams the
   // bytes of a release binary the panel holds, identified by its SHA-256
   // (from a signed manifest in an UpdateOffer), starting at `offset`
   // (resume). The panel only serves releases whose upload completed and
@@ -90,70 +90,40 @@ message Hello {
   uint64 config_version = 2; // inbound config the agent currently holds
   uint64 user_version = 3;   // user set the agent currently holds
   AgentInfo info = 4;
-  // Control-protocol revision the agent speaks. Agents that predate the
-  // field send 0. The panel serves agents below its MIN_AGENT_PROTOCOL the
-  // EMPTY desired state (no inbounds, no users) and never trusts their
-  // Hello/Ack for convergence. Revisions:
-  //   1 = UserDelta base/target + REPLACE semantics, Ack.reason/held_*,
-  //       state_hash, LeaseGrant.
-  //   2 = renews its certificate (AgentChannel.Renew). Protocol 1 agents
-  //       are served as before; they just never rotate their certificate.
-  //   3 = signed self-update (UpdateOffer, FetchArtifact, UpdateStatus).
-  //       Protocol 1/2 agents are served as before; they are never
-  //       offered an update.
-  //   4 = enforces UserOp.speed_limit_bytes_per_sec. Older agents run
-  //       the same users unthrottled (the panel flags such nodes).
-  //   5 = removes Shadowsocks 2022 users in place (tombstones), so the
-  //       panel sends removals on a Shadowsocks node as a UserDelta.
-  //       Rotations there stay Snapshots; what the agent cannot apply in
-  //       place (re-add with a new key, tombstone bound) it answers with
-  //       BASE_MISMATCH. Older agents get a Snapshot for any removal there.
-  //   6 = obtains and renews the node's TLS certificate itself over ACME
-  //       (ConfigSnapshot.acme) and reports it (Heartbeat.cert). Older
-  //       agents ignore both: they keep reading the node certificate files
-  //       the admin installs by hand (the panel flags such nodes).
-  //   7 = (W28-a) one user may be several UserOps: UserOp.user_id is
-  //       "<account>" or "<account>#<n>" (one per entrance the user may use
-  //       on this node; see UserOp). The agent treats every user_id as its
-  //       own xray user and traffic key, but shares the speed limit and the
-  //       online-user count per account (the part before '#'). Older agents
-  //       limit and count each user_id on its own (a user on two entrances
-  //       may get twice the limit; the panel flags such nodes).
-  //   8 = Shadowsocks 2022 removal and credential rotation are native
-  //       deltas (the agent's xray looks users up by hash/email, so
-  //       RemoveUser cannot hand an in-flight handshake to another user; no
-  //       tombstones, no BASE_MISMATCH for a shrink). Agents 5..7 keep the
-  //       tombstone rule above: removals are deltas, rotations Snapshots.
+  // Control-protocol revision the agent speaks (8). The panel serves agents
+  // below its MIN_AGENT_PROTOCOL the EMPTY desired state (no inbounds, no
+  // users) and never trusts their Hello/Ack for convergence. From 8 on: the
+  // agent's xray looks Shadowsocks 2022 users up by hash/email, so user
+  // removal and credential rotation are ordinary deltas (no tombstones, no
+  // BASE_MISMATCH for a shrink); one user may be several UserOps
+  // (UserOp.user_id "<account>" or "<account>#<n>", one per entrance on the
+  // node), sharing the speed limit and the online-user count per account
+  // (the part before '#'); the agent obtains and renews the node's TLS
+  // certificate itself over ACME (ConfigSnapshot.acme, Heartbeat.cert),
+  // enforces UserOp.speed_limit_bytes_per_sec, renews its own certificate
+  // (AgentChannel.Renew) and applies signed self-updates (UpdateOffer,
+  // FetchArtifact, UpdateStatus).
   uint32 protocol_version = 5;
   // State hash of what the agent actually runs (see "State hash" below),
-  // for config_version + the applied user set. Empty for protocol 0.
+  // for config_version + the applied user set.
   string state_hash = 6;
   // Optional features the agent supports, independent of
-  // protocol_version (W11; older agents send none, the panel serves them
-  // as before):
+  // protocol_version:
   //   "metrics" = fills Heartbeat.metrics;
   //   "latency" = accepts LatencyProbeConfig and sends LatencyReport;
   //   "updater" = applies UpdateOffers through the node's privileged
-  //       updater unit (akari-agent-update.path/.service, W18): its state
-  //       directory is noexec, so agents without it fail every update on
-  //       systemd >= 256 (the panel tells the admin to reinstall once).
-  //   "metrics-presence" = (W23) an unset numeric Heartbeat/NodeMetrics
-  //       value means "could not be read", not 0 (see NodeMetrics).
-  //   "stale-units" = (W23) a status flag rather than a feature: the
-  //       node's installed systemd units (akari-agent.service,
-  //       akari-agent-update.service, akari-agent-update.path) differ from
-  //       the ones this agent release carries. Releases from W23 on carry
-  //       their units and the updater installs them with the binary; a node
-  //       whose units were installed by an older installer or updater (or
-  //       edited by hand instead of with a drop-in) keeps the old ones until
-  //       the panel's install command is run once (the panel says so).
-  //   "source-filter" = (W28-a) enforces ConfigSnapshot.source_filters and
+  //       updater unit (akari-agent-update.path/.service);
+  //   "metrics-presence" = an unset numeric Heartbeat/NodeMetrics value
+  //       means "could not be read", not 0 (see NodeMetrics);
+  //   "block-rules" = enforces PanelDown.block_policy and reports
+  //       Heartbeat.block;
+  //   "source-filter" = enforces ConfigSnapshot.source_filters and
   //       reports Heartbeat.source_filter.
   // The panel only sends LatencyProbeConfig to agents that list "latency".
   repeated string capabilities = 20;
 }
 
-// State hash (protocol >= 1), lowercase hex SHA-256 over:
+// State hash, lowercase hex SHA-256 over:
 //   "akari-state-v2\n"
 //   u64 big-endian config_version (the held inbound config version)
 //   then, for every applied (user_id, inbound_tag) record, sorted by
@@ -174,10 +144,9 @@ message Hello {
 // implementation proto/testdata/gen_vectors.py (both repos test against it).
 
 message Heartbeat {
-  // W23: explicit presence (wire-identical to the former implicit fields).
-  // Agents with the "metrics-presence" capability leave a value UNSET when
-  // they could not read it (e.g. /proc/stat hidden by the sandbox) and set
-  // it, zero included, when they did; for older agents unset means 0.
+  // Explicit presence: the agent leaves a value UNSET when it could not
+  // read it (e.g. /proc/stat hidden by the sandbox) and sets it, zero
+  // included, when it did.
   optional double cpu_percent = 1;
   optional uint64 mem_used_bytes = 2;
   optional uint64 mem_total_bytes = 3;
@@ -189,20 +158,20 @@ message Heartbeat {
   // Seconds left on the fail-closed lease (see LeaseGrant); unset while no
   // lease is armed (no grant received since the agent started).
   optional uint64 lease_remaining_seconds = 6;
-  // ACME certificate state (protocol >= 6); unset while the panel asks for
+  // ACME certificate state; unset while the panel asks for
   // no automatic certificate (ConfigSnapshot.acme unset).
   CertStatus cert = 10;
-  // Machine status (W11, capability "metrics"); unset from older agents.
+  // Machine status (capability "metrics").
   NodeMetrics metrics = 20;
-  // Block rule hit counters and the policy in force (W29, capability
-  // "block-rules"); unset from older agents.
+  // Block rule hit counters and the policy in force (capability
+  // "block-rules").
   BlockStats block = 41;
   // Source-IP allowlist state (W28-a, capability "source-filter"); unset
   // while the held Snapshot has no source_filters.
   SourceFilterStatus source_filter = 30;
 }
 
-// The automatic certificate as the agent sees it (protocol >= 6). Sent on
+// The automatic certificate as the agent sees it. Sent on
 // every heartbeat while ConfigSnapshot.acme is set.
 message CertStatus {
   enum State {
@@ -256,14 +225,11 @@ message CertStatus {
 }
 
 // Machine status sampled at each heartbeat (W11). Linux /proc and statfs.
-// W23: the numeric fields have explicit presence (wire-identical to the
-// former implicit fields): an agent with the "metrics-presence" capability
-// leaves a value UNSET when it could not read its source (the file is
-// missing, hidden by the sandbox or unparsable; rates also on the first
-// heartbeat and after a counter reset or an interface change) and sets it,
-// zero included, when it did. For agents without that capability unset
-// means 0 (W11 semantics: unreadable values were sent as 0). Rates are
-// averages since the previous heartbeat.
+// The numeric fields have explicit presence: the agent leaves a value UNSET
+// when it could not read its source (the file is missing, hidden by the
+// sandbox or unparsable; rates also on the first heartbeat and after a
+// counter reset or an interface change) and sets it, zero included, when it
+// did. Rates are averages since the previous heartbeat.
 message NodeMetrics {
   optional double load1 = 1;
   optional double load5 = 2;
@@ -318,7 +284,7 @@ message Ack {
   string error = 4;
 
   enum Reason {
-    REASON_UNSPECIFIED = 0;  // protocol 0 agent: use `ok`
+    REASON_UNSPECIFIED = 0;  // use `ok`
     REASON_OK = 1;
     // The apply was attempted and failed (possibly partially). The panel
     // falls back to a Snapshot under its failure backoff.
@@ -328,8 +294,8 @@ message Ack {
     // sends a Snapshot at once (not a failure, no backoff).
     REASON_BASE_MISMATCH = 3;
   }
-  Reason reason = 5;           // protocol >= 1
-  // What the agent holds AFTER handling the message (protocol >= 1).
+  Reason reason = 5;
+  // What the agent holds AFTER handling the message.
   uint64 held_config_version = 6;
   uint64 held_user_version = 7;
   // State hash of the held state (see Hello.state_hash).
@@ -342,7 +308,7 @@ message AgentUp {
     Heartbeat heartbeat = 2;
     TrafficReport traffic = 3;
     Ack ack = 4;
-    UpdateStatus update_status = 5; // protocol >= 3
+    UpdateStatus update_status = 5;
     LatencyReport latency = 20;     // capability "latency" (W11)
   }
 }
@@ -406,7 +372,7 @@ message InboundUser {
   string protocol = 3;
 }
 
-// ADD has REPLACE semantics (protocol >= 1): the user ends up on EXACTLY
+// ADD has REPLACE semantics: the user ends up on EXACTLY
 // the listed inbounds; tags not listed are removed, a changed account is
 // swapped (and that user's live connections on the changed/removed tags are
 // closed), an identical account is left untouched. REMOVE removes the user
@@ -425,15 +391,15 @@ message UserOp {
   // 64 bytes.
   string user_id = 2;
   repeated InboundUser inbound_users = 3; // ignored for REMOVE
-  // Per-user rate limit (protocol >= 4), bytes per second, applied to each
+  // Per-user rate limit, bytes per second, applied to each
   // direction separately and shared by ALL of the user's connections on
-  // this node (every inbound; protocol >= 7: every UserOp of the account,
+  // this node (every inbound; every UserOp of the account,
   // which all carry the same limit). 0 = unlimited. Ignored for REMOVE (a removed
   // user has no limit). Part of the op like the credentials: a version the
   // agent holds always carries that version's limits, so it is not part of
   // the state hash. A limit that appears where there was none closes the
   // user's live connections (they reconnect throttled); any other change
-  // applies to live connections in place. Agents < 4 ignore the field.
+  // applies to live connections in place.
   uint64 speed_limit_bytes_per_sec = 4;
 }
 
@@ -445,10 +411,10 @@ message ConfigSnapshot {
   string inbounds_json = 2; // xray "inbounds" array JSON
   uint64 user_version = 3;
   repeated UserOp users = 4; // complete desired user set
-  // Automatic certificate for the node's TLS domain (protocol >= 6). Not
+  // Automatic certificate for the node's TLS domain. Not
   // part of the state hash: a change of the domain bumps config_version, so
   // it always arrives with a Snapshot. Unset = no automatic certificate
-  // (inbounds read the files the admin installs, as before).
+  // (inbounds read the files the admin installs).
   AcmeConfig acme = 10;
   // Source-IP allowlists (W28-a, capability "source-filter"): new
   // connections to each listed port are accepted only from the listed
@@ -497,7 +463,7 @@ message AcmeConfig {
   string email = 3;         // optional account contact
 }
 
-// Incremental user-set change (protocol >= 1). Applies only on top of
+// Incremental user-set change. Applies only on top of
 // base: the agent applies it iff it holds exactly (base_config_version,
 // base_user_version); if it already holds the target (config_version,
 // user_version) it acks ok without changing anything (idempotent resend);
@@ -514,7 +480,7 @@ message UserDelta {
   uint64 config_version = 5; // target config version == base_config_version
 }
 
-// Fail-closed lease (protocol >= 1). Sent only after the panel successfully
+// Fail-closed lease. Sent only after the panel successfully
 // read this node's desired state from its database for this stream
 // (initial sync and every reconcile). The agent measures it on a clock that
 // keeps running during suspend (CLOCK_BOOTTIME), accepts grants only from
@@ -541,7 +507,7 @@ enum RemoveMode {
 
 message Noop {}
 
-// --- Agent self-update (protocol >= 3, M6) --------------------------------
+// --- Agent self-update --------------------------------
 //
 // Trust: the agent runs only binaries described by a manifest signed with
 // an Ed25519 release key PINNED in the agent binary (never the panel's key,
@@ -635,7 +601,7 @@ message PanelDown {
     UserDelta delta = 2;
     Noop noop = 3;
     LeaseGrant lease = 4;
-    UpdateOffer update_offer = 5; // protocol >= 3
+    UpdateOffer update_offer = 5;
     LatencyProbeConfig latency_probe = 20; // capability "latency" (W11)
     BlockPolicy block_policy = 40;         // capability "block-rules" (W29)
   }

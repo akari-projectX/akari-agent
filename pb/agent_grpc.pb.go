@@ -44,7 +44,7 @@ type AgentChannelClient interface {
 	// Persistent bidirectional stream. The agent keeps it open for its whole
 	// lifetime; the panel pushes config / user deltas on the same stream.
 	OpenChannel(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AgentUp, PanelDown], error)
-	// Certificate rotation (protocol >= 2). The caller is identified by its
+	// Certificate rotation. The caller is identified by its
 	// client certificate; the CSR carries a NEW key (same rules as
 	// EnrollRequest.csr_der). The panel records the new serial; the calling
 	// certificate stays valid until the new one is first seen on a
@@ -55,7 +55,7 @@ type AgentChannelClient interface {
 	// FAILED_PRECONDITION (node being deleted), INVALID_ARGUMENT (bad CSR),
 	// RESOURCE_EXHAUSTED (rate limited), UNAVAILABLE (retry later).
 	Renew(ctx context.Context, in *RenewRequest, opts ...grpc.CallOption) (*IssuedCertificate, error)
-	// Agent self-update artifact download (protocol >= 3, M6). Streams the
+	// Agent self-update artifact download. Streams the
 	// bytes of a release binary the panel holds, identified by its SHA-256
 	// (from a signed manifest in an UpdateOffer), starting at `offset`
 	// (resume). The panel only serves releases whose upload completed and
@@ -127,7 +127,7 @@ type AgentChannelServer interface {
 	// Persistent bidirectional stream. The agent keeps it open for its whole
 	// lifetime; the panel pushes config / user deltas on the same stream.
 	OpenChannel(grpc.BidiStreamingServer[AgentUp, PanelDown]) error
-	// Certificate rotation (protocol >= 2). The caller is identified by its
+	// Certificate rotation. The caller is identified by its
 	// client certificate; the CSR carries a NEW key (same rules as
 	// EnrollRequest.csr_der). The panel records the new serial; the calling
 	// certificate stays valid until the new one is first seen on a
@@ -138,7 +138,7 @@ type AgentChannelServer interface {
 	// FAILED_PRECONDITION (node being deleted), INVALID_ARGUMENT (bad CSR),
 	// RESOURCE_EXHAUSTED (rate limited), UNAVAILABLE (retry later).
 	Renew(context.Context, *RenewRequest) (*IssuedCertificate, error)
-	// Agent self-update artifact download (protocol >= 3, M6). Streams the
+	// Agent self-update artifact download. Streams the
 	// bytes of a release binary the panel holds, identified by its SHA-256
 	// (from a signed manifest in an UpdateOffer), starting at `offset`
 	// (resume). The panel only serves releases whose upload completed and
