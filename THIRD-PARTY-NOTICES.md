@@ -19,7 +19,7 @@ full dependency graph is `go.mod` / `go.sum`.
 
 | Component | License | Notes |
 |---|---|---|
-| [xray-core](https://github.com/XTLS/Xray-core) v26.10.21 (`v1.260327.1-0.20261021115930-1b1647cd9ddf`) | MPL-2.0 | embedded core; unmodified |
+| [xray-core](https://github.com/XTLS/Xray-core) v26.10.21 (`v1.260327.1-0.20261021115930-1b1647cd9ddf`) | MPL-2.0 | embedded core; built from the akari-projectX/xray-core fork carrying one patch to `common/signal/timer.go` (README, "xray-core 分支") |
 | [xtls/reality](https://github.com/XTLS/REALITY) | MPL-2.0 | via xray-core |
 | [grpc-go](https://github.com/grpc/grpc-go), `genproto/googleapis/rpc` | Apache-2.0 | |
 | [mholt/acmez](https://github.com/mholt/acmez) `v3` | Apache-2.0 | ACME client for the automatic node certificate (W10, `acme.go`); its only dependencies are `golang.org/x/{crypto,net}`. Test-only (not linked): [pebble](https://github.com/letsencrypt/pebble) and `challtestsrv` (MPL-2.0), [go-jose](https://github.com/go-jose/go-jose) (Apache-2.0) |
@@ -33,48 +33,19 @@ full dependency graph is `go.mod` / `go.sum`.
 | [juju/ratelimit](https://github.com/juju/ratelimit) | LGPL-3.0 with a static-linking exception | the exception permits conveying a combined work that links the library statically or dynamically without providing the Minimal Corresponding Source / installation information (4d/4e), provided the other LGPL-3 terms are met (license text kept with the module) |
 | [SagerNet/sing](https://github.com/SagerNet/sing) `v0.5.1`, [sing-shadowsocks](https://github.com/SagerNet/sing-shadowsocks) `v0.2.7` | GPL-3.0-or-later | **test-only since xray-core v26.10.21 (not linked)**; see below |
 
-## GPL components (assessment for the maintainers)
+## GPL components
 
-**Update 2026-10-26 (xray-core v26.10.21):** xray-core rewrote its Shadowsocks 2022
-implementation without `sagernet/sing*`; `go list -deps` of the agent no longer
-contains them (they remain in `go.mod` for the SS2022 native-removal test client only).
-The binary links no GPL module, `THIRD_PARTY_LICENSES.txt` says so (the generator
-decides from the linked set), and README / release notes were corrected. The R19
-decision below was made for the previous xray-core and is kept as history; whether
-to keep distributing under GPL voluntarily is for the maintainers to decide.
-
-Previous assessment (xray-core v26.3.27):
-
-`sagernet/sing` and `sagernet/sing-shadowsocks` are GPL-3.0-or-later (module
-`LICENSE` is the GPL-3.0 boilerplate; no linking exception). xray-core's
-Shadowsocks implementation imports them, and `infra/conf` (needed to parse the
-panel's inbound JSON) links every proxy, so they are statically linked into
-every released agent binary even though the agent never configures a
-Shadowsocks inbound (the panel only hands out vless/vmess/trojan).
-
-Consequences, as far as can be said without legal advice:
-
-- A binary that statically links GPL-3.0 code is a combined work that may be
-  conveyed only under GPL-3.0 terms. The MIT license of this repository's own
-  code is GPL-compatible, so the combined binary is distributable under
-  GPL-3.0-or-later provided the corresponding source is offered. This
-  repository is public and tags reproduce the binary (`make dist`, SHA256SUMS),
-  so the source offer is satisfiable; the release notes must say the binary
-  is a GPL-3.0-or-later combined work.
-- Our own source files stay MIT; nothing here is relicensed.
-- Removing the exposure instead would need a fork/patch that drops the
-  Shadowsocks proxy from xray's `infra/conf` imports; not done (the MPL-2.0
-  note below then also applies to that fork).
-
-Decision (R19, 2026-10-02): released binaries are GPL-3.0-or-later combined
-works; this is stated in the README ("Licence"), in every release's notes
-and in `THIRD_PARTY_LICENSES.txt` (which the binary embeds). No xray patch
-is carried. The panel and the client are unaffected by this
-(they do not link these modules); the client's own GPL-3.0 position for mihomo
-is separate (see `akari-client/CLAUDE.md`).
+Since xray-core v26.10.21 the Shadowsocks 2022 implementation no longer depends on
+`sagernet/sing*`; `go list -deps` of the agent does not contain them (they remain in
+`go.mod` for the SS2022 native-removal test client only). The binary links no GPL
+module, `THIRD_PARTY_LICENSES.txt` says so (the generator decides from the linked
+set; it adds the combined-work notice automatically if a GPL module is linked again),
+and the README licence section matches. Distributing under GPL voluntarily anyway
+is for the maintainers to decide.
 
 ## MPL-2.0 note
 
-xray-core (and REALITY) are used as unmodified module dependencies; no files
-of them are modified in this repository. If you fork this agent and modify
-those files, MPL-2.0 obligations apply to the modified files.
+xray-core (and REALITY) are module dependencies. The only modified file is
+`common/signal/timer.go` in the fork (published in the akari-projectX/xray-core
+repository, so the MPL-2.0 source obligation is met). If you fork this agent and
+modify other files of them, MPL-2.0 obligations apply to the modified files.

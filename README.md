@@ -5,8 +5,8 @@ Akari 控制面板的节点端 agent。内嵌 **xray-core**（release v26.10.21�
 职责：
 
 - 应用面板下发的 `ConfigSnapshot`（启动/重建内嵌内核）和 `UserDelta`（基础/目标版本，REPLACE 语义；动态 `AddUser`/`RemoveUser`，无需重建）。用自带的 gate dispatcher 替换 xray 默认的 dispatcher，因此删除或轮换用户时，会同时关闭该用户的存量连接（并拒绝其上新的 mux 子流）。
-- 无用户的入站（不带 clients 的 dokodemo/socks/http）既不受 gate 管控，也不计费——只有 vless/vmess/trojan 用户由面板管理。
-- 面板的 `agent.remove_mode = "rebuild"`（每次授予租约时下发）会让每次删除/轮换都改为完整重建（回退开关）。
+- 无用户的入站（不带 clients 的 dokodemo/socks/http）既不受 gate 管控，也不计费——只有 vless/vmess/trojan/shadowsocks（2022 多用户）/hysteria（Hysteria 2）用户由面板管理。
+- 面板的 系统设置 → 节点通信「撤权方式」= 重建（每次授予租约时下发）会让每次删除/轮换都改为完整重建（回退开关）。
 - 按协议的撤销金丝雀（revocation canary）：`make test-canary`（包含在 `make test` 中）；仅在它们全绿时才升级 xray-core。
 - 上报实际运行内容的状态哈希（Hello 以及每个 Ack），让面板发现状态分歧。
 - 执行面板的 fail-closed 租约（CLOCK_BOOTTIME；面板在租约期内没有确认期望状态，就停止 xray）。
@@ -113,4 +113,4 @@ go run ./cmd/akari-sign verify -keys release-keys.txt -manifest dist/akari-agent
 ./agent -config test-node-bootstrap.toml -state-dir /var/lib/akari-agent
 ```
 
-bootstrap 文件由面板上的 `akari node add <name>` 生成：包含面板地址、TLS server name、面板 CA 和**一次性注册令牌**——不含私钥。首次启动时，agent 在 state 目录（`-state-dir`；systemd 下默认 `$STATE_DIRECTORY`，否则为配置文件所在目录；文件权限 0600）中生成 ECDSA P-256 密钥，用 CSR 注册（唯一无需客户端证书的调用）并保存签发的证书。密钥从不离开节点，也从不写入日志。当证书剩余有效期不足三分之一时（protocol 2），agent 通过存活的 mTLS 连接用新密钥续期，用新证书重连，并保留旧证书直到面板接受新证书。带新令牌的 bootstrap 文件会让节点重新注册一次。见 `akari-panel/docs/DEPLOY.md`。
+bootstrap 文件由面板上的 `akari server add <name>` 生成：包含面板地址、TLS server name、面板 CA 和**一次性注册令牌**——不含私钥。首次启动时，agent 在 state 目录（`-state-dir`；systemd 下默认 `$STATE_DIRECTORY`，否则为配置文件所在目录；文件权限 0600）中生成 ECDSA P-256 密钥，用 CSR 注册（唯一无需客户端证书的调用）并保存签发的证书。密钥从不离开节点，也从不写入日志。当证书剩余有效期不足三分之一时（protocol 2），agent 通过存活的 mTLS 连接用新密钥续期，用新证书重连，并保留旧证书直到面板接受新证书。带新令牌的 bootstrap 文件会让节点重新注册一次。见 `akari-panel/docs/DEPLOY.md`。
