@@ -45,14 +45,21 @@ type soakReq struct {
 }
 
 type soakResp struct {
-	ID      int64      `json:"id"`
-	Err     string     `json:"err,omitempty"`
-	Live    []string   `json:"live,omitempty"`
-	Alive   []string   `json:"alive,omitempty"` // slots whose long connection is still up
-	Cut     []string   `json:"cut,omitempty"`
-	NotCut  []string   `json:"not_cut,omitempty"`
-	Allowed []string   `json:"allowed,omitempty"` // slots a new connection got through on
-	Stats   *soakStats `json:"stats,omitempty"`
+	ID      int64    `json:"id"`
+	Err     string   `json:"err,omitempty"`
+	Live    []string `json:"live,omitempty"`
+	Alive   []string `json:"alive,omitempty"` // slots whose long connection is still up
+	Cut     []string `json:"cut,omitempty"`
+	NotCut  []string `json:"not_cut,omitempty"`
+	Allowed []string `json:"allowed,omitempty"` // slots a new connection got through on
+	// CutMs: how long (ms) each cut slot's long connection took to close;
+	// Detail: what the client saw of each slot that was not cut.
+	CutMs  map[string]int64  `json:"cut_ms,omitempty"`
+	Detail map[string]string `json:"detail,omitempty"`
+	// Echoed: echoes of the slot's long connection that completed after the
+	// revocation (data that crossed a revoked credential).
+	Echoed map[string]int64 `json:"echoed,omitempty"`
+	Stats  *soakStats       `json:"stats,omitempty"`
 }
 
 type slotStats struct {
@@ -261,7 +268,7 @@ func (c *soakChild) set(req *soakReq) *soakResp {
 // within 6s; a new connection through the same client instance must not
 // relay (probed 3 times). The slots then stay paused until set/resume.
 func (c *soakChild) expectCut(names []string) *soakResp {
-	resp := &soakResp{}
+	resp := &soakResp{CutMs: map[string]int64{}, Detail: map[string]string{}, Echoed: map[string]int64{}}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, n := range names {
@@ -276,12 +283,18 @@ func (c *soakChild) expectCut(names []string) *soakResp {
 		go func() {
 			defer wg.Done()
 			cut := false
-			for end := time.Now().Add(6 * time.Second); time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
+			began := time.Now()
+			pings0, read0, deaths0 := s.longPings.Load(), s.read.Load(), s.longDeaths.Load()
+			for end := began.Add(6 * time.Second); time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
 				if !s.longAlive.Load() {
 					cut = true
 					break
 				}
 			}
+			cutMs := time.Since(began).Milliseconds()
+			detail := fmt.Sprintf("echoes completed since the revocation=%d, bytes read=%d, deaths=%d, last echo %v ago, alive=%v",
+				s.longPings.Load()-pings0, s.read.Load()-read0, s.longDeaths.Load()-deaths0,
+				time.Since(time.Unix(0, s.lastPing.Load())).Round(time.Millisecond), s.longAlive.Load())
 			allowed := false
 			for i := 0; i < 3; i++ {
 				if s.probe() == nil {
@@ -293,8 +306,11 @@ func (c *soakChild) expectCut(names []string) *soakResp {
 			defer mu.Unlock()
 			if cut {
 				resp.Cut = append(resp.Cut, n)
+				resp.CutMs[n] = cutMs
 			} else {
 				resp.NotCut = append(resp.NotCut, n)
+				resp.Detail[n] = detail
+				resp.Echoed[n] = s.longPings.Load() - pings0
 			}
 			if allowed {
 				resp.Allowed = append(resp.Allowed, n)
