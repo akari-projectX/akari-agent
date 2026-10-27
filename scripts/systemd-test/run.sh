@@ -7,13 +7,9 @@
 # agent's side of the hand-over (staged file + apply request, as update.go
 # writes them) and checks what the privileged updater does:
 #
-#   1. a node installed with the pre-W23 units (scripts/systemd-test/
-#      w18-units: ProcSubset=pid, updater without unit refresh): machine
-#      metrics are reported unavailable and the units stale; an update
-#      installs the binary but cannot refresh the units (read-only unit
-#      directory in the old updater's sandbox: the one-time 重装命令);
-#   2. the reinstall (units from the binary, -print-unit): every machine
-#      metric is readable under the shipped unit, nothing stale;
+#   1. a node installed with the units from the binary (-print-unit):
+#      every machine metric is readable under the shipped unit, nothing
+#      stale;
 #   3. a broken release with its own units: crash loop -> binary AND units
 #      rolled back;
 #   4. a good release with different units: installed with the binary
@@ -31,7 +27,6 @@
 #   scripts/systemd-test/run.sh          (WORK=<dir>: scratch, default mktemp)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-LEGACY=scripts/systemd-test/w18-units
 W=${WORK:-$(mktemp -d)}
 mkdir -p "$W"
 C=akari-agent-systemd-test
@@ -52,7 +47,6 @@ build_variant() { # version out
   for u in "$W"/src/systemd/*; do printf '# systemd-test build %s\n' "$1" >>"$u"; done
   make -s -C "$W/src" build-testkeys VERSION="$1" OUT="$2" >/dev/null
 }
-make -s build-testkeys VERSION=v900.0.0 OUT="$W/v0" >/dev/null
 make -s build-testkeys VERSION=v900.0.1 OUT="$W/v1" >/dev/null
 build_variant v900.0.3 "$W/v3"
 CGO_ENABLED=0 go build -o "$W/akari-sign" ./cmd/akari-sign
@@ -112,7 +106,6 @@ J
 cat >"$W/filter4.json" <<'J'
 {"schema":1,"id":"a4","filters":[{"port":20443,"tcp":true,"cidrs":["203.0.113.0/24"]},{"port":22022,"tcp":true,"cidrs":["203.0.113.0/24"]}]}
 J
-mkdir -p "$W/legacy" && cp "$LEGACY"/* "$W/legacy/"
 chmod -R a+rX "$W"
 
 docker build -q -t akari-agent-systemd-test:debian13 scripts/systemd-test >/dev/null
@@ -137,28 +130,29 @@ units_are() { # N: the installed units are release N's
   done
 }
 
-echo "== 1. node installed with the pre-W23 units"
-x "install -m 0755 /w/v0 /usr/local/bin/akari-agent
+echo "== 1. node installed with the units from the binary"
+x "install -m 0755 /w/v1 /usr/local/bin/akari-agent
    install -d -m 0700 /etc/akari-agent && install -m 0600 /w/bootstrap.toml /etc/akari-agent/bootstrap.toml
-   install -m 0644 /w/legacy/akari-agent.service /w/legacy/akari-agent-update.service /w/legacy/akari-agent-update.path $SD/
+   for u in akari-agent.service akari-agent-update.service akari-agent-update.path; do
+     /usr/local/bin/akari-agent -print-unit \$u >$SD/\$u; done
    systemctl daemon-reload && systemctl enable --now akari-agent.service akari-agent-update.path" >/dev/null 2>&1 \
   || fail "install"
+units_are 1 || fail "installed units are not v900.0.1's"
 for _ in $(seq 1 20); do x "test -d $U" && break; sleep 0.5; done
 x "test -d $U" || fail "agent did not create its update dir"
 # The production condition: the agent's state dir is noexec in its namespace.
 x 'grep " /var/lib/private/akari-agent " /proc/$(systemctl show -p MainPID --value akari-agent)/mountinfo' | grep -q noexec \
   || fail "state dir not noexec (this container does not reproduce production)"
 wait_alog '"updater":true'
-# ProcSubset=pid hides the machine-wide /proc files: reported, not zeros.
+# Under the shipped unit every machine metric is readable.
 metrics_line | python3 -c '
 import json, sys
 m = json.loads(sys.stdin.read())
-assert m["level"] == "WARN", m
-for k in ("cpu_percent", "memory", "load", "net", "sockets"): assert k in m["unavailable"], m
-assert "process_rss" not in m["unavailable"] and "disk" not in m["unavailable"], m' \
-  || fail "pre-W23 unit: metrics not reported unavailable: $(metrics_line)"
-alog | grep '"msg":"the installed systemd units are not the ones' | grep -q '"akari-agent.service"' \
-  || fail "stale units not reported"
+assert m["level"] == "INFO" and m["unavailable"] == [], m
+assert m["cpu_count"] > 0 and m["mem_total_bytes"] > 0 and m["net_interface"], m' \
+  || fail "shipped unit: machine metrics not readable: $(metrics_line)"
+alog | grep -q 'the installed systemd units are not the ones' && fail "current units reported stale"
+x "/usr/local/bin/akari-agent -version" | grep -q 'v900.0.1 ' || fail "binary"
 
 stage() { # N: what the agent does (staged file, then the request: the trigger), as the agent's on-disk owner
   # The steps run seconds apart, so the agent has just been (re)started
@@ -180,32 +174,6 @@ confirm() { # version: its self-check (needs a panel) is played here
   x "own=\$(stat -c %u:%g $U); printf $1 >$U/.c && chown \$own $U/.c && mv $U/.c $U/confirmed"
 }
 ulog() { x 'journalctl -u akari-agent-update -o cat --no-pager'; }
-
-echo "== 1b. update v900.0.1 through the pre-W23 updater unit: binary yes, units no"
-stage 1
-wait_result installed
-x '/usr/local/bin/akari-agent -version' | grep -q 'akari-agent v900.0.1 ' || fail "v900.0.1 not installed"
-confirm v900.0.1
-wait_result confirmed
-ulog | grep -q 'systemd units NOT refreshed' || fail "no read-only unit dir warning"
-for u in akari-agent.service akari-agent-update.service akari-agent-update.path; do
-  x "cmp -s /w/legacy/$u $SD/$u" || fail "$u changed under the pre-W23 updater unit"
-done
-
-echo "== 2. the one-time reinstall: units from the binary"
-x "for u in akari-agent.service akari-agent-update.service akari-agent-update.path; do
-     /usr/local/bin/akari-agent -print-unit \$u >$SD/\$u; done
-   systemctl daemon-reload && systemctl restart akari-agent.service" || fail "reinstall units"
-units_are 1 || fail "reinstalled units are not v900.0.1's"
-# Under the shipped unit every machine metric is readable.
-metrics_line | python3 -c '
-import json, sys
-m = json.loads(sys.stdin.read())
-assert m["level"] == "INFO" and m["unavailable"] == [], m
-assert m["cpu_count"] > 0 and m["mem_total_bytes"] > 0 and m["net_interface"], m' \
-  || fail "shipped unit: machine metrics not readable: $(metrics_line)"
-alog | grep -q 'the installed systemd units are not the ones' && fail "current units reported stale"
-x "/usr/local/bin/akari-agent -version" | grep -q 'v900.0.1 ' || fail "binary"
 
 echo "== 3. broken v900.0.2 with its own units: crash loop -> binary and units rolled back"
 x "rm -f $U/apply-result.json"

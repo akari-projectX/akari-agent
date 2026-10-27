@@ -1,7 +1,7 @@
 FUZZ_MAIN = FuzzBuildConfig FuzzRewriteCertPaths FuzzBuildUser FuzzInboundTCPPorts FuzzACMEConfig FuzzProcParsers FuzzStateHash FuzzLoadConfig FuzzApplyRequest FuzzNftScript FuzzFilterRequest
 FUZZ_RELEASE = FuzzParseManifest FuzzCompareVersions FuzzVerify FuzzParseKeys
 
-.PHONY: lint fuzz cover third-party check-third-party bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb sync-units check-units openrc-test vet fmt-check test test-canary soak vulncheck ci
+.PHONY: lint fuzz cover third-party check-third-party bench build build-testkeys sign-tool sign-manifest check-release-keys dist proto sync-proto check-proto check-pb openrc-test vet fmt-check test test-canary soak vulncheck ci
 
 # Canonical contract lives in akari-panel/proto/agent.proto. This repo vendors
 # a copy: `make sync-proto` pulls the sibling checkout's version and
@@ -93,19 +93,6 @@ sync-proto:
 check-proto:
 	@for f in $(CONTRACT_FILES); do diff -q $(PANEL_DIR)/proto/$$f proto/$$f || { echo "proto/$$f differs from $(PANEL_DIR)/proto/$$f: make sync-proto"; exit 1; }; done; echo "contract: in sync with $(PANEL_DIR)"
 
-# W23: the systemd units are canonical HERE (systemd/, compiled into the
-# binary: -print-unit / -print-units). akari-panel keeps a byte-identical
-# copy (deploy/systemd/: its installer's fallback for releases that predate
-# -print-unit): `make sync-units` writes it, `make check-units` (CI, proto
-# job) fails on drift. Unit changes are agent-first: update the panel copy
-# in a panel PR merged before this one (like the proto, panel first).
-UNIT_FILES = akari-agent.service akari-agent-update.service akari-agent-update.path
-sync-units:
-	for u in $(UNIT_FILES); do cp systemd/$$u $(PANEL_DIR)/deploy/systemd/$$u || exit 1; done
-
-check-units:
-	@for u in $(UNIT_FILES); do cmp systemd/$$u $(PANEL_DIR)/deploy/systemd/$$u || { echo "$$u differs from $(PANEL_DIR)/deploy/systemd/$$u: make sync-units"; exit 1; }; done; echo "units: panel copy current"
-
 # Generated code (pb/) must be what buf produces from the vendored proto.
 # Needs protoc-gen-go v1.36.12 and protoc-gen-go-grpc v1.6.2 on PATH.
 check-pb: proto
@@ -182,9 +169,8 @@ cover:
 # W18/W23: the self-update path under real systemd 257 (docker,
 # privileged): the units this repo ships (systemd/), the agent's
 # StateDirectory noexec+idmapped as on a VPS; machine metrics readable under
-# the shipped unit (not under the pre-W23 one); a pre-W23 updater unit
-# (no unit refresh, one reinstall), unit refresh with each update,
-# crash-loop rollback restoring binary and units, a hostile request.
+# the shipped unit, unit refresh with each update, crash-loop rollback
+# restoring binary and units, a hostile request.
 # CI job `systemd-update`. WORK: scratch dir (default: mktemp).
 systemd-test:
 	scripts/systemd-test/run.sh

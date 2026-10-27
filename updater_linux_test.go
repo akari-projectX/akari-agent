@@ -279,22 +279,6 @@ func TestApplyUnits(t *testing.T) {
 			t.Fatalf("temp files next to the target: %v", left)
 		}
 	})
-	t.Run("pre-W23 updater unit (read-only unit dir): update without the units", func(t *testing.T) {
-		e := newUpdaterEnv(t)
-		writeUnitFile = func(string, string, []byte, os.FileMode) error { return &os.PathError{Op: "open", Err: syscall.EROFS} }
-		t.Cleanup(func() { writeUnitFile = writeUnit })
-		e.stage("v1.1.0", []byte("new agent v1.1.0"), nil)
-		e.onRestart = func(int32) { e.confirm("v1.1.0") }
-		if err := e.p.run(); err != nil {
-			t.Fatal(err)
-		}
-		if e.installed() != "new agent v1.1.0" || e.result().State != resConfirmed {
-			t.Fatalf("installed %q result %+v", e.installed(), e.result())
-		}
-		if e.unit("akari-agent.service") != string(oldUnits()["akari-agent.service"]) || e.reloads.Load() != 0 {
-			t.Fatal("units touched")
-		}
-	})
 	t.Run("a unit write failure refuses the update and restores", func(t *testing.T) {
 		e := newUpdaterEnv(t)
 		n := 0

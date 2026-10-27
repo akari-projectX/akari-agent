@@ -30,11 +30,7 @@ package main
 // only the known names (initSys.units) that already exist in the unit
 // directory are replaced: written atomically (root, 0644), the previous
 // ones kept in <updater state>/units.prev/ and put back on a rollback;
-// `systemctl daemon-reload` before the restart. An updater unit from
-// before W23 has the unit directory read-only (ProtectSystem=strict): the
-// update then goes ahead without the units (EROFS, logged), and the agent
-// reports the stale units ("stale-units") until the install command is run
-// once.
+// `systemctl daemon-reload` before the restart.
 //
 // OpenRC (W32, -init openrc; Alpine): the same, with the init scripts
 // (/etc/init.d/akari-agent and akari-agent-update, root 0755; OpenRC reads
@@ -640,9 +636,7 @@ func (p *applier) rollback(d *agentDir, st *rootState, version, rollout, why str
 // installUnits replaces the known units that exist in the unit directory
 // with the new release's (identical ones are left alone), keeping the
 // replaced ones in units.prev/ (recorded in the trial before anything is
-// written), then reloads systemd. A read-only unit directory (an updater
-// unit from before W23) is not an error: the update goes ahead without the
-// units.
+// written), then reloads systemd.
 func (p *applier) installUnits(st *rootState, units map[string][]byte) error {
 	prevDir := filepath.Join(p.rootDir, unitsPrevDir)
 	if err := os.RemoveAll(prevDir); err != nil {
@@ -675,16 +669,8 @@ func (p *applier) installUnits(st *rootState, units map[string][]byte) error {
 	if err := p.save(st); err != nil {
 		return err
 	}
-	for i, n := range change {
-		err := writeUnitFile(p.unitDir, n, units[n], p.init.mode)
-		if i == 0 && errors.Is(err, unix.EROFS) {
-			slog.Warn(p.init.name+" units NOT refreshed: this node's updater unit predates unit refresh "+
-				"(its unit directory is read-only); run the panel's install command (重装命令) once",
-				"dir", p.unitDir)
-			st.Trial.Units = false
-			return p.save(st)
-		}
-		if err != nil {
+	for _, n := range change {
+		if err := writeUnitFile(p.unitDir, n, units[n], p.init.mode); err != nil {
 			return fmt.Errorf("%s: %w", n, err)
 		}
 	}
