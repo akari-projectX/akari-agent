@@ -21,8 +21,7 @@ import (
 // connection keeps its user's own *MemoryUser, so RemoveUser moves nobody and
 // a removed user's stalled handshake resolves to that user, which the gate
 // refuses (ss_native_test.go). Rotation is RemoveUser + AddUser of the same
-// email. (xray v26.3.27 swap-deleted in RemoveUser; protocol 5-7 agents kept
-// removed credentials as tombstones because of that.)
+// email.
 type ss2022Module struct{}
 
 func (ss2022Module) wire() string { return "shadowsocks" }
