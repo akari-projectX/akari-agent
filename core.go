@@ -75,11 +75,13 @@ type appliedCred struct {
 
 // userCounters: a user's xray traffic counters, resolved once when the
 // user is first installed in an instance (registerCountersLocked registers
-// them before the user can connect; xray never unregisters them), and the
-// values last put in a periodic report on the current stream.
+// them before the user can connect; xray never unregisters them), the
+// values last put in a periodic report on the current stream, and the
+// values last seen by CheckpointCounters.
 type userCounters struct {
 	up, down         stats.Counter
 	sentUp, sentDown int64
+	ckptUp, ckptDown int64
 }
 
 // CoreManager owns the embedded xray-core instance. The agent is a
@@ -122,6 +124,10 @@ type CoreManager struct {
 	// instance does not grow the maps without bound (audit P3-4).
 	goneCounters map[string]time.Time
 	staleIssued  map[issuedKey]time.Time
+	// ckptStale: users left counted (or a new session began) since the last
+	// CheckpointCounters, which then reports a change even if no remaining
+	// counter moved.
+	ckptStale bool
 	// now is the clock of the sweep (nil: time.Now); tests set it.
 	now func() time.Time
 	// nodeCert: where TLS inbounds naming the node certificate credential
@@ -159,6 +165,7 @@ func (m *CoreManager) resetUsersLocked() {
 	m.counted = make(map[string]*userCounters)
 	m.goneCounters = make(map[string]time.Time)
 	m.staleIssued = make(map[issuedKey]time.Time)
+	m.ckptStale = true
 }
 
 // issuedKey names one entry of issued.
@@ -731,6 +738,7 @@ func (m *CoreManager) SweepGone() *pb.TrafficReport {
 		if c == nil {
 			continue
 		}
+		m.ckptStale = true
 		if up, down := c.up.Value(), c.down.Value(); up != 0 || down != 0 {
 			rows = append(rows, &pb.UserTraffic{UserId: uid, UpBytes: uint64(up), DownBytes: uint64(down)})
 		}
@@ -794,6 +802,35 @@ func (m *CoreManager) TrafficChanges() *pb.TrafficReport {
 		return nil
 	}
 	return &pb.TrafficReport{Users: users, SessionId: m.sessionID}
+}
+
+// checkpointRow is one user's cumulative counters in a traffic checkpoint.
+type checkpointRow struct {
+	userID   string
+	up, down uint64
+}
+
+// CheckpointCounters appends the current instance's non-zero counters to
+// rows (in no particular order) and returns them with the session id they
+// belong to. changed reports whether they can differ from what the previous
+// call returned: a counter moved, a user left counted, or a new session
+// began. Nothing is encoded or allocated here (rows is the caller's reused
+// buffer), so an idle checkpoint tick costs one read per counter.
+func (m *CoreManager) CheckpointCounters(rows []checkpointRow) (session string, out []checkpointRow, changed bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	changed, m.ckptStale = m.ckptStale, false
+	for uid, c := range m.counted {
+		up, down := c.up.Value(), c.down.Value()
+		if up != c.ckptUp || down != c.ckptDown {
+			c.ckptUp, c.ckptDown = up, down
+			changed = true
+		}
+		if up != 0 || down != 0 {
+			rows = append(rows, checkpointRow{userID: uid, up: uint64(up), down: uint64(down)})
+		}
+	}
+	return m.sessionID, rows, changed
 }
 
 // ResetSent forgets what the periodic reports carried: the next
