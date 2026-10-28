@@ -1066,6 +1066,9 @@ func (a *Agent) tlsConfig(id *nodeIdentity) *tls.Config {
 type finalQueue struct {
 	mu    sync.Mutex
 	items []*finalItem
+	// ver changes whenever the queued reports do (added, merged, dropped),
+	// so the traffic checkpoint re-encodes them only then.
+	ver uint64
 	// now is the clock (nil: time.Now); the burst gap uses it.
 	now func() time.Time
 	// burstGen and burstAt: the stream and time of the last burst that left
@@ -1103,6 +1106,7 @@ func (q *finalQueue) add(r *pb.TrafficReport) {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.ver++
 	for _, it := range q.items {
 		if it.report.SessionId == r.SessionId {
 			it.report = mergeReports(it.report, r)
@@ -1182,6 +1186,9 @@ func (q *finalQueue) confirm(gen uint64, after time.Duration) {
 		}
 		kept = append(kept, it)
 	}
+	if len(kept) != len(q.items) {
+		q.ver++
+	}
 	q.items = kept
 }
 
@@ -1194,6 +1201,21 @@ func (q *finalQueue) all() []*pb.TrafficReport {
 		out = append(out, it.report)
 	}
 	return out
+}
+
+// changedSince returns every queued report and the queue's version when
+// the version is no longer ver (ok=false: unchanged, nothing returned).
+func (q *finalQueue) changedSince(ver uint64) (reports []*pb.TrafficReport, now uint64, ok bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.ver == ver {
+		return nil, ver, false
+	}
+	reports = make([]*pb.TrafficReport, 0, len(q.items))
+	for _, it := range q.items {
+		reports = append(reports, it.report)
+	}
+	return reports, q.ver, true
 }
 
 func (q *finalQueue) len() int {

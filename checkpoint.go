@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
 	pb "akari/agent/pb"
@@ -39,6 +40,13 @@ import (
 // write (no rename, no truncate-to-zero, so ext4's auto_da_alloc does not
 // force a flush either). A slot torn by a kill mid-write fails its CRC and
 // the other, older slot is used.
+//
+// CPU: a tick on which no counter moved and the final queue did not change
+// writes nothing and encodes nothing (one read per counter). Otherwise the
+// payload is appended with protowire into one reused buffer, and the final
+// reports' part of it is re-encoded only when the queue changed. The bytes
+// are exactly what proto.Marshal produces (TestCheckpointEncodingIsProto),
+// so decodeReports reads files of either encoder.
 
 const (
 	checkpointMagic = "AKCKPT01"
@@ -57,23 +65,88 @@ type checkpointStore struct {
 	dir   string
 	seq   uint64
 	files [2]*os.File
-	last  []byte // payload of the last write (unchanged = no write)
+	// onDisk: a slot holds a checkpoint (written since the last clear).
+	// dirty: the next tick writes even if nothing changed (the last write
+	// failed, or the slots were cleared).
+	onDisk, dirty bool
+	// finals is the encoded final-report part of the payload for version
+	// finalsVer of the final queue.
+	finals    []byte
+	finalsVer uint64
+	rows      []checkpointRow // reused for counters
+	frame     []byte          // reused: header + payload
 }
 
 func (c *checkpointStore) path(i int) string { return filepath.Join(c.dir, checkpointSlots[i]) }
 
-// encodeReports is the payload: length-prefixed protobuf TrafficReports.
-func encodeReports(reports []*pb.TrafficReport) ([]byte, error) {
-	var out []byte
-	for _, r := range reports {
-		b, err := proto.Marshal(r)
-		if err != nil {
-			return nil, err
-		}
-		out = binary.AppendUvarint(out, uint64(len(b)))
-		out = append(out, b...)
+// The payload is a sequence of length-prefixed (uvarint) protobuf
+// TrafficReports. appendReport appends one, field by field in the order
+// and with the omissions of proto.Marshal (agent.proto TrafficReport and
+// UserTraffic; proto3 leaves zero scalars and empty strings out).
+func appendReport(b []byte, session string, monotonicMs uint64, rows []checkpointRow) []byte {
+	n := 0
+	for _, r := range rows {
+		n += protowire.SizeTag(1) + protowire.SizeBytes(userTrafficSize(r))
 	}
-	return out, nil
+	if monotonicMs != 0 {
+		n += protowire.SizeTag(2) + protowire.SizeVarint(monotonicMs)
+	}
+	if session != "" {
+		n += protowire.SizeTag(3) + protowire.SizeBytes(len(session))
+	}
+	b = protowire.AppendVarint(b, uint64(n))
+	for _, r := range rows {
+		b = protowire.AppendTag(b, 1, protowire.BytesType)
+		b = protowire.AppendVarint(b, uint64(userTrafficSize(r)))
+		if r.userID != "" {
+			b = protowire.AppendTag(b, 1, protowire.BytesType)
+			b = protowire.AppendString(b, r.userID)
+		}
+		if r.up != 0 {
+			b = protowire.AppendTag(b, 2, protowire.VarintType)
+			b = protowire.AppendVarint(b, r.up)
+		}
+		if r.down != 0 {
+			b = protowire.AppendTag(b, 3, protowire.VarintType)
+			b = protowire.AppendVarint(b, r.down)
+		}
+	}
+	if monotonicMs != 0 {
+		b = protowire.AppendTag(b, 2, protowire.VarintType)
+		b = protowire.AppendVarint(b, monotonicMs)
+	}
+	if session != "" {
+		b = protowire.AppendTag(b, 3, protowire.BytesType)
+		b = protowire.AppendString(b, session)
+	}
+	return b
+}
+
+// userTrafficSize is the encoded size of one UserTraffic message.
+func userTrafficSize(r checkpointRow) int {
+	n := 0
+	if r.userID != "" {
+		n += protowire.SizeTag(1) + protowire.SizeBytes(len(r.userID))
+	}
+	if r.up != 0 {
+		n += protowire.SizeTag(2) + protowire.SizeVarint(r.up)
+	}
+	if r.down != 0 {
+		n += protowire.SizeTag(3) + protowire.SizeVarint(r.down)
+	}
+	return n
+}
+
+// appendReports appends reports (the final queue) to b; rows is scratch.
+func appendReports(b []byte, reports []*pb.TrafficReport, rows []checkpointRow) ([]byte, []checkpointRow) {
+	for _, r := range reports {
+		rows = rows[:0]
+		for _, u := range r.Users {
+			rows = append(rows, checkpointRow{userID: u.UserId, up: u.UpBytes, down: u.DownBytes})
+		}
+		b = appendReport(b, r.SessionId, r.MonotonicMs, rows)
+	}
+	return b, rows
 }
 
 func decodeReports(b []byte) ([]*pb.TrafficReport, error) {
@@ -130,6 +203,7 @@ func (c *checkpointStore) load() []*pb.TrafficReport {
 	if !found {
 		return nil
 	}
+	c.onDisk = true
 	reports, err := decodeReports(best)
 	if err != nil {
 		slog.Error("traffic checkpoint unreadable; dropping it", "error", err)
@@ -138,8 +212,11 @@ func (c *checkpointStore) load() []*pb.TrafficReport {
 	return reports
 }
 
-// write stores the payload in the older slot (in place, no fsync).
-func (c *checkpointStore) write(payload []byte) error {
+// write stores frame (checkpointHdr bytes of room for the header, then the
+// payload) in the older slot (in place, no fsync). The header is filled in
+// place.
+func (c *checkpointStore) write(frame []byte) error {
+	payload := frame[checkpointHdr:]
 	if len(payload) > maxCheckpointPayload {
 		return fmt.Errorf("checkpoint of %d bytes exceeds %d", len(payload), maxCheckpointPayload)
 	}
@@ -152,17 +229,15 @@ func (c *checkpointStore) write(payload []byte) error {
 		}
 		c.files[i] = f
 	}
-	buf := make([]byte, checkpointHdr+len(payload))
-	copy(buf, checkpointMagic)
-	h := buf[len(checkpointMagic):]
+	copy(frame, checkpointMagic)
+	h := frame[len(checkpointMagic):]
 	binary.BigEndian.PutUint64(h[0:8], c.seq)
 	binary.BigEndian.PutUint32(h[8:12], uint32(len(payload)))
 	binary.BigEndian.PutUint32(h[12:16], crc32.Checksum(payload, crcTable))
-	copy(buf[checkpointHdr:], payload)
-	if _, err := c.files[i].WriteAt(buf, 0); err != nil {
+	if _, err := c.files[i].WriteAt(frame, 0); err != nil {
 		return err
 	}
-	return c.files[i].Truncate(int64(len(buf)))
+	return c.files[i].Truncate(int64(len(frame)))
 }
 
 // clear removes both slots (their content has been handed on).
@@ -176,34 +251,48 @@ func (c *checkpointStore) clear() {
 			slog.Warn("cannot remove traffic checkpoint", "error", err)
 		}
 	}
-	c.last = nil
+	c.onDisk = false
+	c.dirty = true
 }
 
 // checkpointLocked writes what the agent owes the panel: the current
 // instance's cumulative counters and every unconfirmed final report.
 // Caller holds applyMu (the only path that moves counters from the
 // instance into the final queue), so nothing is in neither.
+//
+// Nothing is encoded or written when no counter moved, the final queue is
+// unchanged and the last write succeeded; a payload that is empty while
+// no slot exists is not written either.
 func (a *Agent) checkpointLocked() {
-	if a.ckpt == nil {
+	c := a.ckpt
+	if c == nil {
 		return
 	}
-	reports := a.finals.all()
-	if snap := a.core.TrafficSnapshot(); snap != nil && len(snap.Users) > 0 {
-		reports = append(reports, snap)
+	finalsChanged := false
+	if reports, ver, ok := a.finals.changedSince(c.finalsVer); ok {
+		c.finals, c.rows = appendReports(c.finals[:0], reports, c.rows)
+		c.finalsVer, finalsChanged = ver, true
 	}
-	payload, err := encodeReports(reports)
-	if err != nil {
-		slog.Error("cannot encode traffic checkpoint", "error", err)
+	session, rows, countersChanged := a.core.CheckpointCounters(c.rows[:0])
+	c.rows = rows
+	if !finalsChanged && !countersChanged && !c.dirty {
 		return
 	}
-	if string(payload) == string(a.ckpt.last) {
+	c.frame = append(c.frame[:0], make([]byte, checkpointHdr)...)
+	c.frame = append(c.frame, c.finals...)
+	if len(rows) > 0 {
+		c.frame = appendReport(c.frame, session, 0, rows)
+	}
+	if len(c.frame) == checkpointHdr && !c.onDisk {
+		c.dirty = false
 		return
 	}
-	if err := a.ckpt.write(payload); err != nil {
+	if err := c.write(c.frame); err != nil {
+		c.dirty = true
 		slog.Error("cannot write traffic checkpoint", "error", err)
 		return
 	}
-	a.ckpt.last = payload
+	c.onDisk, c.dirty = true, false
 }
 
 // checkpointLoop runs for the process lifetime. A tick on which applyMu is
