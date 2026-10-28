@@ -10,8 +10,8 @@ Akari 控制面板的节点端 agent。内嵌 **xray-core**（release v26.10.21�
 - 按协议的撤销金丝雀（revocation canary）：`make test-canary`（包含在 `make test` 中）；仅在它们全绿时才升级 xray-core。
 - 上报实际运行内容的状态哈希（Hello 以及每个 Ack），让面板发现状态分歧。
 - 执行面板的 fail-closed 租约（CLOCK_BOOTTIME；面板在租约期内没有确认期望状态，就停止 xray）。
-- 上报累计的分用户流量计数（10 秒）和心跳（15 秒，`-heartbeat-interval`），心跳附带机器状态（W11：CPU、负载、内存/swap、磁盘、默认路由网卡的速率与总量、TCP/UDP 连接数、在线用户、RSS、xray 版本；读取 `/proc`，不用 cgo）。
-- 类似 Clash url-test 的延迟测试（W11）：每 5 小时（面板可配置；面板可"立即测试"）从节点自身出口发起 HTTP GET，取 3 次中位数，主 URL 失败时使用备用 URL。
+- 上报累计的分用户流量计数（10 秒）和心跳（15 秒，`-heartbeat-interval`），心跳附带机器状态（CPU、负载、内存/swap、磁盘、默认路由网卡的速率与总量、TCP/UDP 连接数、在线用户、RSS、xray 版本；读取 `/proc`，不用 cgo）。
+- 类似 Clash url-test 的延迟测试：每 5 小时（面板可配置；面板可"立即测试"）从节点自身出口发起 HTTP GET，取 3 次中位数，主 URL 失败时使用备用 URL。
 - 任何断线之后都收敛到面板的期望状态。
 
 ## Licence（许可）
@@ -29,11 +29,13 @@ make proto            # regenerate pb/ from proto/agent.proto
 make sync-proto       # pull the contract from the sibling akari-panel checkout
 make check-proto      # fail if the vendored contract drifted from akari-panel
 make vet fmt-check
+make test             # race tests + revocation canaries
+make soak             # long-running stability soak (SOAK_DURATION, default 60m; not part of CI)
 make third-party      # regenerate THIRD_PARTY_LICENSES.txt (after go.mod changes)
 ./agent -licenses     # licensing of this binary + all third-party licence texts
 ```
 
-发布（tag `v*`）由 `.github/workflows/release.yml` 构建、生成 SBOM 并用 cosign 签名。以加固的 systemd 服务安装，单元文件在 `systemd/`（已编译进二进制：`./agent -print-unit akari-agent.service`；面板的安装器会安装所装发布版自带的单元，每次自更新也会安装新发布版的单元）。在 Alpine Linux（W32）上，同一个静态二进制通过 OpenRC 运行，脚本在 `openrc/`（同样已编译进二进制：`./agent -print-unit akari-agent`；agent 与 updater 使用 `-init openrc`）；与 systemd 方案的差异及已知缺口见 akari-panel 的 `docs/DEPLOY.md` §3h。
+发布（tag `v*`）由 `.github/workflows/release.yml` 构建、生成 SBOM 并用 cosign 签名。以加固的 systemd 服务安装，单元文件在 `systemd/`（已编译进二进制：`./agent -print-unit akari-agent.service`；面板的安装器会安装所装发布版自带的单元，每次自更新也会安装新发布版的单元）。在 Alpine Linux 上，同一个静态二进制通过 OpenRC 运行，脚本在 `openrc/`（同样已编译进二进制：`./agent -print-unit akari-agent`；agent 与 updater 使用 `-init openrc`）；与 systemd 方案的差异及已知缺口见 akari-panel 的 `docs/DEPLOY.md` §3h。
 
 同级检出约定：akari-panel 与 akari-agent 并排放置（`../akari-panel` / `../akari-agent`），与面板 smoke 测试的预期一致。
 
@@ -71,7 +73,7 @@ replace github.com/xtls/xray-core => github.com/akari-projectX/xray-core <分支
 
 如果将来官方自己修了这个问题（新版本上第 4 步的测试在**不打补丁**时也通过），就删掉 `replace`、改回官方模块，并删除本节与 CLAUDE.md 的对应说明。
 
-## Automatic node certificate (protocol 6)（节点证书自动签发）
+## Automatic node certificate（节点证书自动签发）
 
 当节点在面板中配置了 TLS 域名（节点域名），且有入站读取节点证书文件时，面板会下发 `ConfigSnapshot.acme`，agent 自行通过 ACME 获取并续期证书（默认 Let's Encrypt；库：[acmez](https://github.com/mholt/acmez)，Apache-2.0），无需 certbot。细节见 `acme.go`：
 
@@ -84,11 +86,11 @@ replace github.com/xtls/xray-core => github.com/akari-projectX/xray-core <分支
 
 测试：`acme_test.go`（进程内 pebble CA + DNS：HTTP-01、TLS-ALPN-01、端口被占、DNS/连接错误、退避、续期、重启、Snapshot 衔接）以及金丝雀 `TestACME_TLSInboundsGetAndHotReloadTheCertificate`（真实 xray 客户端经 VLESS-WS-TLS、Trojan-TLS 和 Hysteria 2，仅信任测试 CA；替换时保持另一入站的连接；续期时保持所有连接）。没有任何测试访问真实 CA。仅供测试/smoke 的参数：`-acme-roots`、`-acme-http-port`、`-acme-tls-port`。
 
-## Per-user speed limits (protocol 4)（分用户限速）
+## Per-user speed limits（分用户限速）
 
 面板随用户下发其套餐限速（`UserOp.speed_limit_bytes_per_sec`，0 = 不限速）。xray-core 没有分用户限速，所以 agent 的 gate dispatcher 自行对受限用户的流量整形（`ratelimit.go`）：每用户每方向一个令牌桶，由该用户在本节点上的所有连接和入站共享。受限用户的连接不使用 XTLS Vision 的内核 splice（它会绕过任何限速器），Vision 本身仍然可用。不限速用户走原来的路径，完全不变。限速从无到有时，会关闭该用户的存量连接（客户端重连后即被限速）；其他变更就地生效。只包装 dispatch 的出站一侧（xray 的 mux 保留入站侧 link 并断言其类型）。测试：`ratelimit_test.go`（经 xray 的真实 VLESS：吞吐等于限速值）、金丝雀 `TestRT_VisionSpeedLimit`（TLS 上的 Vision）、`TestRT_MuxSpeedLimit`、`TestRT_UDPSpeedLimit`，以及 `TestRT_ProtocolMatrix` 的限速阶段（所有协议，含 SS2022 和 Hysteria2）。
 
-## Self-update (protocol 3)（自更新）
+## Self-update（自更新）
 
 面板可以分批推出新的 agent 发布版（分波次、健康门、自动中止；见 `akari-panel/docs/DEPLOY.md`，"Agent updates"）。agent **只**信任由本仓库中固定的发布密钥（`release-keys.txt`，编译进二进制）签名的 manifest；面板只是中继。只有在签名校验通过、平台匹配、版本比当前运行的更新（或签名 manifest 是明确的 `rollback` 目标：schema 2，带 `rollback_from` 与 `expires_at`，只在正运行的版本恰好是 `rollback_from`、尚未过期、且目标版本是本节点自己运行并确认过的版本时才接受）、且本节点此前没有从该版本回滚过时，才接受更新提议。二进制经已有的 mTLS 连接（`AgentChannel.FetchArtifact`）传来，并校验大小与 SHA-256。agent 从不自己执行它：其 state 目录被 systemd 挂载为 `noexec`（DynamicUser），并且保持如此。它把文件和应用请求暂存到 `<state dir>/update/`；由**特权 updater**（`akari-agent-update.path` + `akari-agent-update.service`，位于 `systemd/`，由面板的一行安装命令安装）以 `akari-agent -apply-update <state dir>` 运行*已安装*的二进制，它把该目录视为不可信，将文件复制到仅 root 可访问的位置，用自己固定的密钥和版本策略重新校验副本，将其安装为 `/usr/local/bin/akari-agent`（保留 `akari-agent.prev`），连同新发布版自带的 systemd 单元一并安装（用 `-print-units` 从已校验的副本读取；旧单元会保留，回滚时恢复），然后重启 agent。新二进制必须在 `-update-self-check`（默认 5m）内连上并得到一次已确认的 apply；否则，或崩溃 `-update-max-boots` 次（默认 3）时，updater 会把旧二进制放回去。`./agent -release-keys` 列出已固定的密钥。
 
@@ -113,4 +115,4 @@ go run ./cmd/akari-sign verify -keys release-keys.txt -manifest dist/akari-agent
 ./agent -config test-node-bootstrap.toml -state-dir /var/lib/akari-agent
 ```
 
-bootstrap 文件由面板上的 `akari server add <name>` 生成：包含面板地址、TLS server name、面板 CA 和**一次性注册令牌**——不含私钥。首次启动时，agent 在 state 目录（`-state-dir`；systemd 下默认 `$STATE_DIRECTORY`，否则为配置文件所在目录；文件权限 0600）中生成 ECDSA P-256 密钥，用 CSR 注册（唯一无需客户端证书的调用）并保存签发的证书。密钥从不离开节点，也从不写入日志。当证书剩余有效期不足三分之一时（protocol 2），agent 通过存活的 mTLS 连接用新密钥续期，用新证书重连，并保留旧证书直到面板接受新证书。带新令牌的 bootstrap 文件会让节点重新注册一次。见 `akari-panel/docs/DEPLOY.md`。
+bootstrap 文件由面板上的 `akari server add <name>` 生成：包含面板地址、TLS server name、面板 CA 和**一次性注册令牌**——不含私钥。首次启动时，agent 在 state 目录（`-state-dir`；systemd 下默认 `$STATE_DIRECTORY`，否则为配置文件所在目录；文件权限 0600）中生成 ECDSA P-256 密钥，用 CSR 注册（唯一无需客户端证书的调用）并保存签发的证书。密钥从不离开节点，也从不写入日志。当证书剩余有效期不足三分之一时，agent 通过存活的 mTLS 连接用新密钥续期，用新证书重连，并保留旧证书直到面板接受新证书。带新令牌的 bootstrap 文件会让节点重新注册一次。见 `akari-panel/docs/DEPLOY.md`。
