@@ -419,11 +419,11 @@ func FuzzStateHash(f *testing.F) {
 		if r1.UserID == r2.UserID && r1.Tag == r2.Tag {
 			return // records must be unique per (user, tag)
 		}
-		h12 := stateHash(ver, inb, []hashRecord{r1, r2})
-		if h21 := stateHash(ver, inb, []hashRecord{r2, r1}); h12 != h21 {
+		h12 := stateHashRecords(ver, inb, []hashRecord{r1, r2})
+		if h21 := stateHashRecords(ver, inb, []hashRecord{r2, r1}); h12 != h21 {
 			t.Fatal("hash depends on record order")
 		}
-		one := stateHash(ver, inb, []hashRecord{r1})
+		one := stateHashRecords(ver, inb, []hashRecord{r1})
 		if one == h12 {
 			t.Fatal("dropping a record kept the hash")
 		}
@@ -432,16 +432,16 @@ func FuzzStateHash(f *testing.F) {
 			moved := r1
 			moved.Account = a1[1:]
 			moved.Protocol = p1 + a1[:1]
-			if stateHash(ver, inb, []hashRecord{moved}) == one {
+			if stateHashRecords(ver, inb, []hashRecord{moved}) == one {
 				t.Fatal("field boundary is ambiguous")
 			}
 		}
-		if stateHash(ver+1, inb, []hashRecord{r1}) == one || stateHash(ver, inb+" ", []hashRecord{r1}) == one {
+		if stateHashRecords(ver+1, inb, []hashRecord{r1}) == one || stateHashRecords(ver, inb+" ", []hashRecord{r1}) == one {
 			t.Fatal("version/inbounds not bound")
 		}
 		recs := []hashRecord{r2, r1}
 		sort.Slice(recs, func(i, j int) bool { return recs[i].UserID < recs[j].UserID })
-		if stateHash(ver, inb, recs) != h12 {
+		if stateHashRecords(ver, inb, recs) != h12 {
 			t.Fatal("hash depends on input order")
 		}
 	})

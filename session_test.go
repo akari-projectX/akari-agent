@@ -57,7 +57,7 @@ func TestStateHashVectors(t *testing.T) {
 		for _, r := range recs {
 			list = append(list, r)
 		}
-		if got := stateHash(c.ConfigVersion, c.InboundsJSON, list); got != c.Hash {
+		if got := stateHashRecords(c.ConfigVersion, c.InboundsJSON, list); got != c.Hash {
 			t.Errorf("%s: got %s want %s", c.Name, got, c.Hash)
 		}
 	}
@@ -300,7 +300,7 @@ func TestLeaseExpiryTeardownAndReport(t *testing.T) {
 			t.Fatal("no hello after reconnect")
 		}
 	}
-	if h.UserVersion != 0 || h.StateHash != stateHash(0, "", nil) {
+	if h.UserVersion != 0 || h.StateHash != stateHashRecords(0, "", nil) {
 		t.Fatalf("hello after expiry = %v", h)
 	}
 	select {

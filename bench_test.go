@@ -233,9 +233,53 @@ func BenchmarkTrafficChanges10kTenPct(b *testing.B) {
 	}
 }
 
+// benchCheckpointAgent: an agent running benchCore(n) with a traffic
+// checkpoint in a temporary directory, already written once.
+func benchCheckpointAgent(b *testing.B, n int) *Agent {
+	b.Helper()
+	a := NewAgent(&Config{}, "bench", nil)
+	a.core = benchCore(b, n)
+	a.ckpt = &checkpointStore{dir: b.TempDir()}
+	b.Cleanup(a.ckpt.clear)
+	a.checkpointLocked()
+	return a
+}
+
+// The 1 s traffic checkpoint when no counter moved (steady state).
+func BenchmarkCheckpoint10kIdle(b *testing.B) {
+	a := benchCheckpointAgent(b, benchUsersN)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		a.checkpointLocked()
+	}
+}
+
+// The 1 s traffic checkpoint when 1% of the users moved since the last one.
+func BenchmarkCheckpoint10kOnePct(b *testing.B) {
+	a := benchCheckpointAgent(b, benchUsersN)
+	a.core.mu.Lock()
+	ctrs := make([]*userCounters, 0, benchUsersN/100)
+	for i := 0; i < benchUsersN; i += 100 {
+		ctrs = append(ctrs, a.core.counted[benchUserID(i)])
+	}
+	a.core.mu.Unlock()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		for _, c := range ctrs {
+			c.up.Add(1)
+		}
+		b.StartTimer()
+		a.checkpointLocked()
+	}
+}
+
 // State hash over 20k credentials (Hello / every Ack).
 func BenchmarkStateHash10k(b *testing.B) {
 	m := benchCore(b, benchUsersN)
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = m.StateHash(1)

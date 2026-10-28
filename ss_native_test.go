@@ -211,7 +211,7 @@ func TestSS2022NativeRemoveStalledHandshakes(t *testing.T) {
 	if _, err := ref.Rebuild(swapPort(t, inb, e.port), keep); err != nil {
 		t.Fatal(err)
 	}
-	if m.StateHash(1) != stateHash(1, inb, hashRecordsOf(ref)) {
+	if m.StateHash(1) != stateHashRecords(1, inb, hashRecordsOf(ref)) {
 		t.Fatal("state hash differs from the remaining users")
 	}
 

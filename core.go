@@ -760,17 +760,7 @@ func (m *CoreManager) manager() (inbound.Manager, error) {
 func (m *CoreManager) StateHash(configVersion uint64) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	n := 0
-	for _, tags := range m.applied {
-		n += len(tags)
-	}
-	recs := make([]hashRecord, 0, n)
-	for uid, tags := range m.applied {
-		for tag, c := range tags {
-			recs = append(recs, hashRecord{UserID: uid, Tag: tag, Protocol: c.protocol, Account: c.account})
-		}
-	}
-	return stateHash(configVersion, m.inboundsJSON, recs)
+	return stateHash(configVersion, m.inboundsJSON, m.applied)
 }
 
 // TrafficSnapshot returns the current session id together with the
