@@ -9,27 +9,27 @@ import (
 )
 
 // The tests relay to loopback echo servers, which xray's freedom outbound
-// refuses by default (see allowPrivateDestinations).
+// refuses by default (see testAllowPrivateDestinations).
 func TestMain(m *testing.M) {
-	allowPrivateDestinations = true
+	testAllowPrivateDestinations = true
 	os.Exit(m.Run())
 }
 
 // Production keeps xray's default final rules (no private destinations for
-// users); only the operator's setting (or the test hook) adds an allow-all
+// users); only the operator's setting (or the test seam) adds an allow-all
 // rule in front of them.
 func TestFreedomOutboundDefaultRules(t *testing.T) {
-	defer func(old bool) { allowPrivateDestinations = old }(allowPrivateDestinations)
+	defer func(old bool) { testAllowPrivateDestinations = old }(testAllowPrivateDestinations)
 
-	allowPrivateDestinations = false
+	testAllowPrivateDestinations = false
 	if out := freedomOutbound(false); out["protocol"] != "freedom" || out["settings"] != nil {
 		t.Fatalf("default outbound %v carries settings: xray's safe default rules would be bypassed", out)
 	}
 	want := `{"protocol":"freedom","settings":{"finalRules":[{"action":"allow"}]}}`
-	for name, tc := range map[string]struct{ setting, hook bool }{
-		"setting": {true, false}, "hook": {false, true}, "both": {true, true},
+	for name, tc := range map[string]struct{ setting, seam bool }{
+		"setting": {true, false}, "seam": {false, true}, "both": {true, true},
 	} {
-		allowPrivateDestinations = tc.hook
+		testAllowPrivateDestinations = tc.seam
 		b, err := json.Marshal(freedomOutbound(tc.setting))
 		if err != nil {
 			t.Fatal(err)
@@ -44,8 +44,8 @@ func TestFreedomOutboundDefaultRules(t *testing.T) {
 // a loopback service through the node: refused by default, reachable once
 // the setting arrives with a Snapshot.
 func TestSnapshotSettingControlsPrivateDestinations(t *testing.T) {
-	defer func(old bool) { allowPrivateDestinations = old }(allowPrivateDestinations)
-	allowPrivateDestinations = false
+	defer func(old bool) { testAllowPrivateDestinations = old }(testAllowPrivateDestinations)
+	testAllowPrivateDestinations = false
 
 	echo := echoServer(t)
 	m := NewCoreManager()
