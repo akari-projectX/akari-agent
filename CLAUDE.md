@@ -43,7 +43,7 @@ Go 1.27 单包（`package main`，模块名 `akari/agent`），内嵌 xray-core 
 | `acme_test.go` / `acme_pebble_test.go` | W10：进程内 pebble（Let's Encrypt 测试 CA）+ miekg/dns 小 DNS（pebble VA 用 TCP 查询）：HTTP-01、80 为入站时 TLS-ALPN-01、端口全占、DNS/连接错误分类与退避（交替挑战）、续期（`now` 接缝）、重启保留证书与账户、Snapshot 胶水（占位证书即可构建、无 acme 时仍读凭据路径）、换 handler 失败 → (0,0) |
 | `acme_canary_test.go` | W10 金丝雀（canary 标签，不带 -race：xray 证书重读 goroutine 无锁写 GetCertificate 读的槽位，上游数据竞争）：VLESS-WS-TLS、Trojan-TLS、Hysteria2 真实 xray 客户端只信任 pebble 根；首证换 handler 时另一入站的连接存活；续期后（`ocspStapling:1` 让 xray 每秒重读，生产默认 1 小时，同一代码路径）新握手拿到新序列号、所有既有连接存活、未重建 |
 | `rt_canary_test.go` | red team 撤权金丝雀（Vision/splice over TLS、trojan、vmess、mux），`make test-canary` |
-| `rt_block_canary_test.go` | W29 金丝雀（canary 标签）：清单每个场景用真实 xray 客户端：开关前后已建立连接是否存活与 `blockSwitchOutcome` 表一致（gRPC、Hysteria 2 断开；明文 XHTTP 可能断开，两种结果都接受；其余保留；面板 DEPLOY §3h 照此记载）、改规则内容不断任何连接、命中 IP 规则的新连接被拦截且计数 |
+| `rt_block_canary_test.go` | W29 金丝雀（canary 标签）：清单每个场景用真实 xray 客户端：开关前后已建立连接是否存活与 `blockSwitchOutcome` 表一致（gRPC、Hysteria 2 断开；明文 XHTTP 可能断开，两种结果都接受；其余保留；面板 DEPLOY §3i 照此记载）、改规则内容不断任何连接、命中 IP 规则的新连接被拦截且计数 |
 | `rt_matrix_test.go` | W8 协议矩阵金丝雀（canary 标签；W26：场景表 = 清单 `[[scenario]]`，由 `scenarioCase` 按协议/传输/安全层构建器组合，清单里没有构建器的场景直接失败）：17 种 协议×传输×安全 组合各用 xray 真实客户端握手、中继、断言用户计数、撤权后旧连接断开且新连接被拒（全部经 delta，SS2022 同样）；W9：移除→同凭据重加（先带限速、再不限速）后**同一个客户端**能再连上（限速 ±5%/不限速），再次移除再被切断 |
 | `ss_native_test.go` | SS2022 原生移除（`-race`，协议 8）：真实 SS2022 握手（sing-shadowsocks 客户端）在固定头之后拖住（服务端已解析出用户），期间 delta 移除/轮换 → 被删或旧密钥的握手被拒、其余用户以本人身份完成、已建立连接存活、每用户计数精确（无错记）、不重建；同凭据重加后能再连；并发版：随机拖延的握手 vs 反复移除/重加；轮换版：旧密钥被切断、新密钥放行。xray 退回交换删除时这些测试会以串号/panic 失败 |
 | `protocols_test.go` | SS2022 受管入站/拒绝项、`TestSS2022NativeUserOps`（移除/重加/轮换都是普通 delta、state hash 与新实例一致）、账号校验、gRPC 无 :authority 请求不致崩溃（R26 回归） |
