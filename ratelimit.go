@@ -277,8 +277,11 @@ func (g *gateDispatcher) SetLimit(email string, bps uint64) int {
 	default:
 		g.limits[acc] = newUserLimit(bps)
 		g.limited[acc] = map[string]struct{}{email: {}}
-		for key := range g.live {
-			if accountOf(key.email) == acc {
+		// Only this account's keys (liveKeys), not every live key: this
+		// runs under the lock every admit and release waits for, once per
+		// newly limited user of a UserDelta.
+		if ak, ok := g.liveKeys[acc]; ok {
+			for _, key := range ak.keys() {
 				victims = append(victims, g.takeLocked(key)...)
 			}
 		}

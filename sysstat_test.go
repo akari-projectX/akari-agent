@@ -302,6 +302,7 @@ func TestGateLiveStats(t *testing.T) {
 		if n != conns || len(seen) != users {
 			t.Fatalf("recount %d/%d, counters %d/%d", n, len(seen), conns, users)
 		}
+		checkLiveIndex(t, g)
 	}
 	want(0, 0)
 	c1, c2, c3 := admit(a1, u1), admit(a1, u1), admit(b1, u1)

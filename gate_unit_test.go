@@ -8,9 +8,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +26,46 @@ import (
 )
 
 func newBareGate() *gateDispatcher { return newGate() }
+
+// checkLiveIndex fails unless the gate's account index (liveKeys) is
+// exactly live's keys grouped by account, each once: a key in
+// live but not in the index would escape SetLimit's kill.
+func checkLiveIndex(t *testing.T, g *gateDispatcher) {
+	t.Helper()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	indexed := 0
+	for acc, ak := range g.liveKeys {
+		if ak.more != nil && len(ak.more) == 0 {
+			t.Errorf("liveKeys[%q] keeps an empty overflow set", acc)
+		}
+		if _, dup := ak.more[ak.first]; dup {
+			t.Errorf("liveKeys[%q] holds %v twice", acc, ak.first)
+		}
+		for _, key := range ak.keys() {
+			indexed++
+			if accountOf(key.email) != acc {
+				t.Errorf("key %v indexed under account %q", key, acc)
+			}
+			if len(g.live[key]) == 0 {
+				t.Errorf("indexed key %v has no live dispatch", key)
+			}
+		}
+	}
+	for key := range g.live {
+		ak, ok := g.liveKeys[accountOf(key.email)]
+		_, inMore := ak.more[key]
+		if !ok || (ak.first != key && !inMore) {
+			t.Errorf("live key %v missing from liveKeys", key)
+		}
+	}
+	if indexed != len(g.live) {
+		t.Errorf("liveKeys holds %d keys, live %d", indexed, len(g.live))
+	}
+	if int(g.liveUsers.Load()) != len(g.liveKeys) {
+		t.Errorf("liveUsers %d, liveKeys has %d accounts", g.liveUsers.Load(), len(g.liveKeys))
+	}
+}
 
 // liveFor registers a tracked dispatch for key as user (what Dispatch /
 // DispatchLink do) and returns it with a channel closed on cancel and the
@@ -59,6 +102,7 @@ func TestGateAllowRotationKillsOnlyThatKey(t *testing.T) {
 	g.Allow(b, ub)
 	_, doneA, readerA := liveFor(t, g, a, ua)
 	_, doneB, _ := liveFor(t, g, b, ub)
+	checkLiveIndex(t, g)
 	if g.LiveTotal() != 2 {
 		t.Fatalf("live %d", g.LiveTotal())
 	}
@@ -72,6 +116,7 @@ func TestGateAllowRotationKillsOnlyThatKey(t *testing.T) {
 	default:
 	}
 	g.Allow(a, ua2) // rotated credential
+	checkLiveIndex(t, g)
 	if !cancelled(doneA) {
 		t.Fatal("rotation left the old identity's dispatch running")
 	}
@@ -92,6 +137,7 @@ func TestGateAllowRotationKillsOnlyThatKey(t *testing.T) {
 	if n := g.Revoke(b); n != 1 || !cancelled(doneB) {
 		t.Fatalf("revoke closed %d", n)
 	}
+	checkLiveIndex(t, g)
 	if g.LiveTotal() != 0 {
 		t.Fatalf("live %d after revoke", g.LiveTotal())
 	}
@@ -146,6 +192,7 @@ func TestGateKillClosesTheClientConnection(t *testing.T) {
 			g.Allow(key, user)
 			cp, _ := probe(g)
 			kill(g)
+			checkLiveIndex(t, g)
 			if !wasClosed(cp) {
 				t.Fatal("the client connection of a killed dispatch stayed open")
 			}
@@ -174,9 +221,11 @@ func TestGateCloseKillsAll(t *testing.T) {
 	g.Allow(k, u)
 	_, done1, _ := liveFor(t, g, k, u)
 	_, done2, _ := liveFor(t, g, k, u)
+	checkLiveIndex(t, g)
 	if err := g.Close(); err != nil {
 		t.Fatal(err)
 	}
+	checkLiveIndex(t, g)
 	if !cancelled(done1) || !cancelled(done2) || g.LiveTotal() != 0 {
 		t.Fatal("close left dispatches running")
 	}
@@ -330,6 +379,7 @@ func TestAccountSharesLimitAndOnlineCount(t *testing.T) {
 	_, doneD, _ := liveFor(t, g, d, ud)
 	_, doneR, _ := liveFor(t, g, r, ur)
 	_, doneO, _ := liveFor(t, g, o, uo)
+	checkLiveIndex(t, g)
 	if c, u := g.LiveStats(); c != 3 || u != 2 {
 		t.Fatalf("stats %d conns %d users, want 3 / 2 (u counted once)", c, u)
 	}
@@ -338,6 +388,7 @@ func TestAccountSharesLimitAndOnlineCount(t *testing.T) {
 	if n := g.SetLimit("u#1", 1000); n != 2 {
 		t.Fatalf("closed %d, want 2", n)
 	}
+	checkLiveIndex(t, g)
 	if !cancelled(doneD) || !cancelled(doneR) {
 		t.Fatal("the account's live dispatches survived the new limit")
 	}
@@ -358,6 +409,7 @@ func TestAccountSharesLimitAndOnlineCount(t *testing.T) {
 	if !ok || !ok2 || lim1 == nil || lim1 != lim2 {
 		t.Fatal("the two entrances do not share one limiter")
 	}
+	checkLiveIndex(t, g)
 	// One op drops it (REMOVE of the relay): the other still carries it.
 	g.SetLimit("u#1", 0)
 	if g.Limit("u") != 1000 {
@@ -386,5 +438,131 @@ func TestGateKillWithoutAClientConnection(t *testing.T) {
 	g.Revoke(key)
 	if !cancelled(done) {
 		t.Fatal("dispatch not cancelled")
+	}
+}
+
+// The account index under concurrent admit/release, revocation, rotation
+// and new limits (-race): it always equals live grouped by account, and a
+// new limit kills exactly the account's live dispatches, on every one of
+// its entrances, and nobody else's.
+func TestGateLiveIndexStress(t *testing.T) {
+	const accounts, entrances = 16, 3
+	g := newBareGate()
+	type id struct {
+		key  gateKey
+		user *protocol.MemoryUser
+	}
+	var ids []id
+	for a := 0; a < accounts; a++ {
+		for e := 0; e < entrances; e++ {
+			email := fmt.Sprintf("u%d", a)
+			if e > 0 {
+				email = fmt.Sprintf("u%d#%d", a, e)
+			}
+			key := gateKey{tag: fmt.Sprintf("in%d", e), email: email}
+			u := &protocol.MemoryUser{Email: email}
+			g.Allow(key, u)
+			ids = append(ids, id{key, u})
+		}
+	}
+	ctx, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	var wg sync.WaitGroup
+	// Relays: admit with whatever identity is current, hold briefly,
+	// release (as Dispatch does when the relay ends, killed or not).
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func(seed int64) {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(seed))
+			for ctx.Err() == nil {
+				x := ids[r.Intn(len(ids))]
+				g.mu.Lock()
+				u := g.allowed[x.key]
+				g.mu.Unlock()
+				c := &liveConn{cancel: func() {}}
+				if _, ok := g.admit(x.key, u, c); ok {
+					time.Sleep(time.Duration(r.Intn(50)) * time.Microsecond)
+					g.release(x.key, c)
+				}
+			}
+		}(int64(w))
+	}
+	// Revocations and rotations of single keys. They pause (killers) while
+	// a SetLimit round checks whose dispatches it closed.
+	var killers sync.Mutex
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		r := rand.New(rand.NewSource(100))
+		for ctx.Err() == nil {
+			x := ids[r.Intn(len(ids))]
+			killers.Lock()
+			if r.Intn(2) == 0 {
+				g.Revoke(x.key)
+			}
+			g.Allow(x.key, &protocol.MemoryUser{Email: x.key.email})
+			killers.Unlock()
+		}
+	}()
+	// New limits: each must close exactly the dispatches its account had
+	// live at that moment. Probes are admitted on every entrance of the
+	// account and of another one just before (with revocations paused);
+	// the account's must all be cancelled, the other's must survive.
+	r := rand.New(rand.NewSource(200))
+	rounds := 0
+	for ctx.Err() == nil {
+		a, b := r.Intn(accounts), r.Intn(accounts)
+		if a == b {
+			continue
+		}
+		var releases []func()
+		probe := func(acc int) []<-chan struct{} {
+			var done []<-chan struct{}
+			for _, x := range ids[acc*entrances : (acc+1)*entrances] {
+				pctx, cancel := context.WithCancel(context.Background())
+				c := &liveConn{cancel: cancel}
+				g.mu.Lock()
+				u := g.allowed[x.key]
+				g.mu.Unlock()
+				if _, ok := g.admit(x.key, u, c); ok {
+					done = append(done, pctx.Done())
+					releases = append(releases, func() { g.release(x.key, c) })
+				}
+			}
+			return done
+		}
+		killers.Lock()
+		mine, theirs := probe(a), probe(b)
+		acc := fmt.Sprintf("u%d", a)
+		if n := g.SetLimit(acc, 1<<20); n < len(mine) {
+			t.Fatalf("SetLimit(%q) closed %d, but %d probes were live", acc, n, len(mine))
+		}
+		for _, d := range mine {
+			select {
+			case <-d:
+			default:
+				t.Fatalf("SetLimit(%q) left a live dispatch of the account running", acc)
+			}
+		}
+		for _, d := range theirs {
+			select {
+			case <-d:
+				t.Fatalf("SetLimit(%q) closed another account's dispatch", acc)
+			default:
+			}
+		}
+		killers.Unlock()
+		for _, rel := range releases {
+			rel()
+		}
+		g.SetLimit(acc, 0)
+		checkLiveIndex(t, g)
+		rounds++
+	}
+	wg.Wait()
+	checkLiveIndex(t, g)
+	if rounds == 0 {
+		t.Fatal("no SetLimit round ran")
 	}
 }

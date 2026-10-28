@@ -44,6 +44,25 @@ func accountOf(email string) string {
 	return email
 }
 
+// accountKeys is the set of one account's keys in live. Most accounts
+// have one (a user on one entrance), held inline so that admitting it
+// allocates nothing; more is made for a second key.
+type accountKeys struct {
+	first gateKey
+	more  map[gateKey]struct{}
+}
+
+// keys returns the set as a slice (a copy: callers drop keys while
+// walking it).
+func (a accountKeys) keys() []gateKey {
+	out := make([]gateKey, 0, 1+len(a.more))
+	out = append(out, a.first)
+	for k := range a.more {
+		out = append(out, k)
+	}
+	return out
+}
+
 // liveConn is one admitted dispatch: cancelling its context stops the
 // outbound side; interrupting its link stops the inbound side; closing the
 // client's connection (conn, when xray recorded it) ends the connection
@@ -79,9 +98,11 @@ type gateDispatcher struct {
 	mu      sync.Mutex
 	allowed map[gateKey]*protocol.MemoryUser
 	live    map[gateKey]map[*liveConn]struct{}
-	// liveKeys: account -> how many keys (inbounds, entrances) in live it
-	// has.
-	liveKeys map[string]int
+	// liveKeys: account -> its keys (inbounds, entrances) in live. Always
+	// exactly the keys of live grouped by accountOf (addKeyLocked,
+	// dropKeyLocked, Close): SetLimit kills an account's dispatches through
+	// it, so a key missing here would escape the kill.
+	liveKeys map[string]accountKeys
 	// limits: per-account rate limits (ratelimit.go); absent = none.
 	// limited: the emails whose ops installed the account's limit (it goes
 	// when the last of them drops it).
@@ -117,7 +138,7 @@ func newGate() *gateDispatcher {
 		inner:    new(dispatcher.DefaultDispatcher),
 		allowed:  make(map[gateKey]*protocol.MemoryUser),
 		live:     make(map[gateKey]map[*liveConn]struct{}),
-		liveKeys: make(map[string]int),
+		liveKeys: make(map[string]accountKeys),
 		limits:   make(map[string]*userLimit),
 		limited:  make(map[string]map[string]struct{}),
 	}
@@ -214,15 +235,46 @@ func (g *gateDispatcher) takeLocked(key gateKey) []*liveConn {
 	return out
 }
 
+// addKeyLocked adds key to live with conns, the set of its dispatches.
+func (g *gateDispatcher) addKeyLocked(key gateKey, conns map[*liveConn]struct{}) {
+	g.live[key] = conns
+	acc := accountOf(key.email)
+	ak, ok := g.liveKeys[acc]
+	switch {
+	case !ok:
+		g.liveKeys[acc] = accountKeys{first: key}
+		g.liveUsers.Add(1)
+	case ak.more == nil:
+		g.liveKeys[acc] = accountKeys{first: ak.first, more: map[gateKey]struct{}{key: {}}}
+	default:
+		ak.more[key] = struct{}{}
+	}
+}
+
 // dropKeyLocked removes key from live (it had at least one dispatch).
 func (g *gateDispatcher) dropKeyLocked(key gateKey) {
 	delete(g.live, key)
 	acc := accountOf(key.email)
-	if n := g.liveKeys[acc] - 1; n > 0 {
-		g.liveKeys[acc] = n
-	} else {
+	ak := g.liveKeys[acc]
+	switch {
+	case key != ak.first:
+		delete(ak.more, key)
+		if len(ak.more) == 0 {
+			g.liveKeys[acc] = accountKeys{first: ak.first}
+		}
+	case len(ak.more) == 0:
 		delete(g.liveKeys, acc)
 		g.liveUsers.Add(-1)
+	default:
+		for k := range ak.more {
+			delete(ak.more, k)
+			ak.first = k
+			break
+		}
+		if len(ak.more) == 0 {
+			ak.more = nil
+		}
+		g.liveKeys[acc] = ak
 	}
 }
 
@@ -275,11 +327,7 @@ func (g *gateDispatcher) admit(key gateKey, user *protocol.MemoryUser, c *liveCo
 	conns := g.live[key]
 	if conns == nil {
 		conns = make(map[*liveConn]struct{})
-		g.live[key] = conns
-		acc := accountOf(key.email)
-		if g.liveKeys[acc]++; g.liveKeys[acc] == 1 {
-			g.liveUsers.Add(1)
-		}
+		g.addKeyLocked(key, conns)
 	}
 	conns[c] = struct{}{}
 	g.liveConns.Add(1)

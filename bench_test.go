@@ -15,6 +15,7 @@ import (
 	"math/rand"
 	"net"
 	"runtime"
+	"strconv"
 	"testing"
 
 	"github.com/xtls/xray-core/common/buf"
@@ -416,4 +417,39 @@ func benchConnectEcho(b *testing.B, port int) {
 func BenchmarkConnectEcho(b *testing.B) {
 	_, port := benchConnectCore(b)
 	benchConnectEcho(b, port)
+}
+
+// SetLimit installing a limit for an account with no limit yet (a new user
+// whose plan has a speed limit, delivered by UserDelta) while n keys of
+// other accounts (two entrances each) have live dispatches. It holds the
+// gate's lock, which every admit and release on the node waits for.
+func BenchmarkSetLimitNewAccount(b *testing.B) {
+	for _, n := range []int{3000, 20000} {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			g := newGate()
+			for i := 0; i < n; i++ {
+				email := fmt.Sprintf("user-%d", i/2)
+				if i%2 == 1 {
+					email += "#1"
+				}
+				key := gateKey{tag: fmt.Sprintf("in-%d", i%2), email: email}
+				u := &protocol.MemoryUser{Email: email}
+				g.Allow(key, u)
+				if _, ok := g.admit(key, u, &liveConn{cancel: func() {}}); !ok {
+					b.Fatal("admissible identity refused")
+				}
+			}
+			accs := make([]string, 1024)
+			for i := range accs {
+				accs[i] = fmt.Sprintf("new-%d", i)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				acc := accs[i%len(accs)]
+				g.SetLimit(acc, 1<<20)
+				g.SetLimit(acc, 0)
+			}
+		})
+	}
 }
