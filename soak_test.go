@@ -285,7 +285,7 @@ func (h *soak) recsLocked() []hashRecord {
 }
 
 func (h *soak) expectedHash() string {
-	return stateHash(h.cfgV, h.inbounds, h.recs())
+	return stateHashRecords(h.cfgV, h.inbounds, h.recs())
 }
 
 // markSeen records key and reports whether it is new (callers hold h.mu).

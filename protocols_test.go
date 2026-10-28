@@ -125,7 +125,7 @@ func TestSS2022NativeUserOps(t *testing.T) {
 	if _, ok := m.applied[userA]; ok {
 		t.Fatal("removed user still applied")
 	}
-	if got := m.StateHash(1); got == stateHash(1, inb, nil) {
+	if got := m.StateHash(1); got == stateHashRecords(1, inb, nil) {
 		t.Fatal("state hash lost the remaining user")
 	}
 	// Removing an absentee is a no-op.
@@ -152,7 +152,7 @@ func TestSS2022NativeUserOps(t *testing.T) {
 	if _, err := ref.Rebuild(swapPort(t, inb, port), []*pb.UserOp{ssOp(userA, "ss", b64key(16, 7)), ssOp(userB, "ss", b64key(16, 3))}); err != nil {
 		t.Fatal(err)
 	}
-	if m.StateHash(1) != stateHash(1, inb, hashRecordsOf(ref)) {
+	if m.StateHash(1) != stateHashRecords(1, inb, hashRecordsOf(ref)) {
 		t.Fatal("state hash differs from a fresh instance with the same users")
 	}
 }

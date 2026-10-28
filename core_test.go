@@ -310,7 +310,7 @@ func TestReplaceRemovesStaleTags(t *testing.T) {
 		}
 		c.Close()
 	}
-	want := stateHash(0, inb, []hashRecord{{UserID: userA, Tag: "in-a", Protocol: "vless", Account: `{"flow":"","id":"` + idA + `"}`}})
+	want := stateHashRecords(0, inb, []hashRecord{{UserID: userA, Tag: "in-a", Protocol: "vless", Account: `{"flow":"","id":"` + idA + `"}`}})
 	if got := m.StateHash(0); got != want {
 		t.Fatal("state hash does not reflect the replaced set")
 	}

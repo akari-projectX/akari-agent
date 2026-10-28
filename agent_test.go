@@ -251,7 +251,7 @@ func TestStateHashBindsInbounds(t *testing.T) {
 		t.Fatal("inbounds not bound into the state hash")
 	}
 	m.Teardown()
-	if m.StateHash(0) != stateHash(0, "", nil) {
+	if m.StateHash(0) != stateHashRecords(0, "", nil) {
 		t.Fatal("nothing running must hash with empty inbounds")
 	}
 }
