@@ -178,7 +178,7 @@ func validFilterID(id string) bool {
 // never stop the updater's other work.
 func (p *applier) applySourceFilters(d *agentDir) {
 	f, _, err := d.open(filterRequestName, maxFilterRequestSize)
-	_ = d.remove(filterRequestName)
+	_ = d.consume(filterRequestName)
 	if errors.Is(err, unix.ENOENT) {
 		return
 	}

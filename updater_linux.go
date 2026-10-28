@@ -856,6 +856,22 @@ func (d *agentDir) remove(name string) error {
 	return err
 }
 
+// consume takes a hand-over name out of the agent's directory so that the
+// trigger (the path unit's PathExists=, the OpenRC loop's test) is false
+// again. An entry that cannot be unlinked (a directory with something in
+// it: the agent may plant one) is renamed aside to a name of its own
+// instead; otherwise it would fire the updater again and again, and under
+// systemd end in the service's start limit, which switches the updater off
+// until someone resets it (red team 2026-10 C-3).
+func (d *agentDir) consume(name string) error {
+	err := d.remove(name)
+	if err == nil || errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	aside := fmt.Sprintf(".rejected.%d.%d", os.Getpid(), time.Now().UnixNano())
+	return unix.Renameat(d.fd, name, d.fd, aside)
+}
+
 // confirmed: the agent recorded that version passed its self-check.
 func (d *agentDir) confirmed(version string) bool {
 	b, err := d.read(confirmedName, 256)
@@ -866,7 +882,7 @@ func (d *agentDir) confirmed(version string) bool {
 // cannot loop on it whatever it contains). nil when there is none.
 func (d *agentDir) takeRequest() (*applyRequest, error) {
 	f, _, err := d.open(requestName, maxRequestSize)
-	_ = d.remove(requestName)
+	_ = d.consume(requestName)
 	if errors.Is(err, unix.ENOENT) {
 		return nil, nil
 	}
