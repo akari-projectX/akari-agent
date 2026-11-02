@@ -23,7 +23,7 @@ require (
 require (
 	github.com/andybalholm/brotli v1.2.3 // indirect
 	github.com/ghodss/yaml v1.0.1-0.20220118164431-d8423dcdf344 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.6 // indirect
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/huin/goupnp v1.2.0 // indirect
